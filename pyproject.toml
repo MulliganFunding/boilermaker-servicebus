@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "y"
+version = "y"
+description = "An async python Background task system using Azure Service Bus Queues"
+authors = ["Erik Aker <eraker@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+azure-core-tracing-opentelemetry = "^1.0.0b11"
+azure-servicebus = "^7.11.1"
+azure-identity = "^1.14.0"
+opentelemetry-api = "^1.20.0"
+pydantic = "^2.3.0"
+
+[tool.poetry.group.dev.dependencies]
+black = "^23.7.0"
+ruff = "^0.0.287"
+pytest = "^7.4.2"
+pytest-cov = "^4.1.0"
+pytest-mypy = "^0.10.3"
+pytest-asyncio = "^0.21.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
