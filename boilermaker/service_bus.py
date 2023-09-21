@@ -30,27 +30,27 @@ class AzureServiceBus:
             raise ValueError("Invalid configuration for AzureServiceBus")
         return None
 
-    @property
-    def client(self) -> ServiceBusClient:
-        if self._client is not None:
-            return self._client
-
+    def get_sbc(self):
         self._validate_access_settings()
-        self._client = ServiceBusClient(self.namespace_url, self.credential)
-        return self._client
+        return ServiceBusClient(self.namespace_url, self.credential)
 
     @contextlib.asynccontextmanager
     async def get_receiver(self):
-        async with self.client as client:
+        async with self.get_sbc() as client:
             receiver = client.get_queue_receiver(queue_name=self.queue_name)
             async with receiver:  # type: ignore
                 yield receiver
+
+    @contextlib.asynccontextmanager
+    async def get_sender(self):
+        async with self.get_sbc() as client:
+            sender = client.get_queue_sender(queue_name=self.queue_name)
+            async with sender:
+                yield sender
 
     async def send_message(self, msg: str, delay: int = 0):
         message = ServiceBusMessage(msg)
         now = datetime.datetime.now(tz=datetime.timezone.utc)
         scheduled_time_utc = now + datetime.timedelta(seconds=delay)
-        async with self.client as client:  # type: ignore
-            sender = client.get_queue_sender(queue_name=self.queue_name)
-            async with sender:
-                await sender.schedule_messages(message, scheduled_time_utc)
+        async with self.get_sender() as sender:  # type: ignore
+            await sender.schedule_messages(message, scheduled_time_utc)

@@ -76,6 +76,7 @@ class Boilermaker:
         task_copy.payload = payload
         return await self.publish_task(task_copy, delay=delay)
 
+    @tracer.start_as_current_span("publish-task")
     async def publish_task(self, task: Task, delay: int = 0):
         """Turn the task into JSON and publish to Service Bus"""
         await self.service_bus_client.send_message(
@@ -100,7 +101,7 @@ class Boilermaker:
                 async with tracing.start_span_from_parent_event_async(
                     tracer,
                     msg,
-                    "ISOSubmissionWorker",
+                    "BoilermakerWorker",
                     otel_enabled=self.otel_enabled,
                 ):
                     await self.message_handler(msg, receiver)
