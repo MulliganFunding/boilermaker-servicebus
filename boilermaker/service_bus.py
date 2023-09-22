@@ -23,7 +23,6 @@ class AzureServiceBus:
         self.namespace_url = settings.service_bus_namespace_url
         self.queue_name = settings.service_bus_queue_name
         self.credential = settings.az_credential()
-        self._client: Optional[ServiceBusClient] = None
 
     def _validate_access_settings(self):
         if not all((self.namespace_url, self.queue_name, self.credential)):

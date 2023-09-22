@@ -1,6 +1,6 @@
 [tool.poetry]
-name = "y"
-version = "y"
+name = "boilermaker"
+version = "0.1.0"
 description = "An async python Background task system using Azure Service Bus Queues"
 authors = ["Erik Aker <eraker@gmail.com>"]
 license = "MIT"
