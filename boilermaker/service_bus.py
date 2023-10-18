@@ -4,15 +4,14 @@
     Wrapper class around a `ServiceBusClient` which allows sending messages or
     subscribing to a queue.
 """
-import contextlib
 import datetime
 import logging
-from typing import Optional
 
-from azure.servicebus.aio import ServiceBusClient
+from azure.servicebus.aio import ServiceBusClient, ServiceBusReceiver, ServiceBusSender
 from azure.servicebus import ServiceBusMessage
 
 from .config import Config
+
 
 servicebus_logger = logging.getLogger("azure.servicebus")
 servicebus_logger.setLevel(logging.WARNING)
@@ -23,33 +22,53 @@ class AzureServiceBus:
         self.namespace_url = settings.service_bus_namespace_url
         self.queue_name = settings.service_bus_queue_name
         self.credential = settings.az_credential()
+        self._client: ServiceBusClient | None = None
+        self._receiver_client: ServiceBusReceiver | None = None
+        self._sender_client: ServiceBusSender | None = None
 
     def _validate_access_settings(self):
         if not all((self.namespace_url, self.queue_name, self.credential)):
             raise ValueError("Invalid configuration for AzureServiceBus")
         return None
 
-    def get_sbc(self):
-        self._validate_access_settings()
-        return ServiceBusClient(self.namespace_url, self.credential)
 
-    @contextlib.asynccontextmanager
-    async def get_receiver(self):
-        async with self.get_sbc() as client:
-            receiver = client.get_queue_receiver(queue_name=self.queue_name)
-            async with receiver:  # type: ignore
-                yield receiver
+    @property
+    def client(self):
+        if self._client is None:
+            self._validate_access_settings()
+            self._client = ServiceBusClient(self.namespace_url, self.credential)
+        return self._client
 
-    @contextlib.asynccontextmanager
-    async def get_sender(self):
-        async with self.get_sbc() as client:
-            sender = client.get_queue_sender(queue_name=self.queue_name)
-            async with sender:
-                yield sender
+    def get_receiver(self) -> ServiceBusReceiver:
+        if self._receiver_client is not None:
+            return self._receiver_client
+
+        self._receiver_client = self.client.get_queue_receiver(queue_name=self.queue_name)
+        return self._receiver_client
+
+    def get_sender(self) -> ServiceBusSender:
+        if self._sender_client is not None:
+            return self._sender_client
+
+        self._sender_client = self.client.get_queue_sender(queue_name=self.queue_name)
+        return self._sender_client
+
+    async def close(self):
+        if self._receiver_client is not None:
+            await self._receiver_client.close()
+            self._receiver_client = None
+
+        if self._sender_client is not None:
+            await self._sender_client.close()
+            self._sender_client = None
+
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
 
     async def send_message(self, msg: str, delay: int = 0):
         message = ServiceBusMessage(msg)
         now = datetime.datetime.now(tz=datetime.timezone.utc)
         scheduled_time_utc = now + datetime.timedelta(seconds=delay)
-        async with self.get_sender() as sender:  # type: ignore
-            await sender.schedule_messages(message, scheduled_time_utc)
+        sender = self.get_sender()
+        await sender.schedule_messages(message, scheduled_time_utc)

@@ -7,7 +7,7 @@ class Config(BaseSettings):
     # Service Bus ENV vars
     service_bus_namespace_url: str
     service_bus_queue_name: str
-    service_bus_credential: str | None = None
+    service_bus_credential: DefaultAzureCredential | None = None
 
     def az_credential(self):
         if self.service_bus_credential:
