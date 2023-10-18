@@ -27,10 +27,13 @@ class Task(BaseModel):
         attempts = retries.RetryAttempts(
             attempts=0, last_retry=datetime.datetime.now(datetime.timezone.utc)
         )
+        policy = retries.RetryPolicy.default()
+        if "policy" in kwargs:
+            policy = kwargs["policy"]
         return cls(
             attempts=attempts,
             function_name=function_name,
-            policy=retries.RetryPolicy.default(),
+            policy=policy,
             payload={},
             diagnostic_id=None,
             **kwargs,

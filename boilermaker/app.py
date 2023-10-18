@@ -182,7 +182,7 @@ class Boilermaker:
         """
         Dynamically look up function requested and then evaluate it.
         """
-        logger.info(f"Received task args={task.payload}")
+        logger.info(f"[{task.function_name}] Received task args={task.payload}")
         function = self.function_registry.get(task.function_name)
         if not function:
             raise ValueError(f"Missing registered function {task.function_name}")
