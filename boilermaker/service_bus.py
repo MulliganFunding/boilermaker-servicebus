@@ -4,7 +4,6 @@
     Wrapper class around a `ServiceBusClient` which allows sending messages or
     subscribing to a queue.
 """
-import contextlib
 import datetime
 import logging
 
@@ -12,6 +11,7 @@ from azure.servicebus.aio import ServiceBusClient, ServiceBusReceiver, ServiceBu
 from azure.servicebus import ServiceBusMessage
 
 from .config import Config
+
 
 servicebus_logger = logging.getLogger("azure.servicebus")
 servicebus_logger.setLevel(logging.WARNING)
@@ -22,6 +22,9 @@ class AzureServiceBus:
         self.namespace_url = settings.service_bus_namespace_url
         self.queue_name = settings.service_bus_queue_name
         self.credential = settings.az_credential()
+        self._client: ServiceBusClient | None = None
+        self._receiver_client: ServiceBusReceiver | None = None
+        self._sender_client: ServiceBusSender | None = None
 
     def _validate_access_settings(self):
         if not all((self.namespace_url, self.queue_name, self.credential)):
