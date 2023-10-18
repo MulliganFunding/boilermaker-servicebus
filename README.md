@@ -5,6 +5,12 @@ This project is an extremely-lightweight task-runner exclusively for __async Pyt
 - [Celery](https://github.com/celery/celery/tree/main)
 -
 
+## To Install
+
+```sh
+pip install "boilermaker-servicebus"
+```
+
 
 ## FAQ
 

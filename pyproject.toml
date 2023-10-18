@@ -1,10 +1,11 @@
 [tool.poetry]
-name = "boilermaker"
-version = "0.1.0"
+name = "boilermaker-servicebus"
+version = "0.1.0a1"
 description = "An async python Background task system using Azure Service Bus Queues"
 authors = ["Erik Aker <eraker@gmail.com>"]
 license = "MIT"
 readme = "README.md"
+packages = [{include = "boilermaker"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -21,6 +22,7 @@ pytest = "^7.4.2"
 pytest-cov = "^4.1.0"
 pytest-mypy = "^0.10.3"
 pytest-asyncio = "^0.21.1"
+twine = "^4.0.2"
 
 [build-system]
 requires = ["poetry-core"]
