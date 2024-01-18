@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 class BoilermakerAppException(Exception):
     def __init__(self, message: str, errors: list):
-        super().__init__(message)
+        super().__init__(message + str(errors))
 
         self.errors = errors
 
