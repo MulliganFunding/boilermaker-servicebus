@@ -47,7 +47,7 @@ class Boilermaker:
         # Callables and Tasks
         self.function_registry: typing.Dict[str, typing.Any] = {}
         self.task_registry: typing.Dict[str, Task] = {}
-        
+
     def task(self, **options):
         """A task decorator can mark a task as backgroundable"""
 
