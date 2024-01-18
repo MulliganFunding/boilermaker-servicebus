@@ -103,7 +103,7 @@ class Boilermaker:
                 if i == retries.max_tries - 1:
                     raise BoilermakerAppException("Error encountered while publishing task to service bus", encountered_errors)
 
-            time.sleep(retries.get_delay_interval())
+            time.sleep(retries.get_delay_interval(i+1))
 
 
     async def run(self):
