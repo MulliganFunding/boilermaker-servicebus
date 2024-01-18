@@ -9,17 +9,25 @@ import logging
 import traceback
 import typing
 import weakref
+import time
 
 from opentelemetry import trace
 from pydantic import ValidationError
 
-from .retries import RetryException
+from .retries import RetryException, RetryPolicy
 from .task import Task
 from . import tracing
 
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
+
+
+class BoilermakerAppException(Exception):
+    def __init__(self, message: str, errors: list):
+        super().__init__(message)
+
+        self.errors = errors
 
 
 class Boilermaker:
@@ -39,6 +47,7 @@ class Boilermaker:
         # Callables and Tasks
         self.function_registry: typing.Dict[str, typing.Any] = {}
         self.task_registry: typing.Dict[str, Task] = {}
+        
 
     def task(self, **options):
         """A task decorator can mark a task as backgroundable"""
@@ -77,12 +86,25 @@ class Boilermaker:
         return await self.publish_task(task_copy, delay=delay)
 
     @tracer.start_as_current_span("publish-task")
-    async def publish_task(self, task: Task, delay: int = 0):
+    async def publish_task(self, task: Task, delay: int = 0, retries: RetryPolicy = RetryPolicy.default):
         """Turn the task into JSON and publish to Service Bus"""
-        await self.service_bus_client.send_message(
-            task.model_dump_json(),
-            delay=delay,
-        )
+        encountered_errors = []
+
+        for i in range(0, retries.max_tries):
+            try:
+                await self.service_bus_client.send_message(
+                    task.model_dump_json(),
+                    delay=delay,
+                )
+                break
+            except Exception as e:
+                encountered_errors.append(e)
+
+                if i == retries.max_tries - 1:
+                    raise BoilermakerAppException("Error encountered while publishing task to service bus", encountered_errors)
+
+            time.sleep(retries.get_delay_interval())
+
 
     async def run(self):
         """
