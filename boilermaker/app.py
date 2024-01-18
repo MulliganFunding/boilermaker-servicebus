@@ -70,7 +70,7 @@ class Boilermaker:
         logger.info(f"Registered background function fn={fn_name}")
         return self
 
-    async def apply_async(self, fn, *args, delay: int = 0, **kwargs):
+    async def apply_async(self, fn, *args, delay: int = 0, retry_policy: RetryPolicy = RetryPolicy.default(), **kwargs):
         """
         Wrap up this function call as a task and publish to broker.
         """
@@ -83,14 +83,14 @@ class Boilermaker:
         task = self.task_registry[fn.__name__]
         task_copy = copy.deepcopy(task)
         task_copy.payload = payload
-        return await self.publish_task(task_copy, delay=delay)
+        return await self.publish_task(task_copy, delay=delay, retry_policy=)
 
     @tracer.start_as_current_span("publish-task")
-    async def publish_task(self, task: Task, delay: int = 0, retries: RetryPolicy = RetryPolicy.default()):
+    async def publish_task(self, task: Task, delay: int = 0, retry_policy: RetryPolicy = RetryPolicy.default()):
         """Turn the task into JSON and publish to Service Bus"""
         encountered_errors = []
 
-        for i in range(0, retries.max_tries):
+        for i in range(0, retry_policy.max_tries):
             try:
                 await self.service_bus_client.send_message(
                     task.model_dump_json(),
@@ -100,10 +100,10 @@ class Boilermaker:
             except Exception as e:
                 encountered_errors.append(e)
 
-                if i == retries.max_tries - 1:
+                if i == retry_policy.max_tries - 1:
                     raise BoilermakerAppException("Error encountered while publishing task to service bus", encountered_errors)
 
-            time.sleep(retries.get_delay_interval(i+1))
+            time.sleep(retry_policy.get_delay_interval(i+1))
 
 
     async def run(self):
