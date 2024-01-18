@@ -86,7 +86,7 @@ class Boilermaker:
         return await self.publish_task(task_copy, delay=delay)
 
     @tracer.start_as_current_span("publish-task")
-    async def publish_task(self, task: Task, delay: int = 0, retries: RetryPolicy = RetryPolicy.default):
+    async def publish_task(self, task: Task, delay: int = 0, retries: RetryPolicy = RetryPolicy.default()):
         """Turn the task into JSON and publish to Service Bus"""
         encountered_errors = []
 
