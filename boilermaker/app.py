@@ -83,7 +83,7 @@ class Boilermaker:
         task = self.task_registry[fn.__name__]
         task_copy = copy.deepcopy(task)
         task_copy.payload = payload
-        return await self.publish_task(task_copy, delay=delay, retry_policy=)
+        return await self.publish_task(task_copy, delay=delay, retry_policy=retry_policy)
 
     @tracer.start_as_current_span("publish-task")
     async def publish_task(self, task: Task, delay: int = 0, retry_policy: RetryPolicy = RetryPolicy.default()):
