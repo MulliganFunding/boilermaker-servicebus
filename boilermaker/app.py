@@ -48,7 +48,6 @@ class Boilermaker:
         self.function_registry: typing.Dict[str, typing.Any] = {}
         self.task_registry: typing.Dict[str, Task] = {}
         
-
     def task(self, **options):
         """A task decorator can mark a task as backgroundable"""
 
@@ -104,7 +103,6 @@ class Boilermaker:
                     raise BoilermakerAppException("Error encountered while publishing task to service bus", encountered_errors)
 
             time.sleep(retry_policy.get_delay_interval(i+1))
-
 
     async def run(self):
         """
