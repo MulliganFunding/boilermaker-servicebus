@@ -17,7 +17,7 @@ from anyio.abc import CancelScope
 
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus.aio import ServiceBusReceiver
-from azure.servicebus.exceptions import MessageLockLostError
+from azure.servicebus.exceptions import MessageLockLostError, ServiceBusError, SessionLockLostError
 from opentelemetry import trace
 from pydantic import ValidationError
 from azure.servicebus.exceptions import (
@@ -104,7 +104,7 @@ class Boilermaker:
         """Turn the task into JSON and publish to Service Bus"""
         encountered_errors = []
 
-        for i in range(0, retries):
+        for _i in range(0, retries):
             try:
                 return await self.service_bus_client.send_message(
                     task.model_dump_json(),
@@ -128,7 +128,10 @@ class Boilermaker:
             async for signum in signals:
                 if self._current_message is not None:
                     sequence_number = self._current_message.sequence_number
-                    await receiver.abandon_message(self._current_message)
+                    try:
+                        await receiver.abandon_message(self._current_message)
+                    except (MessageLockLostError, ServiceBusError, SessionLockLostError):
+                        pass
                     self._current_message = None
                     logger.warn(
                         f"Signal {signum} received: shutting down. "
@@ -168,7 +171,7 @@ class Boilermaker:
     ):
         try:
             await receiver.complete_message(msg)
-        except MessageLockLostError:
+        except (MessageLockLostError, ServiceBusError, SessionLockLostError):
             pass
         self._current_message = None
 
