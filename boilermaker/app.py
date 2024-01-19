@@ -12,7 +12,11 @@ import weakref
 
 from opentelemetry import trace
 from pydantic import ValidationError
-from azure.servicebus.exceptions import ServiceBusConnectionError, ServiceBusAuthorizationError, ServiceBusAuthenticationError 
+from azure.servicebus.exceptions import (
+    ServiceBusConnectionError,
+    ServiceBusAuthorizationError,
+    ServiceBusAuthenticationError,
+)
 
 from .retries import RetryException
 from .task import Task
@@ -57,7 +61,9 @@ class Boilermaker:
             @wraps(fn)
             async def inner(state, *args, **kwargs):
                 return await fn(state, *args, **kwargs)
+
             return inner
+
         return deco
 
     def register_async(self, fn, **options):
@@ -96,11 +102,18 @@ class Boilermaker:
                     delay=delay,
                 )
                 break
-            except (ServiceBusConnectionError, ServiceBusAuthorizationError, ServiceBusAuthenticationError) as e:
+            except (
+                ServiceBusConnectionError,
+                ServiceBusAuthorizationError,
+                ServiceBusAuthenticationError,
+            ) as e:
                 encountered_errors.append(e)
 
                 if i == retries - 1:
-                    raise BoilermakerAppException("Error encountered while publishing task to service bus", encountered_errors)
+                    raise BoilermakerAppException(
+                        "Error encountered while publishing task to service bus",
+                        encountered_errors,
+                    )
 
     async def run(self):
         """
