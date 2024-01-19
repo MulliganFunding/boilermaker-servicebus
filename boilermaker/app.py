@@ -9,12 +9,12 @@ import logging
 import traceback
 import typing
 import weakref
-import time
 
 from opentelemetry import trace
 from pydantic import ValidationError
+from azure.servicebus.exceptions import ServiceBusConnectionError, ServiceBusAuthorizationError, ServiceBusAuthenticationError 
 
-from .retries import RetryException, RetryPolicy
+from .retries import RetryException
 from .task import Task
 from . import tracing
 
@@ -69,7 +69,7 @@ class Boilermaker:
         logger.info(f"Registered background function fn={fn_name}")
         return self
 
-    async def apply_async(self, fn, *args, delay: int = 0, retry_policy: RetryPolicy = RetryPolicy.default(), **kwargs):
+    async def apply_async(self, fn, *args, delay: int = 0, retries: int = 3, **kwargs):
         """
         Wrap up this function call as a task and publish to broker.
         """
@@ -82,27 +82,25 @@ class Boilermaker:
         task = self.task_registry[fn.__name__]
         task_copy = copy.deepcopy(task)
         task_copy.payload = payload
-        return await self.publish_task(task_copy, delay=delay, retry_policy=retry_policy)
+        return await self.publish_task(task_copy, delay=delay, retries=retries)
 
     @tracer.start_as_current_span("publish-task")
-    async def publish_task(self, task: Task, delay: int = 0, retry_policy: RetryPolicy = RetryPolicy.default()):
+    async def publish_task(self, task: Task, delay: int = 0, retries: int = 3):
         """Turn the task into JSON and publish to Service Bus"""
         encountered_errors = []
 
-        for i in range(0, retry_policy.max_tries):
+        for i in range(0, retries):
             try:
                 await self.service_bus_client.send_message(
                     task.model_dump_json(),
                     delay=delay,
                 )
                 break
-            except Exception as e:
+            except (ServiceBusConnectionError, ServiceBusAuthorizationError, ServiceBusAuthenticationError) as e:
                 encountered_errors.append(e)
 
-                if i == retry_policy.max_tries - 1:
+                if i == retries - 1:
                     raise BoilermakerAppException("Error encountered while publishing task to service bus", encountered_errors)
-
-            time.sleep(retry_policy.get_delay_interval(i+1))
 
     async def run(self):
         """
