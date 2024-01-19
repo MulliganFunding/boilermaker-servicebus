@@ -127,23 +127,13 @@ class Boilermaker:
             async for signum in signals:
                 if self._current_message is not None:
                     sequence_number = self._current_message.sequence_number
-                    if signum == signal.SIGINT:
-                        await receiver.abandon_message(self._current_message)
-                        self._current_message = None
-                        # Keyboard Interrupts will land here
-                        logger.warn(
-                            "SIGINT received: shutting down. "
-                            f"Msg returned to queue {sequence_number}"
-                        )
-                    else:
-                        # SIGTERM (k8s will send on pod terminate)
-                        await receiver.abandon_message(self._current_message)
-                        self._current_message = None
-                        logger.warn(
-                            "SIGTERM received: shutting down. "
-                            f"Msg returned to queue {sequence_number}"
-                        )
-
+                    await receiver.abandon_message(self._current_message)
+                    self._current_message = None
+                    # Keyboard Interrupts will land here
+                    logger.warn(
+                        f"Signal {signum} received: shutting down. "
+                        f"Msg returned to queue {sequence_number}"
+                    )
                 scope.cancel()
                 return
 
