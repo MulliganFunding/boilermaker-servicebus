@@ -2,17 +2,16 @@
 Async tasks received from Service Bus go in here
 
 """
-
 import copy
 from functools import wraps
 from json.decoder import JSONDecodeError
 import logging
 import signal
+import time
 import traceback
 import typing
 import weakref
 
-import anyio
 from anyio import open_signal_receiver, create_task_group
 from anyio.abc import CancelScope
 
@@ -264,10 +263,15 @@ class Boilermaker:
         """
         Dynamically look up function requested and then evaluate it.
         """
-        logger.info(f"[{task.function_name}] {sequence_number=}")
+        start = time.monotonic()
+        logger.info(f"[{task.function_name}] Begin Task {sequence_number=}")
         function = self.function_registry.get(task.function_name)
         if not function:
             raise ValueError(f"Missing registered function {task.function_name}")
-        return await function(
+        result = await function(
             self.state, *task.payload["args"], **task.payload["kwargs"]
         )
+        logger.info(
+            f"[{task.function_name}] Compeleted Task {sequence_number=} in {time.monotonic()-start}s"
+        )
+        return result
