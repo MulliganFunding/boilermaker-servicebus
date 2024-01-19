@@ -17,7 +17,11 @@ from anyio.abc import CancelScope
 
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus.aio import ServiceBusReceiver
-from azure.servicebus.exceptions import MessageLockLostError, ServiceBusError, SessionLockLostError
+from azure.servicebus.exceptions import (
+    MessageLockLostError,
+    ServiceBusError,
+    SessionLockLostError,
+)
 from opentelemetry import trace
 from pydantic import ValidationError
 from azure.servicebus.exceptions import (
@@ -130,12 +134,20 @@ class Boilermaker:
                     sequence_number = self._current_message.sequence_number
                     try:
                         await receiver.abandon_message(self._current_message)
-                    except (MessageLockLostError, ServiceBusError, SessionLockLostError):
-                        pass
+                    except (
+                        MessageLockLostError,
+                        ServiceBusError,
+                        SessionLockLostError,
+                    ):
+                        msg = (
+                            f"Failed to requeue message {sequence_number=} "
+                            f"exc_info={traceback.format_exc()}"
+                        )
+                        logger.error(msg)
                     self._current_message = None
                     logger.warn(
-                        f"Signal {signum} received: shutting down. "
-                        f"Msg returned to queue {sequence_number}"
+                        f"Signal {signum=} received: shutting down. "
+                        f"Msg returned to queue {sequence_number=}"
                     )
                 scope.cancel()
                 return
@@ -172,7 +184,11 @@ class Boilermaker:
         try:
             await receiver.complete_message(msg)
         except (MessageLockLostError, ServiceBusError, SessionLockLostError):
-            pass
+            msg = (
+                f"Failed to settle message sequence_number={msg.sequence_number} "
+                f"exc_info={traceback.format_exc()}"
+            )
+            logger.error(msg)
         self._current_message = None
 
     async def message_handler(
