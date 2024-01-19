@@ -18,6 +18,7 @@ from anyio.abc import CancelScope
 
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus.aio import ServiceBusReceiver
+from azure.servicebus.exceptions import MessageLockLostError
 from opentelemetry import trace
 from pydantic import ValidationError
 from azure.servicebus.exceptions import (
@@ -115,14 +116,14 @@ class Boilermaker:
                 ServiceBusAuthorizationError,
                 ServiceBusAuthenticationError,
             ) as e:
-                encountered_errors.append(e)    
+                encountered_errors.append(e)
         else:
             raise BoilermakerAppException(
                 "Error encountered while publishing task to service bus",
                 encountered_errors,
             )
 
-    async def signal_handler(self, scope: CancelScope, receiver: ServiceBusReceiver):
+    async def signal_handler(self, receiver: ServiceBusReceiver, scope: CancelScope):
         with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
             async for signum in signals:
                 if self._current_message is not None:
@@ -176,7 +177,10 @@ class Boilermaker:
     async def complete_message(
         self, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
     ):
-        await receiver.complete_message(msg)
+        try:
+            await receiver.complete_message(msg)
+        except MessageLockLostError:
+            pass
         self._current_message = None
 
     async def message_handler(
@@ -217,9 +221,6 @@ class Boilermaker:
             message_settled = True
             return None
 
-        # We want to support other event loops/cancellations (eg trio)
-        CancelledError = anyio.get_cancelled_exc_class()
-
         # Actually handle the task here
         try:
             await self.task_handler(task, sequence_number)
@@ -239,11 +240,6 @@ class Boilermaker:
                 task,
                 delay=delay,
             )
-        except CancelledError:
-            # Cancellation, SIGINT (KeyboardInterrupt), SIGTERMs, etc.
-            await receiver.abandon_message(msg)
-            self._current_message = None
-            raise
         except Exception as exc:
             # Some other exception has been thrown
             err_msg = f"Failed processing task sequence_number={sequence_number}  {traceback.format_exc()}"
