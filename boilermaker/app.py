@@ -97,23 +97,21 @@ class Boilermaker:
 
         for i in range(0, retries):
             try:
-                await self.service_bus_client.send_message(
+                return await self.service_bus_client.send_message(
                     task.model_dump_json(),
                     delay=delay,
                 )
-                break
             except (
                 ServiceBusConnectionError,
                 ServiceBusAuthorizationError,
                 ServiceBusAuthenticationError,
             ) as e:
-                encountered_errors.append(e)
-
-                if i == retries - 1:
-                    raise BoilermakerAppException(
-                        "Error encountered while publishing task to service bus",
-                        encountered_errors,
-                    )
+                encountered_errors.append(e)    
+        else:
+            raise BoilermakerAppException(
+                "Error encountered while publishing task to service bus",
+                encountered_errors,
+            )
 
     async def run(self):
         """
