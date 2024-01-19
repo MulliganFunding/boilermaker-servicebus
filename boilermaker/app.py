@@ -123,13 +123,13 @@ class Boilermaker:
             )
 
     async def signal_handler(self, receiver: ServiceBusReceiver, scope: CancelScope):
+        """We would like to reschedule any open messages on SIGINT/SIGTERM"""
         with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
             async for signum in signals:
                 if self._current_message is not None:
                     sequence_number = self._current_message.sequence_number
                     await receiver.abandon_message(self._current_message)
                     self._current_message = None
-                    # Keyboard Interrupts will land here
                     logger.warn(
                         f"Signal {signum} received: shutting down. "
                         f"Msg returned to queue {sequence_number}"
