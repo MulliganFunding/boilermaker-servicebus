@@ -6,10 +6,22 @@ import copy
 from functools import wraps
 from json.decoder import JSONDecodeError
 import logging
+import signal
+import time
 import traceback
 import typing
 import weakref
 
+from anyio import open_signal_receiver, create_task_group
+from anyio.abc import CancelScope
+
+from azure.servicebus import ServiceBusReceivedMessage
+from azure.servicebus.aio import ServiceBusReceiver
+from azure.servicebus.exceptions import (
+    MessageLockLostError,
+    ServiceBusError,
+    SessionLockLostError,
+)
 from opentelemetry import trace
 from pydantic import ValidationError
 from azure.servicebus.exceptions import (
@@ -51,6 +63,7 @@ class Boilermaker:
         # Callables and Tasks
         self.function_registry: typing.Dict[str, typing.Any] = {}
         self.task_registry: typing.Dict[str, Task] = {}
+        self._current_message: ServiceBusReceivedMessage | None = None
 
     def task(self, **options):
         """A task decorator can mark a task as backgroundable"""
@@ -95,7 +108,7 @@ class Boilermaker:
         """Turn the task into JSON and publish to Service Bus"""
         encountered_errors = []
 
-        for i in range(0, retries):
+        for _i in range(0, retries):
             try:
                 return await self.service_bus_client.send_message(
                     task.model_dump_json(),
@@ -106,12 +119,38 @@ class Boilermaker:
                 ServiceBusAuthorizationError,
                 ServiceBusAuthenticationError,
             ) as e:
-                encountered_errors.append(e)    
+                encountered_errors.append(e)
         else:
             raise BoilermakerAppException(
                 "Error encountered while publishing task to service bus",
                 encountered_errors,
             )
+
+    async def signal_handler(self, receiver: ServiceBusReceiver, scope: CancelScope):
+        """We would like to reschedule any open messages on SIGINT/SIGTERM"""
+        with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
+            async for signum in signals:
+                if self._current_message is not None:
+                    sequence_number = self._current_message.sequence_number
+                    try:
+                        await receiver.abandon_message(self._current_message)
+                    except (
+                        MessageLockLostError,
+                        ServiceBusError,
+                        SessionLockLostError,
+                    ):
+                        msg = (
+                            f"Failed to requeue message {sequence_number=} "
+                            f"exc_info={traceback.format_exc()}"
+                        )
+                        logger.error(msg)
+                    self._current_message = None
+                    logger.warn(
+                        f"Signal {signum=} received: shutting down. "
+                        f"Msg returned to queue {sequence_number=}"
+                    )
+                scope.cancel()
+                return
 
     async def run(self):
         """
@@ -121,30 +160,51 @@ class Boilermaker:
 
         Note: *all* messages will be marked "complete" after the handler runs.
 
-        See `document_storage.clients.AzureServiceBus.run_receive_messages` for details.
+        See `AzureServiceBus` for details.
         """
-        async with self.service_bus_client.get_receiver() as receiver:
-            async for msg in receiver:
-                # This separate method is easier to test
-                # and easier to early-return from in case of skip or fail msg
-                async with tracing.start_span_from_parent_event_async(
-                    tracer,
-                    msg,
-                    "BoilermakerWorker",
-                    otel_enabled=self.otel_enabled,
-                ):
-                    await self.message_handler(msg, receiver)
+        async with create_task_group() as tg:
+            async with self.service_bus_client.get_receiver() as receiver:
+                # Handle SIGTERM: when found, agbandon message
+                tg.start_soon(self.signal_handler, receiver, tg.cancel_scope)
 
-    async def message_handler(self, msg: str, receiver):
+                async for msg in receiver:
+                    # This separate method is easier to test
+                    # and easier to early-return from in case of skip or fail msg
+                    async with tracing.start_span_from_parent_event_async(
+                        tracer,
+                        msg,
+                        "BoilermakerWorker",
+                        otel_enabled=self.otel_enabled,
+                    ):
+                        await self.message_handler(msg, receiver)
+
+    async def complete_message(
+        self, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
+    ):
+        try:
+            await receiver.complete_message(msg)
+        except (MessageLockLostError, ServiceBusError, SessionLockLostError):
+            msg = (
+                f"Failed to settle message sequence_number={msg.sequence_number} "
+                f"exc_info={traceback.format_exc()}"
+            )
+            logger.error(msg)
+        self._current_message = None
+
+    async def message_handler(
+        self, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
+    ):
         """Individual message handler"""
         message_settled = False
+        sequence_number = msg.sequence_number
+        self._current_message = msg
         try:
             task = Task.model_validate_json(str(msg))
         except (JSONDecodeError, ValidationError):
-            msg = "Invalid task " f"exc_info={traceback.format_exc()}"
+            msg = f"Invalid task sequence_number={sequence_number} exc_info={traceback.format_exc()}"
             logger.error(msg)
             # This task is not parseable
-            await receiver.complete_message(msg)
+            await self.complete_message(msg, receiver)
             return None
 
         # Immediately record an attempt
@@ -152,7 +212,7 @@ class Boilermaker:
 
         # at-most once: "complete" msg even if it fails later
         if task.acks_early:
-            await receiver.complete_message(msg)
+            await self.complete_message(msg, receiver)
             message_settled = True
 
         if not task.can_retry:
@@ -161,60 +221,66 @@ class Boilermaker:
                 await receiver.dead_letter_message(
                     msg,
                     reason="ProcessingError",
-                    error_description="Task failed",
+                    error_description="Task failed: retries exhausted",
                 )
             else:
-                await receiver.complete_message(msg)
+                await self.complete_message(msg, receiver)
 
             message_settled = True
             return None
 
         # Actually handle the task here
         try:
-            await self.task_handler(task)
+            await self.task_handler(task, sequence_number)
         except RetryException as retry:
             # A retry has been requested
             delay = task.get_next_delay()
             warn_msg = (
-                "Event retry requested. Publishing retry "
-                f"{task.function_name=}"
-                f"{retry.msg=}"
-                f"{task.attempts.attempts=}"
-                f"{delay=}"
+                "Event retry requested. Publishing retry:"
+                f"[ {task.function_name=}"
+                f" {retry.msg=}"
+                f" {task.attempts.attempts=}"
+                f" {delay=}"
+                f" {sequence_number=} ]"
             )
             logger.warn(warn_msg)
             await self.publish_task(
                 task,
                 delay=delay,
             )
-        except Exception:
+        except Exception as exc:
             # Some other exception has been thrown
-            err_msg = "Failed processing task " f"{traceback.format_exc()}"
+            err_msg = f"Failed processing task sequence_number={sequence_number}  {traceback.format_exc()}"
             logger.error(err_msg)
             if task.should_dead_letter:
                 await receiver.dead_letter_message(
                     msg,
                     reason="ProcessingError",
-                    error_description="Task failed",
+                    error_description=f"Task failed: {exc}",
                 )
             elif not message_settled:
-                await receiver.complete_message(msg)
+                await self.complete_message(msg, receiver)
 
             message_settled = True
 
         # at-least once: settle at the end
         if task.acks_late and not message_settled:
-            await receiver.complete_message(msg)
+            await self.complete_message(msg, receiver)
             message_settled = True
 
-    async def task_handler(self, task: Task):
+    async def task_handler(self, task: Task, sequence_number: int):
         """
         Dynamically look up function requested and then evaluate it.
         """
-        logger.info(f"[{task.function_name}] Received task args={task.payload}")
+        start = time.monotonic()
+        logger.info(f"[{task.function_name}] Begin Task {sequence_number=}")
         function = self.function_registry.get(task.function_name)
         if not function:
             raise ValueError(f"Missing registered function {task.function_name}")
-        return await function(
+        result = await function(
             self.state, *task.payload["args"], **task.payload["kwargs"]
         )
+        logger.info(
+            f"[{task.function_name}] Compeleted Task {sequence_number=} in {time.monotonic()-start}s"
+        )
+        return result
