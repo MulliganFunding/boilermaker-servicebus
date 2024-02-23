@@ -31,6 +31,7 @@ from azure.servicebus.exceptions import (
 )
 
 from .retries import RetryException
+from . import sample
 from .task import Task
 from . import tracing
 
@@ -274,6 +275,12 @@ class Boilermaker:
         """
         start = time.monotonic()
         logger.info(f"[{task.function_name}] Begin Task {sequence_number=}")
+
+        # Check if it's a debug task
+        if task.function_name == sample.TASK_NAME:
+            return await sample.debug_task(self.state)
+
+        # Look up function associated with the task
         function = self.function_registry.get(task.function_name)
         if not function:
             raise ValueError(f"Missing registered function {task.function_name}")
