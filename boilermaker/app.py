@@ -20,16 +20,13 @@ from azure.servicebus.aio import ServiceBusReceiver
 from azure.servicebus.exceptions import (
     MessageLockLostError,
     ServiceBusError,
+    ServiceBusConnectionError,
+    ServiceBusAuthorizationError,
+    ServiceBusAuthenticationError,
     SessionLockLostError,
 )
 from opentelemetry import trace
 from pydantic import ValidationError
-from azure.servicebus.exceptions import (
-    ServiceBusConnectionError,
-    ServiceBusAuthorizationError,
-    ServiceBusAuthenticationError,
-)
-
 from .retries import RetryException
 from . import sample
 from .task import Task
@@ -116,6 +113,7 @@ class Boilermaker:
                     delay=delay,
                 )
             except (
+                ServiceBusError,
                 ServiceBusConnectionError,
                 ServiceBusAuthorizationError,
                 ServiceBusAuthenticationError,
