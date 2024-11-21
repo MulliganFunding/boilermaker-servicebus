@@ -1,9 +1,8 @@
 from unittest import mock
 
+import pytest
 from azure.identity.aio import DefaultAzureCredential
 from azure.servicebus.aio import ServiceBusClient
-import pytest
-
 from boilermaker import config, service_bus
 
 

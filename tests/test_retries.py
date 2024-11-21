@@ -1,9 +1,7 @@
 import datetime
 
 import pytest
-
 from boilermaker import retries
-
 
 ATTEMPTS = tuple(range(10))
 
@@ -54,17 +52,17 @@ def test_policy_exponential(attempts, exponential):
 
 def test_isomorphism(default, linear, exponential):
     for policy in [default, linear, exponential]:
-        assert retries.RetryPolicy.model_validate_json(policy.json()) == policy
+        assert retries.RetryPolicy.model_validate_json(policy.model_dump_json()) == policy
 
 
 def test_attempts():
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(tz=datetime.UTC)
 
     with pytest.raises(ValueError):
         retries.RetryAttempts(attempts=-1, last_retry=now)
 
     attempts = retries.RetryAttempts(attempts=1, last_retry=now)
-    later = datetime.datetime.utcnow()
+    later = datetime.datetime.now(tz=datetime.UTC)
     attempts.inc(when=later)
     attempts.inc(when=later)
     assert attempts.attempts == 3

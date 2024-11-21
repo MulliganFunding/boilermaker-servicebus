@@ -1,5 +1,5 @@
-from pydantic_settings import BaseSettings
 from azure.identity.aio import DefaultAzureCredential
+from pydantic_settings import BaseSettings
 
 
 class Config(BaseSettings):

@@ -3,35 +3,33 @@ Async tasks received from Service Bus go in here
 
 """
 import copy
-from functools import wraps
-from json.decoder import JSONDecodeError
 import logging
 import signal
 import time
 import traceback
 import typing
 import weakref
+from functools import wraps
+from json.decoder import JSONDecodeError
 
-from anyio import open_signal_receiver, create_task_group
+from anyio import create_task_group, open_signal_receiver
 from anyio.abc import CancelScope
-
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus.aio import ServiceBusReceiver
 from azure.servicebus.exceptions import (
     MessageLockLostError,
-    ServiceBusError,
-    ServiceBusConnectionError,
-    ServiceBusAuthorizationError,
     ServiceBusAuthenticationError,
+    ServiceBusAuthorizationError,
+    ServiceBusConnectionError,
+    ServiceBusError,
     SessionLockLostError,
 )
 from opentelemetry import trace
 from pydantic import ValidationError
-from .retries import RetryException
-from . import sample
-from .task import Task
-from . import tracing
 
+from . import sample, tracing
+from .retries import RetryException
+from .task import Task
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
@@ -59,8 +57,8 @@ class Boilermaker:
         self.service_bus_client = service_bus_client
         self.otel_enabled = enable_opentelemetry
         # Callables and Tasks
-        self.function_registry: typing.Dict[str, typing.Any] = {}
-        self.task_registry: typing.Dict[str, Task] = {}
+        self.function_registry: dict[str, typing.Any] = {}
+        self.task_registry: dict[str, Task] = {}
         self._current_message: ServiceBusReceivedMessage | None = None
 
     def task(self, **options):
@@ -286,6 +284,6 @@ class Boilermaker:
             self.state, *task.payload["args"], **task.payload["kwargs"]
         )
         logger.info(
-            f"[{task.function_name}] Compeleted Task {sequence_number=} in {time.monotonic()-start}s"
+            f"[{task.function_name}] Completed Task {sequence_number=} in {time.monotonic()-start}s"
         )
         return result

@@ -9,14 +9,13 @@
     We need to pull out one of these and cast to a string to propagate context.
 """
 from contextlib import asynccontextmanager
-from typing import Dict, Optional
 
 from azure.servicebus import ServiceBusReceivedMessage
-from opentelemetry.propagate import extract
 from opentelemetry import trace
+from opentelemetry.propagate import extract
 
 
-def get_traceparent(event: ServiceBusReceivedMessage) -> Optional[str]:
+def get_traceparent(event: ServiceBusReceivedMessage) -> str | None:
     if not hasattr(event, "application_properties"):
         return None
 
@@ -26,7 +25,7 @@ def get_traceparent(event: ServiceBusReceivedMessage) -> Optional[str]:
     return None
 
 
-def get_traceparent_context(event: ServiceBusReceivedMessage) -> Dict[str, str]:
+def get_traceparent_context(event: ServiceBusReceivedMessage) -> dict[str, str]:
     if diagnostic_id := get_traceparent(event):
         return {"traceparent": diagnostic_id}
     return {}
