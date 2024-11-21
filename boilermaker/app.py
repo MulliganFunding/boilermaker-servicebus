@@ -142,7 +142,7 @@ class Boilermaker:
                         )
                         logger.error(msg)
                     self._current_message = None
-                    logger.warn(
+                    logger.warning(
                         f"Signal {signum=} received: shutting down. "
                         f"Msg returned to queue {sequence_number=}"
                     )
@@ -240,7 +240,7 @@ class Boilermaker:
                 f" {delay=}"
                 f" {sequence_number=} ]"
             )
-            logger.warn(warn_msg)
+            logger.warning(warn_msg)
             await self.publish_task(
                 task,
                 delay=delay,
