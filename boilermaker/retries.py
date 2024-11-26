@@ -4,7 +4,6 @@ import random
 
 from pydantic import BaseModel, field_validator
 
-
 MAX_REASONABLE_RETRIES = 30
 MAX_BACKOFF_SECONDS = 3600  # an hour
 

@@ -2,6 +2,7 @@ import datetime
 import typing
 
 from pydantic import BaseModel
+
 from . import retries
 
 
@@ -17,15 +18,15 @@ class Task(BaseModel):
     # For retries, we want a policy to govern how we retry this task
     policy: retries.RetryPolicy
     # Represents actual arguments: must be jsonable!
-    payload: typing.Dict[str, typing.Any]
+    payload: dict[str, typing.Any]
     # Eventhub event metadata below
     # opentelemetry parent trace id is included here
-    diagnostic_id: typing.Optional[str]
+    diagnostic_id: str | None
 
     @classmethod
     def default(cls, function_name: str, **kwargs):
         attempts = retries.RetryAttempts(
-            attempts=0, last_retry=datetime.datetime.now(datetime.timezone.utc)
+            attempts=0, last_retry=datetime.datetime.now(datetime.UTC)
         )
         policy = retries.RetryPolicy.default()
         if "policy" in kwargs:
@@ -51,5 +52,5 @@ class Task(BaseModel):
         return self.policy.get_delay_interval(self.attempts.attempts)
 
     def record_attempt(self):
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         return self.attempts.inc(now)

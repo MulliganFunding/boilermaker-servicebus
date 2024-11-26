@@ -2,7 +2,6 @@ import logging
 
 from .task import Task
 
-
 logger = logging.getLogger(__name__)
 TASK_NAME = "debug_task"
 

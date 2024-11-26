@@ -8,16 +8,18 @@ def test_validate_settings(sbus):
         sbus._validate_access_settings()
 
 
-def test_get_receiver(sbus, mockservicebus):
+async def test_get_receiver(sbus, mockservicebus):
     receiver =  sbus.get_receiver()
-    receiver.bla()
+    # it's an asyncmock, so we have to await it
+    await receiver.bla()
     assert mockservicebus._receiver.method_calls
     assert sbus.get_receiver() is receiver
 
 
-def test_get_sender(sbus, mockservicebus):
+async def test_get_sender(sbus, mockservicebus):
     sender =  sbus.get_sender()
-    sender.bla()
+    # it's an asyncmock, so we have to await it
+    await sender.bla()
     assert mockservicebus._sender.method_calls
     assert sbus.get_sender() is sender
 

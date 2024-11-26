@@ -7,11 +7,10 @@
 import datetime
 import logging
 
-from azure.servicebus.aio import ServiceBusClient, ServiceBusReceiver, ServiceBusSender
 from azure.servicebus import ServiceBusMessage
+from azure.servicebus.aio import ServiceBusClient, ServiceBusReceiver, ServiceBusSender
 
 from .config import Config
-
 
 servicebus_logger = logging.getLogger("azure.servicebus")
 servicebus_logger.setLevel(logging.WARNING)
@@ -68,7 +67,7 @@ class AzureServiceBus:
 
     async def send_message(self, msg: str, delay: int = 0):
         message = ServiceBusMessage(msg)
-        now = datetime.datetime.now(tz=datetime.timezone.utc)
+        now = datetime.datetime.now(tz=datetime.UTC)
         scheduled_time_utc = now + datetime.timedelta(seconds=delay)
         sender = self.get_sender()
         await sender.schedule_messages(message, scheduled_time_utc)
