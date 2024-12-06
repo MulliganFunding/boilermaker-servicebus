@@ -244,7 +244,8 @@ class Boilermaker:
                 await self.publish_task(task.on_success)
 
         except RetryException as retry:
-            # A retry has been requested
+            # A retry has been requested:
+            # no on_failure run until after retries exhausted
             delay = task.get_next_delay()
             warn_msg = (
                 "Event retry requested. Publishing retry:"
