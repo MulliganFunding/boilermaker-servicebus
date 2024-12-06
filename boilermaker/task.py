@@ -23,6 +23,10 @@ class Task(BaseModel):
     # opentelemetry parent trace id is included here
     diagnostic_id: str | None
 
+    # Callbacks for success and failure
+    on_success: typing.Optional["Task"] = None
+    on_failure: typing.Optional["Task"] = None
+
     @classmethod
     def default(cls, function_name: str, **kwargs):
         attempts = retries.RetryAttempts(
@@ -30,7 +34,7 @@ class Task(BaseModel):
         )
         policy = retries.RetryPolicy.default()
         if "policy" in kwargs:
-            policy = kwargs["policy"]
+            policy = kwargs.pop("policy")
         return cls(
             attempts=attempts,
             function_name=function_name,
