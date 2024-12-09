@@ -2,6 +2,7 @@
 Async tasks received from Service Bus go in here
 
 """
+
 import copy
 import logging
 import signal
@@ -28,6 +29,7 @@ from opentelemetry import trace
 from pydantic import ValidationError
 
 from . import sample, tracing
+from .failure import TaskFailureResult, TaskFailureResultType
 from .retries import RetryException
 from .task import Task
 
@@ -221,28 +223,30 @@ class Boilermaker:
 
         if not task.can_retry:
             logger.error(f"Retries exhausted for event {task.function_name}")
-            if task.should_dead_letter:
-                await receiver.dead_letter_message(
-                    msg,
-                    reason="ProcessingError",
-                    error_description="Task failed: retries exhausted",
-                )
-            else:
-                await self.complete_message(msg, receiver)
-
+            await self.deadletter_or_complete_task(
+                receiver, msg, "ProcessingError", task, exc="Retries exhausted"
+            )
             # This task is marked a failure: no more retries
             if task.on_failure:
                 await self.publish_task(task.on_failure)
-
-            message_settled = True
+            # Early return here: no more processing
             return None
 
         # Actually handle the task here
         try:
-            await self.task_handler(task, sequence_number)
-            if task.on_success:
+            result = await self.task_handler(task, sequence_number)
+            # Check and handle failure first
+            if result is TaskFailureResult:
+                # Deadletter or complete the message
+                await self.deadletter_or_complete_task(receiver, msg, "TaskFailed", task)
+                message_settled = True
+                if task.on_failure:
+                    # Schedule on_failure task
+                    await self.publish_task(task.on_failure)
+            # Success case: publish the next task (if desired)
+            elif task.on_success:
+                # Success case: publish the next task
                 await self.publish_task(task.on_success)
-
         except RetryException as retry:
             # A retry has been requested:
             # no on_failure run until after retries exhausted
@@ -267,15 +271,7 @@ class Boilermaker:
             if task.on_failure:
                 await self.publish_task(task.on_failure)
 
-            if task.should_dead_letter:
-                await receiver.dead_letter_message(
-                    msg,
-                    reason="ProcessingError",
-                    error_description=f"Task failed: {exc}",
-                )
-            elif not message_settled:
-                await self.complete_message(msg, receiver)
-
+            await self.deadletter_or_complete_task(receiver, msg, "ExceptionThrown", task, detail=exc)
             message_settled = True
 
         # at-least once: settle at the end
@@ -283,7 +279,7 @@ class Boilermaker:
             await self.complete_message(msg, receiver)
             message_settled = True
 
-    async def task_handler(self, task: Task, sequence_number: int):
+    async def task_handler(self, task: Task, sequence_number: int) -> typing.Any | TaskFailureResultType:
         """
         Dynamically look up function requested and then evaluate it.
         """
@@ -305,3 +301,22 @@ class Boilermaker:
             f"[{task.function_name}] Completed Task {sequence_number=} in {time.monotonic()-start}s"
         )
         return result
+
+    async def deadletter_or_complete_task(
+        self,
+        receiver,
+        msg: str,
+        reason: str,
+        task: Task,
+        detail: Exception | str | None = None,
+    ):
+        description = f"Task failed: {detail}" if detail else "Task failed"
+        if task.should_dead_letter:
+            await receiver.dead_letter_message(
+                msg,
+                reason=reason,
+                error_description=description,
+            )
+        else:
+            await self.complete_message(msg, receiver)
+        return None

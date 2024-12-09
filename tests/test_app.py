@@ -1,7 +1,6 @@
 import pytest
-
-from boilermaker.app import Boilermaker
 from boilermaker import retries
+from boilermaker.app import Boilermaker
 
 
 class State:
