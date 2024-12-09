@@ -44,6 +44,9 @@ class Task(BaseModel):
             **kwargs,
         )
 
+    def __bool__(self) -> bool:
+        return self.can_retry
+
     @property
     def acks_early(self):
         return not self.acks_late

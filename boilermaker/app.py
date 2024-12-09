@@ -207,8 +207,8 @@ class Boilermaker:
         try:
             task = Task.model_validate_json(str(msg))
         except (JSONDecodeError, ValidationError):
-            msg = f"Invalid task sequence_number={sequence_number} exc_info={traceback.format_exc()}"
-            logger.error(msg)
+            log_err_msg = f"Invalid task sequence_number={sequence_number} exc_info={traceback.format_exc()}"
+            logger.error(log_err_msg)
             # This task is not parseable
             await self.complete_message(msg, receiver)
             return None
@@ -223,9 +223,10 @@ class Boilermaker:
 
         if not task.can_retry:
             logger.error(f"Retries exhausted for event {task.function_name}")
-            await self.deadletter_or_complete_task(
-                receiver, msg, "ProcessingError", task, exc="Retries exhausted"
-            )
+            if not message_settled:
+                await self.deadletter_or_complete_task(
+                    receiver, msg, "ProcessingError", task, detail="Retries exhausted"
+                )
             # This task is marked a failure: no more retries
             if task.on_failure:
                 await self.publish_task(task.on_failure)
@@ -238,8 +239,11 @@ class Boilermaker:
             # Check and handle failure first
             if result is TaskFailureResult:
                 # Deadletter or complete the message
-                await self.deadletter_or_complete_task(receiver, msg, "TaskFailed", task)
-                message_settled = True
+                if not message_settled:
+                    await self.deadletter_or_complete_task(
+                        receiver, msg, "TaskFailed", task
+                    )
+                    message_settled = True
                 if task.on_failure:
                     # Schedule on_failure task
                     await self.publish_task(task.on_failure)
@@ -271,15 +275,20 @@ class Boilermaker:
             if task.on_failure:
                 await self.publish_task(task.on_failure)
 
-            await self.deadletter_or_complete_task(receiver, msg, "ExceptionThrown", task, detail=exc)
-            message_settled = True
+            if not message_settled:
+                await self.deadletter_or_complete_task(
+                    receiver, msg, "ExceptionThrown", task, detail=exc
+                )
+                message_settled = True
 
         # at-least once: settle at the end
         if task.acks_late and not message_settled:
             await self.complete_message(msg, receiver)
             message_settled = True
 
-    async def task_handler(self, task: Task, sequence_number: int) -> typing.Any | TaskFailureResultType:
+    async def task_handler(
+        self, task: Task, sequence_number: int
+    ) -> typing.Any | TaskFailureResultType:
         """
         Dynamically look up function requested and then evaluate it.
         """
