@@ -1,15 +1,20 @@
 import asyncio
 import os
 
-from azure.identity.aio import DefaultAzureCredential
-from azure.servicebus.aio import ServiceBusSender
 from boilermaker import retries
 from boilermaker.app import Boilermaker
+from boilermaker.config import Config
 from boilermaker.failure import TaskFailureResult
+from boilermaker.service_bus import AzureServiceBus
 
-azure_identity_async_credential = DefaultAzureCredential()
 service_bus_namespace_url = os.environ["SERVICE_BUS_NAMESPACE_URL"]
 service_bus_queue_name = os.environ["SERVICE_BUS_QUEUE_NAME"]
+conf = Config(
+    service_bus_namespace_url=service_bus_namespace_url,
+    service_bus_queue_name=service_bus_queue_name,
+)
+# We create a service bus Sender client
+service_bus_client = AzureServiceBus(conf)
 
 
 # This represents our "App" object
@@ -34,13 +39,6 @@ async def happy_path(state):
 async def sad_path(state):
     print("Everything is sad")
 
-
-# We create a service bus Sender client
-service_bus_client = ServiceBusSender(
-    service_bus_namespace_url,
-    azure_identity_async_credential,
-    queue_name=service_bus_queue_name,
-)
 
 # Next we'll create a worker and register our task
 worker = Boilermaker(App({"key": "value"}), service_bus_client=service_bus_client)

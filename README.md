@@ -17,7 +17,7 @@ The `Boilermaker` application object requires some state (which will get sent to
 
 A task handler for `Boilermaker` is any async function which takes as its first argument application state and which has been registered:
 
-```sh
+```python
 # This is a background task that we'll register
 async def background_task1(state, somearg, somekwarg=True):
     """`state` must be first argument."""
@@ -26,21 +26,25 @@ async def background_task1(state, somearg, somekwarg=True):
     print(somearg)
     print(somekwarg)
 
+# Our task must be registered to be invocable.
 boilermaker_app.register_async(background_task1, policy=...A retry policy goes here...)
 ```
 **Note**: `Boilermaker` does not currently have a way to store or use the results of tasks, and all arguments must be JSON-serializable.
+
+### Complete Example
 
 For a fuller example, in our application, we may have some code like the following:
 
 ```python
 from azure.identity.aio import DefaultAzureCredential
-from azure.servicebus.aio import ServiceBusSender
-
 from boilermaker.app import Boilermaker
+from boilermaker.config import Config
+# The boilermaker ServiceBus wrapper is for convenience/example
+from boilermaker.service_bus import AzureServiceBus
 from boilermaker import retries
 
 
-# This represents our "App" object
+# This represents our "App" object which will be passed as `state` to our handlers
 class App:
     def __init__(self, data):
         self.data = data
@@ -55,16 +59,15 @@ async def background_task1(state, somearg, somekwarg=True):
     print(somekwarg)
 
 
-azure_identity_async_credential = DefaultAzureCredential()
+
 service_bus_namespace_url = os.environ["SERVICE_BUS_NAMESPACE_URL"]
 service_bus_queue_name = os.environ["SERVICE_BUS_QUEUE_NAME"]
-
-# We create a service bus Sender client
-sbus_client = AzureServiceBus(
-    service_bus_namespace_url,
-    service_bus_queue_name,
-    azure_identity_async_credential,  # type: DefaultAzureCredential
+conf = Config(
+    service_bus_namespace_url=service_bus_namespace_url,
+    service_bus_queue_name=service_bus_queue_name,
 )
+# We create a service bus Sender client
+service_bus_client = AzureServiceBus(conf)
 
 # Next we'll create a worker and register our task
 worker = Boilermaker(App({"key": "value"}), service_bus_client=service_bus_client)

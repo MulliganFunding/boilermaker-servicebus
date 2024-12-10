@@ -30,7 +30,6 @@ class AzureServiceBus:
             raise ValueError("Invalid configuration for AzureServiceBus")
         return None
 
-
     @property
     def client(self):
         if self._client is None:
