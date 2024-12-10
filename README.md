@@ -90,10 +90,14 @@ It is possible to register callbacks for tasks, which can run on success or fail
 ```python
 ...see worker-instantation example above...
 
-async def a_background_task(state, param: int):
-    if param > 0:
+from boilermaker.failure import TaskFailureResult
+
+async def a_background_task(state, param: str):
+    if param == "success":
         print("Things seem to be going really well")
         return None
+    elif param == "fail":
+        return TaskFailureResult
     raise ValueError("Negative numbers are a bummer")
 
 
@@ -111,14 +115,14 @@ worker.register_async(happy_path, policy=retries.NoRetry())
 worker.register_async(sad_path, policy=retries.NoRetry())
 
 # Now we can create a happy task and add callbacks
-happy_task = worker.create_task(a_background_task, 11)
+happy_task = worker.create_task(a_background_task, "success")
 # This callback should get scheduled
 happy_task.on_success = worker.create_task(happy_path)
 # This callback will not
 happy_task.on_failure = worker.create_task(sad_path)
 
 # For good measure, we'll create a sad task too
-sad_task = worker.create_task(a_background_task, -20)
+sad_task = worker.create_task(a_background_task, "uh oh!")
 # This callback should not get scheduled
 sad_task.on_success = worker.create_task(happy_path)
 # This callback should get scheduled
