@@ -227,8 +227,8 @@ class Boilermaker:
                 await self.deadletter_or_complete_task(
                     receiver, msg, "ProcessingError", task, detail="Retries exhausted"
                 )
-            # This task is marked a failure: no more retries
-            if task.on_failure:
+            # This task is a failure because there it did not succeed and retries are exhausted
+            if task.on_failure is not None:
                 await self.publish_task(task.on_failure)
             # Early return here: no more processing
             return None
@@ -244,11 +244,11 @@ class Boilermaker:
                         receiver, msg, "TaskFailed", task
                     )
                     message_settled = True
-                if task.on_failure:
+                if task.on_failure is not None:
                     # Schedule on_failure task
                     await self.publish_task(task.on_failure)
             # Success case: publish the next task (if desired)
-            elif task.on_success:
+            elif task.on_success is not None:
                 # Success case: publish the next task
                 await self.publish_task(task.on_success)
         except RetryException as retry:
@@ -272,7 +272,7 @@ class Boilermaker:
             # Some other exception has been thrown
             err_msg = f"Failed processing task sequence_number={sequence_number}  {traceback.format_exc()}"
             logger.error(err_msg)
-            if task.on_failure:
+            if task.on_failure is not None:
                 await self.publish_task(task.on_failure)
 
             if not message_settled:
