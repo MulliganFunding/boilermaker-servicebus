@@ -86,6 +86,8 @@ If we look in , we should be able to see this task registered and run:
 It is possible to register callbacks for tasks, which can run on success or failure. To schedule a task with callbacks, we have to create a task object and then set a success and/or failure callback. Finally, instead of `apply_async` we have to call `publish_task`:
 
 ```python
+...see worker-instantation example above...
+
 async def a_background_task(state, param: int):
     if param > 0:
         print("Things seem to be going really well")
@@ -103,8 +105,8 @@ async def sad_path(state):
 
 # We need to be sure our tasks are registered
 worker.register_async(a_background_task, policy=retries.NoRetry)
-worker.register_async(happy_path, policy=retries.NoRetry)
-worker.register_async(sad_path, policy=retries.NoRetry)
+worker.register_async(happy_path, policy=retries.NoRetry())
+worker.register_async(sad_path, policy=retries.NoRetry())
 
 # Now we can create a happy task and add callbacks
 happy_task = worker.create_task(a_background_task, 11)
@@ -123,8 +125,9 @@ sad_task.on_failure = worker.create_task(sad_path)
 # Finally, this will schedule the tasks
 async def publish_task():
     await worker.publish_task(happy_task)
+    # If we wait a bit we can see more clearly one task before the other
+    await asyncio.sleep(4)
     await worker.publish_task(sad_task)
-
 ```
 
 ## FAQ

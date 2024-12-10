@@ -45,9 +45,9 @@ service_bus_client = ServiceBusSender(
 worker = Boilermaker(App({"key": "value"}), service_bus_client=service_bus_client)
 
 # We need to be sure our tasks are registered
-worker.register_async(a_background_task, policy=retries.NoRetry)
-worker.register_async(happy_path, policy=retries.NoRetry)
-worker.register_async(sad_path, policy=retries.NoRetry)
+worker.register_async(a_background_task, policy=retries.NoRetry())
+worker.register_async(happy_path, policy=retries.NoRetry())
+worker.register_async(sad_path, policy=retries.NoRetry())
 
 # Now we can create a happy task and add callbacks
 happy_task = worker.create_task(a_background_task, 11)
