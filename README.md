@@ -15,7 +15,22 @@ pip install "boilermaker-servicebus"
 
 The `Boilermaker` application object requires some state (which will get sent to all handlers as the first argument upon invocation) and an authenticated ServiceBus client.
 
-In our primary app, we may have some code like the following:
+A task handler for `Boilermaker` is any async function which takes as its first argument application state and which has been registered:
+
+```sh
+# This is a background task that we'll register
+async def background_task1(state, somearg, somekwarg=True):
+    """`state` must be first argument."""
+    await state.data.get("key")
+    print(state)
+    print(somearg)
+    print(somekwarg)
+
+boilermaker_app.register_async(background_task1, policy=...A retry policy goes here...)
+```
+**Note**: `Boilermaker` does not currently have a way to store or use the results of tasks, and all arguments must be JSON-serializable.
+
+For a fuller example, in our application, we may have some code like the following:
 
 ```python
 from azure.identity.aio import DefaultAzureCredential
@@ -98,7 +113,7 @@ async def a_background_task(state, param: str):
         return None
     elif param == "fail":
         return TaskFailureResult
-    raise ValueError("Negative numbers are a bummer")
+    raise ValueError("Exceptions are a bummer!")
 
 
 async def happy_path(state):

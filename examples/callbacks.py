@@ -24,7 +24,7 @@ async def a_background_task(state, param: str):
         return None
     elif param == "fail":
         return TaskFailureResult
-    raise ValueError("Negative numbers are a bummer")
+    raise ValueError("Exceptions are a bummer!")
 
 
 async def happy_path(state):
