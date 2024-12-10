@@ -2,6 +2,7 @@
 Async tasks received from Service Bus go in here
 
 """
+
 import copy
 import logging
 import signal
@@ -28,6 +29,7 @@ from opentelemetry import trace
 from pydantic import ValidationError
 
 from . import sample, tracing
+from .failure import TaskFailureResult, TaskFailureResultType
 from .retries import RetryException
 from .task import Task
 
@@ -84,9 +86,9 @@ class Boilermaker:
         logger.info(f"Registered background function fn={fn_name}")
         return self
 
-    async def apply_async(self, fn, *args, delay: int = 0, retries: int = 3, **kwargs):
+    def create_task(self, fn, *args, **kwargs) -> Task:
         """
-        Wrap up this function call as a task and publish to broker.
+        Create a Task object (but do not publish it).
         """
         if fn.__name__ not in self.function_registry:
             raise ValueError(f"Unregistered function invoked: {fn.__name__}")
@@ -94,10 +96,17 @@ class Boilermaker:
             raise ValueError(f"Unregistered task: {fn.__name__}")
 
         payload = {"args": args, "kwargs": kwargs}
-        task = self.task_registry[fn.__name__]
-        task_copy = copy.deepcopy(task)
-        task_copy.payload = payload
-        return await self.publish_task(task_copy, delay=delay, retries=retries)
+        task_proto = self.task_registry[fn.__name__]
+        task = copy.deepcopy(task_proto)
+        task.payload = payload
+        return task
+
+    async def apply_async(self, fn, *args, delay: int = 0, retries: int = 3, **kwargs):
+        """
+        Wrap up this function call as a task and publish to broker.
+        """
+        task = self.create_task(fn, *args, **kwargs)
+        return await self.publish_task(task, delay=delay, retries=retries)
 
     @tracer.start_as_current_span("publish-task")
     async def publish_task(self, task: Task, delay: int = 0, retries: int = 3):
@@ -198,8 +207,8 @@ class Boilermaker:
         try:
             task = Task.model_validate_json(str(msg))
         except (JSONDecodeError, ValidationError):
-            msg = f"Invalid task sequence_number={sequence_number} exc_info={traceback.format_exc()}"
-            logger.error(msg)
+            log_err_msg = f"Invalid task sequence_number={sequence_number} exc_info={traceback.format_exc()}"
+            logger.error(log_err_msg)
             # This task is not parseable
             await self.complete_message(msg, receiver)
             return None
@@ -214,23 +223,37 @@ class Boilermaker:
 
         if not task.can_retry:
             logger.error(f"Retries exhausted for event {task.function_name}")
-            if task.should_dead_letter:
-                await receiver.dead_letter_message(
-                    msg,
-                    reason="ProcessingError",
-                    error_description="Task failed: retries exhausted",
+            if not message_settled:
+                await self.deadletter_or_complete_task(
+                    receiver, msg, "ProcessingError", task, detail="Retries exhausted"
                 )
-            else:
-                await self.complete_message(msg, receiver)
-
-            message_settled = True
+            # This task is a failure because there it did not succeed and retries are exhausted
+            if task.on_failure is not None:
+                await self.publish_task(task.on_failure)
+            # Early return here: no more processing
             return None
 
         # Actually handle the task here
         try:
-            await self.task_handler(task, sequence_number)
+            result = await self.task_handler(task, sequence_number)
+            # Check and handle failure first
+            if result is TaskFailureResult:
+                # Deadletter or complete the message
+                if not message_settled:
+                    await self.deadletter_or_complete_task(
+                        receiver, msg, "TaskFailed", task
+                    )
+                    message_settled = True
+                if task.on_failure is not None:
+                    # Schedule on_failure task
+                    await self.publish_task(task.on_failure)
+            # Success case: publish the next task (if desired)
+            elif task.on_success is not None:
+                # Success case: publish the next task
+                await self.publish_task(task.on_success)
         except RetryException as retry:
-            # A retry has been requested
+            # A retry has been requested:
+            # no on_failure run until after retries exhausted
             delay = task.get_next_delay()
             warn_msg = (
                 "Event retry requested. Publishing retry:"
@@ -249,23 +272,23 @@ class Boilermaker:
             # Some other exception has been thrown
             err_msg = f"Failed processing task sequence_number={sequence_number}  {traceback.format_exc()}"
             logger.error(err_msg)
-            if task.should_dead_letter:
-                await receiver.dead_letter_message(
-                    msg,
-                    reason="ProcessingError",
-                    error_description=f"Task failed: {exc}",
-                )
-            elif not message_settled:
-                await self.complete_message(msg, receiver)
+            if task.on_failure is not None:
+                await self.publish_task(task.on_failure)
 
-            message_settled = True
+            if not message_settled:
+                await self.deadletter_or_complete_task(
+                    receiver, msg, "ExceptionThrown", task, detail=exc
+                )
+                message_settled = True
 
         # at-least once: settle at the end
         if task.acks_late and not message_settled:
             await self.complete_message(msg, receiver)
             message_settled = True
 
-    async def task_handler(self, task: Task, sequence_number: int):
+    async def task_handler(
+        self, task: Task, sequence_number: int
+    ) -> typing.Any | TaskFailureResultType:
         """
         Dynamically look up function requested and then evaluate it.
         """
@@ -287,3 +310,22 @@ class Boilermaker:
             f"[{task.function_name}] Completed Task {sequence_number=} in {time.monotonic()-start}s"
         )
         return result
+
+    async def deadletter_or_complete_task(
+        self,
+        receiver,
+        msg: str,
+        reason: str,
+        task: Task,
+        detail: Exception | str | None = None,
+    ):
+        description = f"Task failed: {detail}" if detail else "Task failed"
+        if task.should_dead_letter:
+            await receiver.dead_letter_message(
+                msg,
+                reason=reason,
+                error_description=description,
+            )
+        else:
+            await self.complete_message(msg, receiver)
+        return None
