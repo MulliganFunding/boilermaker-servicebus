@@ -14,7 +14,7 @@ conf = Config(
     service_bus_queue_name=service_bus_queue_name,
 )
 # We create a service bus Sender client
-service_bus_client = AzureServiceBus(conf)
+service_bus_client = AzureServiceBus.from_config(conf)
 
 
 # This represents our "App" object

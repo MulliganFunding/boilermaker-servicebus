@@ -24,6 +24,7 @@ format:
 check:
     #!/bin/bash -eux
     uv run ruff check boilermaker tests
+    just check-types
 
 # Run mypy checks
 check-types:

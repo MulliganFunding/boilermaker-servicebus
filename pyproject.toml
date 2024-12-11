@@ -1,19 +1,21 @@
 [project]
 name = "boilermaker-servicebus"
-version = "0.5.0a1"
+version = "0.5.1a1"
 description = "An async python Background task system using Azure Service Bus Queues"
 authors = [
     { "name" = "Erik Aker", "email" = "eaker@mulliganfunding.com" },
 ]
+license = {file = "LICENSE"}
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "anyio >= 4.6.2.post1",
+    "aio-azure-clients-toolbox>=0.1.0",
+    "anyio >= 4.7.0",
     "azure-core-tracing-opentelemetry >= 1.0.0b11",
     "azure-servicebus >= 7.12.3",
-    "azure-identity >= 1.18.0",
-    "opentelemetry-api >= 1.28.2",
-    "pydantic >= 2.9.2",
+    "azure-identity >= 1.19.0",
+    "opentelemetry-api >= 1.29.0",
+    "pydantic >= 2.10.3",
     "pydantic-settings >= 2.5.2",
 ]
 
@@ -24,7 +26,7 @@ dev-dependencies = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6",
     "pytest-mypy>=0.10.3",
-    "ruff>=0.6",
+    "ruff>=0.8.2",
 ]
 
 [build-system]
@@ -44,6 +46,7 @@ testpaths = ["tests"]
 filterwarnings = [
     "error"
 ]
+
 
 [tool.ruff]
 src = ["boilermaker", "tests"]
