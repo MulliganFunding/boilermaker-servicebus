@@ -2,7 +2,6 @@
 Async tasks received from Service Bus go in here
 
 """
-
 import copy
 import logging
 import signal
@@ -13,6 +12,7 @@ import weakref
 from functools import wraps
 from json.decoder import JSONDecodeError
 
+from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender  # type: ignore
 from anyio import create_task_group, open_signal_receiver
 from anyio.abc import CancelScope
 from azure.servicebus import ServiceBusReceivedMessage
@@ -51,7 +51,10 @@ class Boilermaker:
     """
 
     def __init__(
-        self, state: typing.Any, service_bus_client=None, enable_opentelemetry=False
+        self,
+        state: typing.Any,
+        service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender = None,
+        enable_opentelemetry=False,
     ):
         # This is likely going to be circular, the app referencing
         # the worker as well. Opt for weakrefs for improved mem safety.
@@ -190,11 +193,11 @@ class Boilermaker:
         try:
             await receiver.complete_message(msg)
         except (MessageLockLostError, ServiceBusError, SessionLockLostError):
-            msg = (
+            logmsg = (
                 f"Failed to settle message sequence_number={msg.sequence_number} "
                 f"exc_info={traceback.format_exc()}"
             )
-            logger.error(msg)
+            logger.error(logmsg)
         self._current_message = None
 
     async def message_handler(
@@ -287,7 +290,7 @@ class Boilermaker:
             message_settled = True
 
     async def task_handler(
-        self, task: Task, sequence_number: int
+        self, task: Task, sequence_number: int | None
     ) -> typing.Any | TaskFailureResultType:
         """
         Dynamically look up function requested and then evaluate it.
@@ -313,8 +316,8 @@ class Boilermaker:
 
     async def deadletter_or_complete_task(
         self,
-        receiver,
-        msg: str,
+        receiver: ServiceBusReceiver,
+        msg: ServiceBusReceivedMessage,
         reason: str,
         task: Task,
         detail: Exception | str | None = None,

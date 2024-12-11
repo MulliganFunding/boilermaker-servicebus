@@ -47,6 +47,7 @@ filterwarnings = [
     "error"
 ]
 
+
 [tool.ruff]
 src = ["boilermaker", "tests"]
 fix = true
