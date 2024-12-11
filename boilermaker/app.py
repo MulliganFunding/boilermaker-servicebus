@@ -35,6 +35,7 @@ from .task import Task
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
+TaskHandler: typing.TypeAlias = typing.Callable[..., typing.Awaitable[typing.Any]]
 
 
 class BoilermakerAppException(Exception):
@@ -80,13 +81,19 @@ class Boilermaker:
 
         return deco
 
-    def register_async(self, fn, **options):
+    def register_async(self, fn: TaskHandler, **options):
         """Register a task to be callable as background"""
         fn_name = fn.__name__
         task = Task.default(fn_name, **options)
         self.function_registry[fn_name] = fn
         self.task_registry[fn_name] = task
         logger.info(f"Registered background function fn={fn_name}")
+        return self
+
+    def register_many_async(self, fns: list[TaskHandler], **options):
+        """Register many tasks at once using the same `options` for each"""
+        for fn in fns:
+            self.register_async(fn, **options)
         return self
 
     def create_task(self, fn, *args, **kwargs) -> Task:

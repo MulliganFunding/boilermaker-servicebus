@@ -19,6 +19,16 @@ class State:
 DEFAULT_STATE = State({"somekey": "somevalue"})
 
 
+def make_message(task, sequence_number: int = 123):
+    # Example taken from:
+    # azure-sdk-for-python/blob/main/sdk/servicebus/azure-servicebus/tests/test_message.py#L233
+    my_frame = [0, 0, 0]
+    amqp_received_message = Message(
+        data=[task.model_dump_json().encode("utf-8")],
+        message_annotations={SEQUENCENUBMERNAME: sequence_number},
+    )
+    return ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
+
 
 @pytest.fixture
 def app(sbus):
@@ -60,6 +70,28 @@ async def test_app_register_async(app):
     assert app.task_registry[somefunc.__name__].function_name == somefunc.__name__
     assert await somefunc(DEFAULT_STATE) == "somevalue"
 
+
+async def test_app_register_many_async(app, mockservicebus):
+    async def somefunc1(state):
+        return state["somekey1"]
+    async def somefunc2(state, one_arg):
+        return state["somekey2"]
+    async def somefunc3(state, one_arg, two_args, one_kwarg=True):
+        return state["somekey2"]
+
+    all_funcs = [somefunc1, somefunc2, somefunc3]
+    app.register_many_async(all_funcs, policy=retries.RetryPolicy.default())
+    for func in all_funcs:
+        assert func.__name__ in app.task_registry
+        assert app.task_registry[func.__name__].function_name == func.__name__
+
+    task1 = app.create_task(somefunc1)
+    task2 = app.create_task(somefunc2, "a")
+    task3 = app.create_task(somefunc3, "b", 123, one_kwarg="11")
+    for task in [task1, task2, task3]:
+        await app.message_handler(make_message(task), mockservicebus.get_queue_receiver())
+
+
 async def test_create_task(app):
     async def somefunc(state, **kwargs):
         state.inner.update(kwargs)
@@ -79,17 +111,46 @@ async def test_create_task(app):
     assert task.record_attempt()
     assert task.attempts.attempts == 1
 
+async def test_create_task_failures(app):
+    async def one(state):
+        pass
 
-def make_message(task, sequence_number: int = 123):
-    # Example taken from:
-    # azure-sdk-for-python/blob/main/sdk/servicebus/azure-servicebus/tests/test_message.py#L233
-    my_frame = [0, 0, 0]
-    amqp_received_message = Message(
-        data=[task.model_dump_json().encode("utf-8")],
-        message_annotations={SEQUENCENUBMERNAME: sequence_number},
-    )
-    return ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
+    # Check failures
+    with pytest.raises(ValueError) as exc:
+        app.create_task(one)
+        assert "Unregistered function" in str(exc)
 
+    # Register it but leave from task registry
+    app.function_registry[one.__name__] = one
+    with pytest.raises(ValueError) as exc:
+        app.create_task(one)
+        assert "Unregistered task" in str(exc)
+
+
+async def test_apply_async(app, mockservicebus):
+    async def somefunc(state, **kwargs):
+        state.inner.update(kwargs)
+        return state["somekey"]
+
+    # Function must be registered  first
+    app.register_async(somefunc, policy=retries.RetryPolicy.default())
+    # Now we can try to publish
+    await app.apply_async(somefunc, bla="heynow")
+    assert len(mockservicebus._sender.method_calls) == 1
+    publish_success_call = mockservicebus._sender.method_calls[0]
+    assert publish_success_call[0] == "schedule_messages"
+    data = json.loads(str(publish_success_call[1][0]))
+    assert data["payload"]["args"] == []
+    assert data["payload"]["kwargs"] == {"bla": "heynow"}
+    assert data["function_name"] == "somefunc"
+    assert data["on_success"] is None
+    assert data["on_failure"] is None
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+#
+# Message Handling Logic Tests
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 async def test_task_garbage_message(app, mockservicebus):
     message_num = random.randint(100, 1000)
