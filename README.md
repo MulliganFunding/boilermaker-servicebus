@@ -212,8 +212,8 @@ __Note__: `on_failure` callbacks will only be run __after all retries have been 
 There are three places where retries for a task can be configured:
 
 - When initially registering a task (the task default).
-- When scheduling a task (override the default).
-- When raising a `RetryException` in order to trigger a retry (also overrides the default).
+- When scheduling a task (overrides the default for that invocation).
+- When raising a `RetryException` with a custom policy (overrides default _if_ different).
 
 Examples of each are included below.
 
