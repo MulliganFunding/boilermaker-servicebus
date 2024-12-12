@@ -2,6 +2,7 @@
 Async tasks received from Service Bus go in here
 
 """
+
 import copy
 import logging
 import signal
@@ -30,7 +31,7 @@ from pydantic import ValidationError
 
 from . import sample, tracing
 from .failure import TaskFailureResult, TaskFailureResultType
-from .retries import RetryException
+from .retries import NoRetry, RetryException, RetryPolicy
 from .task import Task
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
@@ -96,7 +97,9 @@ class Boilermaker:
             self.register_async(fn, **options)
         return self
 
-    def create_task(self, fn, *args, **kwargs) -> Task:
+    def create_task(
+        self, fn, *args, policy: RetryPolicy | None = None, **kwargs
+    ) -> Task:
         """
         Create a Task object (but do not publish it).
         """
@@ -109,21 +112,38 @@ class Boilermaker:
         task_proto = self.task_registry[fn.__name__]
         task = copy.deepcopy(task_proto)
         task.payload = payload
+        if policy is not None:
+            task.policy = policy
+
         return task
 
-    async def apply_async(self, fn, *args, delay: int = 0, retries: int = 3, **kwargs):
+    async def apply_async(
+        self,
+        fn,
+        *args,
+        delay: int = 0,
+        publish_attempts: int = 3,
+        policy: RetryPolicy | None = None,
+        **kwargs,
+    ):
         """
         Wrap up this function call as a task and publish to broker.
         """
-        task = self.create_task(fn, *args, **kwargs)
-        return await self.publish_task(task, delay=delay, retries=retries)
+        task = self.create_task(fn, *args, policy=policy, **kwargs)
+        return await self.publish_task(
+            task, delay=delay, publish_attempts=publish_attempts
+        )
 
     @tracer.start_as_current_span("publish-task")
-    async def publish_task(self, task: Task, delay: int = 0, retries: int = 3):
+    async def publish_task(
+        self,
+        task: Task,
+        delay: int = 0,
+        publish_attempts: int = 3,
+    ):
         """Turn the task into JSON and publish to Service Bus"""
         encountered_errors = []
-
-        for _i in range(0, retries):
+        for _i in range(publish_attempts):
             try:
                 return await self.service_bus_client.send_message(
                     task.model_dump_json(),
@@ -134,8 +154,8 @@ class Boilermaker:
                 ServiceBusConnectionError,
                 ServiceBusAuthorizationError,
                 ServiceBusAuthenticationError,
-            ) as e:
-                encountered_errors.append(e)
+            ) as exc:
+                encountered_errors.append(exc)
         else:
             raise BoilermakerAppException(
                 "Error encountered while publishing task to service bus",
@@ -237,7 +257,7 @@ class Boilermaker:
                 await self.deadletter_or_complete_task(
                     receiver, msg, "ProcessingError", task, detail="Retries exhausted"
                 )
-            # This task is a failure because there it did not succeed and retries are exhausted
+            # This task is a failure because it did not succeed and retries are exhausted
             if task.on_failure is not None:
                 await self.publish_task(task.on_failure)
             # Early return here: no more processing
@@ -263,7 +283,14 @@ class Boilermaker:
                 await self.publish_task(task.on_success)
         except RetryException as retry:
             # A retry has been requested:
-            # no on_failure run until after retries exhausted
+            # Calculate next delay and publish retry.
+            # Do not run on_failure run until after retries exhausted!
+            # The `retry` RetryException may have a policy -> What if it's different from the Task?
+            if retry.policy and retry.policy != task.policy:
+                # This will publish the *next* instance of the task using *this* policy
+                task.policy = retry.policy
+                logger.warning(f"Task policy updated to retry policy {retry.policy}")
+
             delay = task.get_next_delay()
             warn_msg = (
                 "Event retry requested. Publishing retry:"

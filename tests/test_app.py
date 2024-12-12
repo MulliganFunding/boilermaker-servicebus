@@ -7,6 +7,7 @@ from azure.servicebus._common.constants import SEQUENCENUBMERNAME
 from azure.servicebus._pyamqp.message import Message
 from boilermaker import failure, retries
 from boilermaker.app import Boilermaker
+from boilermaker.task import Task
 
 
 class State:
@@ -80,10 +81,12 @@ async def test_app_register_many_async(app, mockservicebus):
         return state["somekey2"]
 
     all_funcs = [somefunc1, somefunc2, somefunc3]
-    app.register_many_async(all_funcs, policy=retries.RetryPolicy.default())
+    # We do not specify a policy here
+    app.register_many_async(all_funcs)
     for func in all_funcs:
         assert func.__name__ in app.task_registry
         assert app.task_registry[func.__name__].function_name == func.__name__
+        assert app.task_registry[func.__name__].policy == retries.RetryPolicy.default()
 
     task1 = app.create_task(somefunc1)
     task2 = app.create_task(somefunc2, "a")
@@ -111,6 +114,37 @@ async def test_create_task(app):
     assert task.record_attempt()
     assert task.attempts.attempts == 1
 
+
+async def test_create_task_with_policy(app):
+    async def somefunc(state, **kwargs):
+        state.inner.update(kwargs)
+        return state["somekey"]
+
+    # Function must be registered first: use default policy
+    app.register_async(somefunc, policy=retries.RetryPolicy.default())
+    # Sanity check: default policy shuold be higher than what we're setting below
+    assert app.task_registry["somefunc"].policy.max_tries > 2
+    # Now we can create a task out of it
+    policy = retries.RetryPolicy(
+        max_tries=2, delay=30, delay_max=600, retry_mode=retries.RetryMode.Exponential
+    )
+    task = app.create_task(somefunc, somekwarg="akwargval", policy=policy)
+    assert task.function_name == "somefunc"
+    assert task.payload == {"args": (), "kwargs": {"somekwarg": "akwargval"}}
+    assert task.policy.max_tries == 2
+    assert task.attempts.attempts == 0
+    assert task.acks_late
+    assert task.acks_early is False
+    assert task.can_retry
+    assert task.get_next_delay() <= policy.delay
+    assert task.record_attempt()
+    assert task.attempts.attempts == 1
+    assert task.record_attempt()
+    assert task.can_retry
+    assert task.record_attempt()
+    assert not task.can_retry
+
+
 async def test_create_task_failures(app):
     async def one(state):
         pass
@@ -127,7 +161,34 @@ async def test_create_task_failures(app):
         assert "Unregistered task" in str(exc)
 
 
-async def test_apply_async(app, mockservicebus):
+async def test_apply_async_with_policy(app, mockservicebus):
+    async def somefunc(state, **kwargs):
+        state.inner.update(kwargs)
+        return state["somekey"]
+
+    # Function must be registered  first
+    app.register_async(somefunc, policy=retries.RetryPolicy.default())
+
+    policy = retries.RetryPolicy(
+        max_tries=2, delay=30, delay_max=600, retry_mode=retries.RetryMode.Linear
+    )
+    # Now we can try to publish
+    await app.apply_async(somefunc, bla="heynow", policy=policy)
+    assert len(mockservicebus._sender.method_calls) == 1
+    publish_success_call = mockservicebus._sender.method_calls[0]
+    assert publish_success_call[0] == "schedule_messages"
+    # We should always be able to deserialize the task
+    published_task = Task.model_validate_json(str(publish_success_call[1][0]))
+    # This task was published with a linear policy
+    assert published_task.policy.retry_mode == retries.RetryMode.Linear
+    assert published_task.payload["args"] == []
+    assert published_task.payload["kwargs"] == {"bla": "heynow"}
+    assert published_task.function_name == "somefunc"
+    assert published_task.on_success is None
+    assert published_task.on_failure is None
+
+
+async def test_apply_async_no_policy(app, mockservicebus):
     async def somefunc(state, **kwargs):
         state.inner.update(kwargs)
         return state["somekey"]
@@ -139,12 +200,14 @@ async def test_apply_async(app, mockservicebus):
     assert len(mockservicebus._sender.method_calls) == 1
     publish_success_call = mockservicebus._sender.method_calls[0]
     assert publish_success_call[0] == "schedule_messages"
-    data = json.loads(str(publish_success_call[1][0]))
-    assert data["payload"]["args"] == []
-    assert data["payload"]["kwargs"] == {"bla": "heynow"}
-    assert data["function_name"] == "somefunc"
-    assert data["on_success"] is None
-    assert data["on_failure"] is None
+    # We should always be able to deserialize the task
+    published_task = Task.model_validate_json(str(publish_success_call[1][0]))
+    assert published_task.policy.retry_mode == retries.RetryMode.Fixed
+    assert published_task.payload["args"] == []
+    assert published_task.payload["kwargs"] == {"bla": "heynow"}
+    assert published_task.function_name== "somefunc"
+    assert published_task.on_success is None
+    assert published_task.on_failure is None
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -208,12 +271,13 @@ async def test_task_success(has_on_success, acks_late, app, mockservicebus):
         assert len(mockservicebus._sender.method_calls) == 1
         publish_success_call = mockservicebus._sender.method_calls[0]
         assert publish_success_call[0] == "schedule_messages"
-        data = json.loads(str(publish_success_call[1][0]))
-        assert data["payload"]["args"] == []
-        assert data["payload"]["kwargs"] == {"somekwarg": "akwargval"}
-        assert data["function_name"] == "onsuccess"
-        assert data["on_success"] is None
-        assert data["on_failure"] is None
+        # We should always be able to deserialize the task
+        published_task = Task.model_validate_json(str(publish_success_call[1][0]))
+        assert published_task.payload["args"] == []
+        assert published_task.payload["kwargs"] == {"somekwarg": "akwargval"}
+        assert published_task.function_name == "onsuccess"
+        assert published_task.on_success is None
+        assert published_task.on_failure is None
     else:
         # No new tasks published
         assert not mockservicebus._sender.method_calls
@@ -255,12 +319,13 @@ async def test_task_failure(has_on_failure, should_deadletter, acks_late, app, m
         assert len(mockservicebus._sender.method_calls) == 1
         publish_fail_call = mockservicebus._sender.method_calls[0]
         assert publish_fail_call[0] == "schedule_messages"
-        data = json.loads(str(publish_fail_call[1][0]))
-        assert data["payload"]["args"] == []
-        assert data["payload"]["kwargs"] == {"somekwarg": "akwargval"}
-        assert data["function_name"] == "onfail"
-        assert data["on_success"] is None
-        assert data["on_failure"] is None
+        # We should always be able to deserialize the task
+        published_task = Task.model_validate_json(str(publish_fail_call[1][0]))
+        assert published_task.payload["args"] == []
+        assert published_task.payload["kwargs"] == {"somekwarg": "akwargval"}
+        assert published_task.function_name == "onfail"
+        assert published_task.on_success is None
+        assert published_task.on_failure is None
     else:
         # No new tasks published
         assert not mockservicebus._sender.method_calls
@@ -278,7 +343,7 @@ async def test_task_failure(has_on_failure, should_deadletter, acks_late, app, m
 @pytest.mark.parametrize("can_retry", [True, False])
 async def test_task_retries_with_onfail(can_retry, has_on_failure, should_deadletter, app, mockservicebus):
     async def retrytask(state):
-        raise retries.RetryException("Retry me", policy=retries.RetryPolicy.default())
+        raise retries.RetryException("Retry me")
 
     async def onfail(state, **kwargs):
         return 1
@@ -312,35 +377,35 @@ async def test_task_retries_with_onfail(can_retry, has_on_failure, should_deadle
         assert len(mockservicebus._sender.method_calls) == 1
         publish_fail_call = mockservicebus._sender.method_calls[0]
         assert publish_fail_call[0] == "schedule_messages"
-        data = json.loads(str(publish_fail_call[1][0]))
-        assert data["payload"]["args"] == []
-        assert data["payload"]["kwargs"] == {"somekwarg": "akwargval"}
-        assert data["function_name"] == "onfail"
-        assert data["on_success"] is None
-        assert data["on_failure"] is None
+        published_task = Task.model_validate_json(str(publish_fail_call[1][0]))
+        assert published_task.payload["args"] == []
+        assert published_task.payload["kwargs"] == {"somekwarg": "akwargval"}
+        assert published_task.function_name == "onfail"
+        assert published_task.on_success is None
+        assert published_task.on_failure is None
     elif not has_on_failure and can_retry:
         # Publish retry task with sender
         assert len(mockservicebus._sender.method_calls) == 1
         publish_fail_call = mockservicebus._sender.method_calls[0]
         assert publish_fail_call[0] == "schedule_messages"
-        data = json.loads(str(publish_fail_call[1][0]))
-        assert data["payload"]["args"] == []
-        assert data["payload"]["kwargs"] == {}
-        assert data["function_name"] == "retrytask"
-        assert data["on_success"] is None
-        assert data["on_failure"] is None
+        published_task = Task.model_validate_json(str(publish_fail_call[1][0]))
+        assert published_task.payload["args"] == []
+        assert published_task.payload["kwargs"] == {}
+        assert published_task.function_name == "retrytask"
+        assert published_task.on_success is None
+        assert published_task.on_failure is None
     elif has_on_failure and can_retry:
         # Publish retry task with onfail task
         assert len(mockservicebus._sender.method_calls) == 1
         publish_fail_call = mockservicebus._sender.method_calls[0]
         assert publish_fail_call[0] == "schedule_messages"
-        data = json.loads(str(publish_fail_call[1][0]))
-        assert data["payload"]["args"] == []
-        assert data["payload"]["kwargs"] == {}
-        assert data["function_name"] == "retrytask"
-        assert data["on_success"] is None
-        assert data["on_failure"] is not None
-        assert data["on_failure"]["function_name"] == "onfail"
+        published_task = Task.model_validate_json(str(publish_fail_call[1][0]))
+        assert published_task.payload["args"] == []
+        assert published_task.payload["kwargs"] == {}
+        assert published_task.function_name == "retrytask"
+        assert published_task.on_success is None
+        assert published_task.on_failure is not None
+        assert published_task.on_failure.function_name == "onfail"
     else:
         # No new tasks published
         assert not mockservicebus._sender.method_calls
@@ -353,12 +418,50 @@ async def test_task_retries_with_onfail(can_retry, has_on_failure, should_deadle
     assert result is None
 
 
+async def test_task_retries_with_new_policy(app, mockservicebus):
+    async def retrytask(state):
+        # NEW POLICY!
+        raise retries.RetryExceptionDefaultExponential(
+            "Retry me", delay=800, max_delay=2000, max_tries=99
+        )
+
+    # Function must be registered first
+    app.register_async(retrytask, policy=retries.RetryPolicy.default())
+    # Now we can create a task out of it
+    task = app.create_task(retrytask)
+    # Now we can run the task
+    result = await app.message_handler(
+        make_message(task), mockservicebus.get_queue_receiver()
+    )
+
+    # Task should *always* be settled
+    assert len(mockservicebus._receiver.method_calls) == 1
+
+    # Published retry task with sender: published with a different policy!
+    assert len(mockservicebus._sender.method_calls) == 1
+    publish_fail_call = mockservicebus._sender.method_calls[0]
+    # Should have used a very large delay based on thrown RetryException
+    assert publish_fail_call[0] == "schedule_messages"
+    published_task = Task.model_validate_json(str(publish_fail_call[1][0]))
+    assert published_task.payload["args"] == []
+    assert published_task.payload["kwargs"] == {}
+    assert published_task.function_name == "retrytask"
+    assert published_task.policy.retry_mode == retries.RetryMode.Exponential
+    assert published_task.policy.max_tries == 99
+    assert published_task.policy.delay > retries.RetryPolicy.default().delay
+    assert published_task.on_success is None
+    assert published_task.on_failure is None
+
+    assert result is None
+
+
+
 @pytest.mark.parametrize("acks_late", [True, False])
 @pytest.mark.parametrize("should_deadletter", [True, False])
 @pytest.mark.parametrize("can_retry", [True, False])
 async def test_task_retries_acks_late(can_retry, should_deadletter, acks_late, app, mockservicebus):
     async def retrytask(state):
-        raise retries.RetryException("Retry me", policy=retries.RetryPolicy.default())
+        raise retries.RetryException("Retry me")
 
     # Function must be registered first
     app.register_async(retrytask, policy=retries.RetryPolicy.default())
@@ -394,12 +497,12 @@ async def test_task_retries_acks_late(can_retry, should_deadletter, acks_late, a
         assert len(mockservicebus._sender.method_calls) == 1
         publish_call = mockservicebus._sender.method_calls[0]
         assert publish_call[0] == "schedule_messages"
-        data = json.loads(str(publish_call[1][0]))
-        assert data["payload"]["args"] == []
-        assert data["payload"]["kwargs"] == {}
-        assert data["function_name"] == "retrytask"
-        assert data["on_success"] is None
-        assert data["on_failure"] is None
+        published_task = Task.model_validate_json(str(publish_call[1][0]))
+        assert published_task.payload["args"] == []
+        assert published_task.payload["kwargs"] == {}
+        assert published_task.function_name == "retrytask"
+        assert published_task.on_success is None
+        assert published_task.on_failure is None
     else:
         # No new tasks published
         assert not mockservicebus._sender.method_calls
@@ -454,11 +557,12 @@ async def test_task_handle_exception(has_on_failure, should_deadletter, acks_lat
         assert len(mockservicebus._sender.method_calls) == 1
         publish_call = mockservicebus._sender.method_calls[0]
         assert publish_call[0] == "schedule_messages"
-        data = json.loads(str(publish_call[1][0]))
-        assert data["payload"]["args"] == []
-        assert data["payload"]["kwargs"] == {'somekwarg': 'akwargval'}
-        assert data["function_name"] == "onfail"
-        assert data["on_success"] is None
-        assert data["on_failure"] is None
+        published_task = Task.model_validate_json(str(publish_call[1][0]))
+
+        assert published_task.payload["args"] == []
+        assert published_task.payload["kwargs"] == {'somekwarg': 'akwargval'}
+        assert published_task.function_name == "onfail"
+        assert published_task.on_success is None
+        assert published_task.on_failure is None
 
     assert result is None
