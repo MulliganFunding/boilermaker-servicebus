@@ -121,7 +121,7 @@ class Boilermaker:
         fn,
         *args,
         delay: int = 0,
-        publish_attempts: int = 3,
+        publish_attempts: int = 1,
         policy: RetryPolicy | None = None,
         **kwargs,
     ):
@@ -138,7 +138,7 @@ class Boilermaker:
         self,
         task: Task,
         delay: int = 0,
-        publish_attempts: int = 3,
+        publish_attempts: int = 1,
     ):
         """Turn the task into JSON and publish to Service Bus"""
         encountered_errors = []
