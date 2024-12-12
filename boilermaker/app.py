@@ -292,10 +292,9 @@ class Boilermaker:
 
             delay = task.get_next_delay()
             warn_msg = (
-                f"{retry.msg}. "
-                f"Retrying... <function={task.function_name}, "
-                f" attempts={task.attempts.attempts}, "
-                f" {delay=}, {sequence_number=}>"
+                f"{retry.msg} "
+                f"[attempt {task.attempts.attempts} of {task.policy.max_tries}] "
+                f"Publishing retry... {sequence_number=} <function={task.function_name}> with {delay=} "
             )
             logger.warning(warn_msg)
             await self.publish_task(
