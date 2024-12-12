@@ -2,7 +2,6 @@
 Async tasks received from Service Bus go in here
 
 """
-
 import copy
 import logging
 import signal
@@ -31,7 +30,7 @@ from pydantic import ValidationError
 
 from . import sample, tracing
 from .failure import TaskFailureResult, TaskFailureResultType
-from .retries import NoRetry, RetryException, RetryPolicy
+from .retries import RetryException, RetryPolicy
 from .task import Task
 
 tracer: trace.Tracer = trace.get_tracer(__name__)

@@ -134,7 +134,7 @@ class RetryExceptionDefaultExponential(RetryException):
             "retry_mode": RetryMode.Exponential,
         }
         defaults.update(kwargs)
-        super().__init__(msg, policy=RetryPolicy(**defaults))
+        super().__init__(msg, policy=RetryPolicy.model_validate(defaults))
 
 
 class RetryExceptionDefaultLinear(RetryException):
@@ -146,4 +146,4 @@ class RetryExceptionDefaultLinear(RetryException):
             "retry_mode": RetryMode.Linear,
         }
         defaults.update(kwargs)
-        super().__init__(msg, policy=RetryPolicy(**defaults))
+        super().__init__(msg, policy=RetryPolicy.model_validate(defaults))
