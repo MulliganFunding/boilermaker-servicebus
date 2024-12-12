@@ -19,7 +19,9 @@ STATIC_DEBUG_TASK = Task.default(TASK_NAME, acks_late=False)
 STATIC_DEBUG_TASK.payload = {"args": [], "kwargs": {}}
 
 
-async def debug_task_retry_policy(state, use_default: bool, msg: str = "RETRY TEST", max_tries=5, delay=30, delay_max=600):
+async def debug_task_retry_policy(
+    state, use_default: bool, msg: str = "RETRY TEST", max_tries=5, delay=30, delay_max=600
+):
     """
     This task does nothing.
     """
