@@ -292,12 +292,10 @@ class Boilermaker:
 
             delay = task.get_next_delay()
             warn_msg = (
-                "Event retry requested. Publishing retry:"
-                f"[ {task.function_name=}"
-                f" {retry.msg=}"
-                f" {task.attempts.attempts=}"
-                f" {delay=}"
-                f" {sequence_number=} ]"
+                f"[{sequence_number=}] {retry.msg}. Publishing retry: "
+                f"<function={task.function_name}>, "
+                f" attempts={task.attempts.attempts}, "
+                f" {delay=}>"
             )
             logger.warning(warn_msg)
             await self.publish_task(
