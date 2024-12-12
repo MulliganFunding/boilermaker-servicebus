@@ -121,7 +121,7 @@ async def test_create_task_with_policy(app):
 
     # Function must be registered first: use default policy
     app.register_async(somefunc, policy=retries.RetryPolicy.default())
-    # Sanity check: default policy shuold be higher than what we're setting below
+    # Sanity check: default policy should be higher than what we're setting below
     assert app.task_registry["somefunc"].policy.max_tries > 2
     # Now we can create a task out of it
     policy = retries.RetryPolicy(
