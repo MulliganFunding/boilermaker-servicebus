@@ -92,7 +92,7 @@ class RetryPolicy(BaseModel):
 # NoRetry only tries one time
 class NoRetry(RetryPolicy):
     def __init__(self):
-        """Duplciates RetryPolicy.no_retry() constructor"""
+        """Duplicates RetryPolicy.no_retry() constructor"""
         super().__init__(max_tries=1, delay=5, delay_max=5, retry_mode=RetryMode.Fixed)
 
 

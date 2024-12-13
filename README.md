@@ -246,7 +246,8 @@ from boilermaker import retries
 
 async def a_background_task(state, param: str):
     if param == "throwing":
-        # This will retry using the set when *scheduling* the task (see below)
+        # This will retry using the RetryPolicy set
+        # when *scheduling* the task (see below)
         raise retries.RetryException("We are thrown")
     return "OK"
 
