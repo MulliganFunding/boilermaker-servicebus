@@ -4,6 +4,7 @@ import random
 
 from pydantic import BaseModel, field_validator
 
+DEFAULT_MAX_TRIES = 5
 MAX_REASONABLE_RETRIES = 100
 MAX_BACKOFF_SECONDS = 3600  # an hour
 
@@ -21,7 +22,7 @@ class RetryMode(enum.IntEnum):
 # Default RetryPolicy is try up to 5 times waiting 60s each time
 class RetryPolicy(BaseModel):
     # Capped at this value
-    max_tries: int = MAX_REASONABLE_RETRIES
+    max_tries: int = DEFAULT_MAX_TRIES
     # Seconds
     delay: int = 0
     # Max seconds
