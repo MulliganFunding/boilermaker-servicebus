@@ -1,5 +1,6 @@
 import logging
 
+from .retries import RetryException, RetryExceptionDefaultExponential
 from .task import Task
 
 logger = logging.getLogger(__name__)
@@ -16,3 +17,16 @@ async def debug_task(state):
 
 STATIC_DEBUG_TASK = Task.default(TASK_NAME, acks_late=False)
 STATIC_DEBUG_TASK.payload = {"args": [], "kwargs": {}}
+
+
+async def debug_task_retry_policy(
+    state, use_default: bool, msg: str = "RETRY TEST", max_tries=5, delay=30, delay_max=600
+):
+    """
+    This task does nothing.
+    """
+    if use_default:
+        raise RetryException(msg)
+    raise RetryExceptionDefaultExponential(
+        msg, max_tries=max_tries, delay=delay, delay_max=delay_max
+    )
