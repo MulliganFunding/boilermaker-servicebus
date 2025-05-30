@@ -28,6 +28,10 @@ jobs:
       - name: Set up uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+            ssh-private-key: ${{ secrets.CIBOT_LIBRARIES_SSH_READ_PRIVATE_KEY }}
+
       - name: Check out repository code
         uses: actions/checkout@v4
 
