@@ -15,10 +15,11 @@ pip install "boilermaker-servicebus"
 
 The `Boilermaker` application object requires some state (which will get sent to all handlers as the first argument upon invocation) and an authenticated ServiceBus client.
 
-A task handler for `Boilermaker` is any async function which takes as its first argument application state and which has been registered:
+A task handler for `Boilermaker` is any async function which takes as its first argument some application state (any Python object), and which has been registered:
 
 ```python
 # This is a background task that we'll register
+# `state` can be anything: we add this to our Boilermaker app
 async def background_task1(state, somearg, somekwarg=True):
     """`state` must be first argument."""
     await state.data.get("key")
