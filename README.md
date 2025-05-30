@@ -69,8 +69,10 @@ conf = Config(
 # We create a service bus Sender client
 service_bus_client = AzureServiceBus.from_config(conf)
 
+# Here, we'll create an arbitrary state payload for every task to receive.
+state = App({"key": "value"})
 # Next we'll create a worker and register our task
-worker = Boilermaker(App({"key": "value"}), service_bus_client=service_bus_client)
+worker = Boilermaker(state, service_bus_client=service_bus_client)
 worker.register_async(background_task1, policy=retries.RetryPolicy.default())
 
 

@@ -198,7 +198,7 @@ class Boilermaker:
         See `AzureServiceBus` for details.
         """
         async with create_task_group() as tg:
-            async with self.service_bus_client.get_receiver() as receiver:
+            async with self.service_bus_client.get_receiver_async() as receiver:
                 # Handle SIGTERM: when found, agbandon message
                 tg.start_soon(self.signal_handler, receiver, tg.cancel_scope)
 
