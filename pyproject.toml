@@ -29,7 +29,7 @@ dev-dependencies = [
     "ruff>=0.11.12",
 ]
 [tool.uv.sources]
-aio-azure-clients-toolbox = {git = "ssh://git@github.com/MulliganFunding/aio-azure-clients-toolbox.git", branch="https-aiohttp-connection-close-error" }
+aio-azure-clients-toolbox = {git = "https://git@github.com/MulliganFunding/aio-azure-clients-toolbox.git", branch="https-aiohttp-connection-close-error" }
 
 [build-system]
 requires = ["setuptools", "versioningit"]

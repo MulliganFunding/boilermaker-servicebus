@@ -5,7 +5,7 @@ requires-python = ">=3.11"
 [[package]]
 name = "aio-azure-clients-toolbox"
 version = "0.4.0"
-source = { git = "ssh://git@github.com/MulliganFunding/aio-azure-clients-toolbox.git?branch=https-aiohttp-connection-close-error#dbb78cb62b11e6474e96494deb63d422c11314b4" }
+source = { git = "https://github.com/MulliganFunding/aio-azure-clients-toolbox.git?branch=https-aiohttp-connection-close-error#08e7cb218df094f0b227a74fe75033aafe2589ab" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -282,7 +282,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aio-azure-clients-toolbox", git = "ssh://git@github.com/MulliganFunding/aio-azure-clients-toolbox.git?branch=https-aiohttp-connection-close-error" },
+    { name = "aio-azure-clients-toolbox", git = "https://github.com/MulliganFunding/aio-azure-clients-toolbox.git?branch=https-aiohttp-connection-close-error" },
     { name = "anyio", specifier = ">=4.7.0" },
     { name = "azure-core-tracing-opentelemetry", specifier = ">=1.0.0b11" },
     { name = "azure-identity", specifier = ">=1.20.0" },
