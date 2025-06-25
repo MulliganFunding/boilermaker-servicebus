@@ -31,7 +31,10 @@ from pydantic import ValidationError
 from . import sample, tracing
 from .failure import TaskFailureResult, TaskFailureResultType
 from .retries import RetryException, RetryPolicy
+from .service_bus import AzureServiceBus as LocalAzureServiceBus
 from .task import Task
+from .workflow import Chain, Chord, Group, Workflow, WorkflowBuilder, workflow
+from .workflow_executor import WorkflowExecutor
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
@@ -54,7 +57,7 @@ class Boilermaker:
     def __init__(
         self,
         state: typing.Any,
-        service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender | None = None,
+        service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender | LocalAzureServiceBus | None = None,
         enable_opentelemetry=False,
     ):
         # This is likely going to be circular, the app referencing
@@ -66,6 +69,9 @@ class Boilermaker:
         self.function_registry: dict[str, typing.Any] = {}
         self.task_registry: dict[str, Task] = {}
         self._current_message: ServiceBusReceivedMessage | None = None
+
+        # Workflow support
+        self.workflow_executor: WorkflowExecutor | None = None
 
     def task(self, **options):
         """A task decorator can mark a task as backgroundable"""
@@ -374,3 +380,55 @@ class Boilermaker:
         else:
             await self.complete_message(msg, receiver)
         return None
+
+    # Workflow support methods
+    def enable_workflows(self) -> WorkflowExecutor:
+        """Enable workflow support and return the workflow executor"""
+        if self.workflow_executor is None:
+            from .workflow_executor import WorkflowExecutor
+            self.workflow_executor = WorkflowExecutor(self)
+        return self.workflow_executor
+
+    def chain(self, *tasks: Task) -> Chain:
+        """Create a chain of tasks that execute sequentially"""
+        return Chain(list(tasks))
+
+    def chord(self, header_tasks: list[Task], callback_task: Task) -> Chord:
+        """Create a chord pattern: parallel tasks followed by a callback"""
+        return Chord(header_tasks, callback_task)
+
+    def group(self, *tasks: Task) -> Group:
+        """Create a group of tasks that execute in parallel"""
+        return Group(list(tasks))
+
+    def workflow(self) -> "WorkflowBuilder":
+        """Create a workflow builder for complex DAGs"""
+        return workflow()
+
+    async def execute_chain(self, *tasks: Task) -> typing.Any:
+        """Execute a chain of tasks sequentially"""
+        if self.workflow_executor is None:
+            self.enable_workflows()
+        assert self.workflow_executor is not None
+        return await self.workflow_executor.execute_chain(list(tasks))
+
+    async def execute_chord(self, header_tasks: list[Task], callback_task: Task) -> typing.Any:
+        """Execute a chord pattern"""
+        if self.workflow_executor is None:
+            self.enable_workflows()
+        assert self.workflow_executor is not None
+        return await self.workflow_executor.execute_chord(header_tasks, callback_task)
+
+    async def execute_group(self, *tasks: Task) -> list[typing.Any]:
+        """Execute a group of tasks in parallel"""
+        if self.workflow_executor is None:
+            self.enable_workflows()
+        assert self.workflow_executor is not None
+        return await self.workflow_executor.execute_group(list(tasks))
+
+    async def execute_workflow(self, workflow: Workflow) -> typing.Any:
+        """Execute a complex workflow"""
+        if self.workflow_executor is None:
+            self.enable_workflows()
+        assert self.workflow_executor is not None
+        return await self.workflow_executor.execute_workflow(workflow)
