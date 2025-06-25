@@ -54,7 +54,7 @@ class Boilermaker:
     def __init__(
         self,
         state: typing.Any,
-        service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender = None,
+        service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender | None = None,
         enable_opentelemetry=False,
     ):
         # This is likely going to be circular, the app referencing
@@ -141,6 +141,12 @@ class Boilermaker:
         publish_attempts: int = 1,
     ):
         """Turn the task into JSON and publish to Service Bus"""
+        if self.service_bus_client is None:
+            raise BoilermakerAppException(
+                "Cannot publish task: service_bus_client is not configured",
+                [],
+            )
+
         encountered_errors = []
         for _i in range(publish_attempts):
             try:
@@ -197,6 +203,12 @@ class Boilermaker:
 
         See `AzureServiceBus` for details.
         """
+        if self.service_bus_client is None:
+            raise BoilermakerAppException(
+                "Cannot run worker: service_bus_client is not configured",
+                [],
+            )
+
         async with create_task_group() as tg:
             async with self.service_bus_client.get_receiver() as receiver:
                 # Handle SIGTERM: when found, agbandon message
