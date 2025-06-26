@@ -7,14 +7,14 @@ of complex workflows using the existing task infrastructure.
 import asyncio
 import copy
 import logging
-import time
-import typing
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, TYPE_CHECKING
 
-from .app import Boilermaker
+from . import retries
 from .task import Task
 from .workflow import Workflow, WorkflowNode, WorkflowNodeType
-from . import retries
+
+if TYPE_CHECKING:
+    from .app import Boilermaker
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +25,11 @@ class WorkflowExecutor:
     and managing dependencies.
     """
 
-    def __init__(self, boilermaker: Boilermaker):
+    def __init__(self, boilermaker: "Boilermaker"):
         self.boilermaker = boilermaker
-        self.active_workflows: Dict[str, Workflow] = {}
-        self.workflow_results: Dict[str, Any] = {}
-        self.workflow_errors: Dict[str, Exception] = {}
+        self.active_workflows: dict[str, Workflow] = {}
+        self.workflow_results: dict[str, Any] = {}
+        self.workflow_errors: dict[str, Exception] = {}
 
     async def execute_workflow(self, workflow: Workflow) -> Any:
         """
@@ -131,7 +131,7 @@ class WorkflowExecutor:
         result = await self.boilermaker.task_handler(task, None)
         return result
 
-    def _get_parent_results(self, workflow: Workflow, node_id: str) -> Dict[str, Any]:
+    def _get_parent_results(self, workflow: Workflow, node_id: str) -> dict[str, Any]:
         """Get results from parent nodes"""
         parent_results = {}
         node = workflow.nodes[node_id]
@@ -142,7 +142,7 @@ class WorkflowExecutor:
 
         return parent_results
 
-    async def execute_chain(self, tasks: List[Task]) -> Any:
+    async def execute_chain(self, tasks: list[Task]) -> Any:
         """Execute a chain of tasks sequentially"""
         from .workflow import Chain
 
@@ -150,7 +150,7 @@ class WorkflowExecutor:
         workflow = chain.build_workflow()
         return await self.execute_workflow(workflow)
 
-    async def execute_chord(self, header_tasks: List[Task], callback_task: Task) -> Any:
+    async def execute_chord(self, header_tasks: list[Task], callback_task: Task) -> Any:
         """Execute a chord pattern"""
         from .workflow import Chord
 
@@ -158,13 +158,13 @@ class WorkflowExecutor:
         workflow = chord.build_workflow()
         return await self.execute_workflow(workflow)
 
-    async def execute_group(self, tasks: List[Task]) -> List[Any]:
+    async def execute_group(self, tasks: list[Task]) -> list[Any]:
         """Execute a group of tasks in parallel"""
         from .workflow import Group
 
         group = Group(tasks)
         workflow = group.build_workflow()
-        result = await self.execute_workflow(workflow)
+        await self.execute_workflow(workflow)
 
         # For groups, we need to collect all results
         results = []
@@ -185,7 +185,7 @@ class WorkflowTaskHandler:
     def __init__(self, executor: WorkflowExecutor):
         self.executor = executor
 
-    async def handle_workflow_start(self, state: Any, workflow_data: Dict[str, Any]) -> Any:
+    async def handle_workflow_start(self, state: Any, workflow_data: dict[str, Any]) -> Any:
         """Handle starting a workflow"""
         # This would need to reconstruct the workflow from the data
         # For now, this is a placeholder
@@ -194,7 +194,7 @@ class WorkflowTaskHandler:
         # Implementation would depend on how workflows are serialized
         return {"status": "started", "workflow_id": workflow_id}
 
-    async def handle_workflow_complete(self, state: Any, workflow_data: Dict[str, Any]) -> Any:
+    async def handle_workflow_complete(self, state: Any, workflow_data: dict[str, Any]) -> Any:
         """Handle workflow completion"""
         workflow_id = workflow_data.get("workflow_id")
         result = workflow_data.get("result")
@@ -203,7 +203,7 @@ class WorkflowTaskHandler:
 
 
 # Extension methods for Boilermaker
-def add_workflow_support(boilermaker: Boilermaker) -> WorkflowExecutor:
+def add_workflow_support(boilermaker: "Boilermaker") -> WorkflowExecutor:
     """
     Add workflow support to a Boilermaker instance
 

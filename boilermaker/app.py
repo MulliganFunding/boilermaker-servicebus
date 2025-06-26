@@ -33,7 +33,7 @@ from .failure import TaskFailureResult, TaskFailureResultType
 from .retries import RetryException, RetryPolicy
 from .service_bus import AzureServiceBus as LocalAzureServiceBus
 from .task import Task
-from .workflow import Chain, Chord, Group, Workflow, WorkflowBuilder, workflow
+from .workflow import Chain, Chord, Group, Workflow, workflow, WorkflowBuilder
 from .workflow_executor import WorkflowExecutor
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
@@ -57,7 +57,9 @@ class Boilermaker:
     def __init__(
         self,
         state: typing.Any,
-        service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender | LocalAzureServiceBus | None = None,
+        service_bus_client: (
+            AzureServiceBus | ManagedAzureServiceBusSender | LocalAzureServiceBus | None
+        ) = None,
         enable_opentelemetry=False,
     ):
         # This is likely going to be circular, the app referencing

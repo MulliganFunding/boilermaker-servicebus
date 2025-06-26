@@ -4,12 +4,9 @@ Workflow abstractions for DAG-like task execution
 This module provides higher-level abstractions for building complex workflows
 including chains, chords, and arbitrary DAGs.
 """
-import asyncio
-import copy
-import typing
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any
 
 from .task import Task
 
@@ -27,14 +24,14 @@ class WorkflowNode:
     """Represents a node in a workflow DAG"""
     id: str
     node_type: WorkflowNodeType
-    task: Optional[Task] = None
-    children: List[str] = field(default_factory=list)
-    parents: List[str] = field(default_factory=list)
-    dependencies: Set[str] = field(default_factory=set)
+    task: Task | None = None
+    children: list[str] = field(default_factory=list)
+    parents: list[str] = field(default_factory=list)
+    dependencies: set[str] = field(default_factory=set)
     completed: bool = False
     failed: bool = False
     result: Any = None
-    error: Optional[Exception] = None
+    error: Exception | None = None
 
 
 class Workflow:
@@ -47,14 +44,14 @@ class Workflow:
 
     def __init__(self, workflow_id: str):
         self.workflow_id = workflow_id
-        self.nodes: Dict[str, WorkflowNode] = {}
-        self.execution_order: List[str] = []
-        self.completed_nodes: Set[str] = set()
-        self.failed_nodes: Set[str] = set()
-        self.results: Dict[str, Any] = {}
-        self.errors: Dict[str, Exception] = {}
+        self.nodes: dict[str, WorkflowNode] = {}
+        self.execution_order: list[str] = []
+        self.completed_nodes: set[str] = set()
+        self.failed_nodes: set[str] = set()
+        self.results: dict[str, Any] = {}
+        self.errors: dict[str, Exception] = {}
 
-    def add_node(self, node_id: str, node_type: WorkflowNodeType, task: Optional[Task] = None) -> "Workflow":
+    def add_node(self, node_id: str, node_type: WorkflowNodeType, task: Task | None = None) -> "Workflow":
         """Add a node to the workflow"""
         if node_id in self.nodes:
             raise ValueError(f"Node {node_id} already exists in workflow")
@@ -76,7 +73,7 @@ class Workflow:
         self.nodes[to_node].dependencies.add(from_node)
         return self
 
-    def _calculate_execution_order(self) -> List[str]:
+    def _calculate_execution_order(self) -> list[str]:
         """Calculate topological sort for execution order"""
         # Kahn's algorithm for topological sorting
         in_degree = {node_id: len(node.dependencies) for node_id, node in self.nodes.items()}
@@ -97,7 +94,7 @@ class Workflow:
 
         return order
 
-    def get_ready_nodes(self) -> List[str]:
+    def get_ready_nodes(self) -> list[str]:
         """Get nodes that are ready to execute (all dependencies satisfied)"""
         ready = []
         for node_id in self.nodes:
@@ -150,7 +147,7 @@ class Chain:
     A -> B -> C -> D
     """
 
-    def __init__(self, tasks: List[Task]):
+    def __init__(self, tasks: list[Task]):
         self.tasks = tasks
         self.workflow_id = f"chain_{id(self)}"
 
@@ -178,7 +175,7 @@ class Chord:
     A, B, C -> D (where A, B, C run in parallel, then D runs)
     """
 
-    def __init__(self, header_tasks: List[Task], callback_task: Task):
+    def __init__(self, header_tasks: list[Task], callback_task: Task):
         self.header_tasks = header_tasks
         self.callback_task = callback_task
         self.workflow_id = f"chord_{id(self)}"
@@ -213,7 +210,7 @@ class Group:
     A, B, C (all run in parallel)
     """
 
-    def __init__(self, tasks: List[Task]):
+    def __init__(self, tasks: list[Task]):
         self.tasks = tasks
         self.workflow_id = f"group_{id(self)}"
 
@@ -239,7 +236,7 @@ class WorkflowBuilder:
         self.workflow = Workflow(f"workflow_{id(self)}")
         self.node_counter = 0
 
-    def task(self, task: Task, node_id: Optional[str] = None) -> str:
+    def task(self, task: Task, node_id: str | None = None) -> str:
         """Add a task node"""
         if node_id is None:
             node_id = f"task_{self.node_counter}"
@@ -254,9 +251,9 @@ class WorkflowBuilder:
             self.workflow.add_dependency(dep_node, dependent_node)
         return self
 
-    def chain(self, *tasks: Task) -> List[str]:
+    def chain(self, *tasks: Task) -> list[str]:
         """Add a chain of tasks"""
-        node_ids = []
+        node_ids: list[str] = []
         for task in tasks:
             node_id = self.task(task)
             if node_ids:
@@ -264,11 +261,11 @@ class WorkflowBuilder:
             node_ids.append(node_id)
         return node_ids
 
-    def parallel(self, *tasks: Task) -> List[str]:
+    def parallel(self, *tasks: Task) -> list[str]:
         """Add tasks that run in parallel"""
         return [self.task(task) for task in tasks]
 
-    def chord(self, header_tasks: List[Task], callback_task: Task) -> List[str]:
+    def chord(self, header_tasks: list[Task], callback_task: Task) -> list[str]:
         """Add a chord pattern"""
         header_ids = self.parallel(*header_tasks)
         callback_id = self.task(callback_task)
@@ -287,7 +284,7 @@ def chain(*tasks: Task) -> Chain:
     return Chain(list(tasks))
 
 
-def chord(header_tasks: List[Task], callback_task: Task) -> Chord:
+def chord(header_tasks: list[Task], callback_task: Task) -> Chord:
     """Create a chord pattern"""
     return Chord(header_tasks, callback_task)
 
