@@ -1,12 +1,16 @@
 import datetime
 import typing
 
+import uuid_utils as uuid
 from pydantic import BaseModel
 
 from . import retries
 
 
 class Task(BaseModel):
+    # Unique identifier for this task: UUID7 for timestamp ordered identifiers.
+    # We include a default for users upgrading previous versions where this key is missing.
+    task_id: str = ""
     # Whether we should dead-letter a failing message
     should_dead_letter: bool = True
     # At-most-once vs at-least-once (default)
@@ -36,6 +40,7 @@ class Task(BaseModel):
         if "policy" in kwargs:
             policy = kwargs.pop("policy")
         return cls(
+            task_id=str(uuid.uuid7()),
             attempts=attempts,
             function_name=function_name,
             policy=policy,
