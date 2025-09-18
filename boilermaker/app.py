@@ -230,7 +230,6 @@ class Boilermaker:
                 tg.start_soon(self.signal_handler, receiver, tg.cancel_scope)
 
                 async for msg in receiver:
-                    print("Message received", msg.sequence_number)
                     # This separate method is easier to test
                     # and easier to early-return from in case of skip or fail msg
                     async with tracing.start_span_from_parent_event_async(
