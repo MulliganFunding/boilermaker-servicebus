@@ -161,6 +161,30 @@ class Boilermaker:
             task, delay=delay, publish_attempts=publish_attempts
         )
 
+    def chain(self, *tasks: Task, on_failure: Task | None = None) -> Task:
+        """
+        Chain tasks together so that each task runs after the previous one
+        completes successfully.
+
+        The `on_failure` task (if provided) will be set as the
+        on_failure callback for *all* tasks in the chain.
+
+        :param tasks: The tasks to chain together
+        :returns: The first task in the chain.
+        """
+        if len(tasks) < 2:
+            raise ValueError("At least two tasks are required to form a chain")
+
+        # Maintain pointer to the head of the chain
+        task1 = tasks[0]
+        task1.on_failure = on_failure
+        for t1, t2 in itertools.pairwise(tasks):
+            t1.on_success = t2
+            # Set on_failure for all tasks if provided (None is fine here)
+            t2.on_failure = on_failure
+
+        return task1
+
     @tracer.start_as_current_span("boilermaker.publish-task")
     async def publish_task(
         self,
@@ -199,27 +223,6 @@ class Boilermaker:
                 "Error encountered while publishing task to service bus",
                 encountered_errors,
             )
-
-    def chain(self, *tasks: Task, on_failure: Task | None = None) -> Task:
-        """
-        Chain tasks together so that each task runs after the previous one
-        completes successfully.
-
-        :param tasks: The tasks to chain together
-        :returns: The first task in the chain.
-        """
-        if len(tasks) < 2:
-            raise ValueError("At least two tasks are required to form a chain")
-
-        # Maintain pointer to the head of the chain
-        task1 = tasks[0]
-        task1.on_failure = on_failure
-        for t1, t2 in itertools.pairwise(tasks):
-            t1.on_success = t2
-            # Set on_failure for all tasks if provided (None is fine here)
-            t2.on_failure = on_failure
-
-        return task1
 
     # ~~ ** Signal handling, receiver run, and message processing methods ** ~~
     async def signal_handler(self, receiver: ServiceBusReceiver, scope: CancelScope):

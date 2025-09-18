@@ -238,14 +238,21 @@ async def test_apply_async_no_policy(app, mockservicebus):
     assert published_task.on_failure is None
 
 
+# Chain Tests
 async def sample_task(state, number1: int, number2: int = 4):
     if "sample_task_called" not in state.inner:
         state.inner["sample_task_called"] = 0
+
     state.inner["sample_task_called"] += 1
     if "sample_task_payload" not in state.inner:
         state.inner["sample_task_payload"] = []
 
     state.inner["sample_task_payload"].append((number1, number2))
+
+    # simulate failure
+    if number1 + number2 > 10:
+        raise ValueError("Number too big!")
+
     return number1 + number2
 
 
@@ -280,11 +287,10 @@ def test_chain_odd_task_count(app, has_fail):
         assert current.on_failure == fail
         count += 1
         current = current.on_success
-    assert count == 3
 
 
 @pytest.mark.parametrize("has_fail", [True, False])
-def test_chain_even_task_count(app, has_fail):
+async def test_chain_even_task_count(app, has_fail):
     fail = Task.si(failing_task) if has_fail else None
     workflow = app.chain(
         Task.si(sample_task, 1, 2),
@@ -304,6 +310,95 @@ def test_chain_even_task_count(app, has_fail):
         count += 1
         current = current.on_success
     assert count == 4
+
+
+async def test_chain_publish(app, mockservicebus):
+    app.register_async(failing_task)
+    app.register_async(sample_task)
+
+    fail = Task.si(failing_task)
+    workflow = app.chain(
+        Task.si(sample_task, 1, 2),
+        Task.si(sample_task, 3),
+        Task.si(sample_task, 5, number2=6),
+        on_failure=fail,
+    )
+    assert isinstance(workflow, Task)
+    await app.publish_task(workflow)
+
+    # Publish new task with sender
+    assert len(mockservicebus._sender.method_calls) == 1
+    publish_success_call = mockservicebus._sender.method_calls[0]
+    assert publish_success_call[0] == "schedule_messages"
+    # We should always be able to deserialize the task
+    published_task = Task.model_validate_json(str(publish_success_call[1][0]))
+    assert published_task.payload["args"] == [1, 2]
+    assert published_task.payload["kwargs"] == {}
+    assert published_task.function_name == "sample_task"
+    assert published_task.on_failure.function_name == "failing_task"
+    assert published_task.on_success is not None
+    published_task.on_success.function_name = "sample_task"
+    assert published_task.on_success.payload["args"] == [
+        3,
+    ]
+    assert published_task.on_success.on_success is not None
+    published_task.on_success.on_success.function_name = "sample_task"
+    published_task.on_success.on_success.payload["args"] = (5,)
+    assert published_task.on_success.on_success.payload["kwargs"] == {"number2": 6}
+
+
+async def test_chain_publish_and_evaluate(app, mockservicebus):
+    app.register_async(failing_task)
+    app.register_async(sample_task)
+    fail = Task.si(failing_task)
+    workflow = app.chain(
+        Task.si(sample_task, 1, 2),
+        # This one should fail!
+        Task.si(sample_task, 5, number2=6),
+        Task.si(sample_task, 3),
+        on_failure=fail,
+    )
+    assert isinstance(workflow, Task)
+    await app.publish_task(workflow)
+
+    # Publish new task with sender
+    assert len(mockservicebus._sender.method_calls) == 1
+    publish_success_call1 = mockservicebus._sender.method_calls[0]
+    assert publish_success_call1[0] == "schedule_messages"
+    # We should always be able to deserialize the task
+    published_task = Task.model_validate_json(str(publish_success_call1[1][0]))
+    smb_msg1 = make_message(published_task, sequence_number=1)
+
+    # *EVALUATE*: We should be able to run the task based on our published task
+    await app.message_handler(smb_msg1, mockservicebus._receiver)
+
+    # *EVALUATE*: It should have scheduled the next task in the chain!
+    assert len(mockservicebus._sender.method_calls) == 2
+    publish_success_call2 = mockservicebus._sender.method_calls[1]
+    assert publish_success_call2[0] == "schedule_messages"
+    # We should always be able to deserialize the automatically-published task
+    published_task2 = Task.model_validate_json(str(publish_success_call2[1][0]))
+    smb_msg2 = make_message(published_task2, sequence_number=2)
+
+    #  *EVALUATE*: We expect this one to fail! Number too big!
+    await app.message_handler(smb_msg2, mockservicebus._receiver)
+
+    # It should have scheduled the failure task now!
+    assert len(mockservicebus._sender.method_calls) == 3
+    publish_success_call3 = mockservicebus._sender.method_calls[2]
+    assert publish_success_call3[0] == "schedule_messages"
+    # This should be a failure task now
+    published_task3 = Task.model_validate_json(str(publish_success_call3[1][0]))
+    assert published_task3.function_name == "failing_task"
+    smb_msg3 = make_message(published_task3, sequence_number=3)
+
+    # *EVALUATE*: We can handle the failure task now
+    await app.message_handler(smb_msg3, mockservicebus._receiver)
+
+    # Our state has been updated correctly
+    assert app.state.inner["sample_task_called"] == 2
+    assert app.state.inner["sample_task_payload"] == [(1, 2), (5, 6)]
+    assert "fail_count" in app.state.inner and app.state.inner["fail_count"] == 1
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #

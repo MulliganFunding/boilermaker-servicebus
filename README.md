@@ -49,13 +49,12 @@ class App:
 
 
 # This is a background task that we'll register
-async def background_task1(state, somearg, somekwarg=True):
+async def background_task1(state: App, somearg, somekwarg=True):
     """`state` must be first argument."""
     await state.data.get("key")
     print(state)
     print(somearg)
     print(somekwarg)
-
 
 
 service_bus_namespace_url = os.environ["SERVICE_BUS_NAMESPACE_URL"]
@@ -99,7 +98,7 @@ If we look in the logs for our other process, we should be able to see this task
 ```
 
 
-## Callbacks
+## Callbacks and Chains
 
 It is possible to register callbacks for tasks, which can run on success or failure. To schedule a task with callbacks, we have to create a task object and then set a success and/or failure callback. Finally, instead of `apply_async` we have to call `publish_task`:
 
@@ -154,6 +153,23 @@ async def publish_task():
     await asyncio.sleep(4)
     await worker.publish_task(sad_task)
 ```
+
+### Chains
+
+It's also possible to `chain` tasks together, like this:
+
+```python
+async def publish_chain():
+    fail = Task.si(sad_path)
+    workflow = app.chain(
+            Task.si(a_background_task, "success"),
+            Task.si(happy_path),
+            Task.si(a_background_task, "fail"),
+            on_failure=fail,
+        )
+    await app.publish_task(workflow)
+```
+
 
 Here are examples of log out from running the above:
 
