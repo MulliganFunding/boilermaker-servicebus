@@ -1,9 +1,7 @@
 # Boilermaker
 
-This project is an extremely-lightweight task-runner exclusively for __async Python__ and Azure Service Bus Queues. If you need a fully fledged task-runner, you should consider one of these other projects instead:
+This project is an extremely-lightweight task-runner exclusively for __async Python__ and Azure Service Bus Queues. If you need a fully fledged task-runner which allows connecting to different backends, you should consider [Celery](https://github.com/celery/celery/tree/main) instead.
 
-- [Celery](https://github.com/celery/celery/tree/main)
--
 
 ## To Install
 
@@ -141,7 +139,7 @@ sad_task = worker.create_task(a_background_task, "uh oh!")
 # This callback should get scheduled on success
 happy_task >= worker.create_task(happy_path)
 # This callback will get scheduled on failure
-happy_task.on_failure >> worker.create_task(sad_path)
+happy_task >> worker.create_task(sad_path)
 
 # It's also possible to assign tasks directly to `on_success` and `on_failure`.
 # This callback should not get scheduled
