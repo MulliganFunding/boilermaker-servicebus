@@ -136,9 +136,7 @@ happy_task = worker.create_task(a_background_task, "success")
 sad_task = worker.create_task(a_background_task, "uh oh!")
 
 # This callback should get scheduled on success
-happy_task >= worker.create_task(happy_path)
-# This callback will get scheduled on failure
-happy_task >> worker.create_task(sad_path)
+happy_task >> worker.create_task(happy_path)
 
 # It's also possible to assign tasks directly to `on_success` and `on_failure`.
 # This callback should not get scheduled

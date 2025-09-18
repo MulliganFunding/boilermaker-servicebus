@@ -2,7 +2,7 @@ import datetime
 import typing
 
 import uuid_utils as uuid
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import retries
 
@@ -12,7 +12,7 @@ DEFAULT_RETRY_ATTEMPTS = 1
 class Task(BaseModel):
     # Unique identifier for this task: UUID7 for timestamp ordered identifiers.
     # We include a default for users upgrading previous versions where this key is missing.
-    task_id: str = ""
+    task_id: str = Field(default_factory=lambda: str(uuid.uuid7()))
     # Whether we should dead-letter a failing message
     should_dead_letter: bool = True
     # At-most-once vs at-least-once (default)
@@ -35,6 +35,9 @@ class Task(BaseModel):
     on_success: typing.Optional["Task"] = None
     on_failure: typing.Optional["Task"] = None
 
+    # Required for the uuid.UUID type annotation
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     @classmethod
     def default(cls, function_name: str, **kwargs):
         attempts = retries.RetryAttempts.default()
@@ -42,7 +45,6 @@ class Task(BaseModel):
         if "policy" in kwargs:
             policy = kwargs.pop("policy")
         return cls(
-            task_id=str(uuid.uuid7()),
             attempts=attempts,
             function_name=function_name,
             policy=policy,
@@ -85,7 +87,7 @@ class Task(BaseModel):
         """
         Adds a success callback (`other`) to this task with << operator
 
-        Returns other to allow chaining.
+        Returns self to allow chaining.
 
         In other words:
 
@@ -117,12 +119,10 @@ class Task(BaseModel):
         in case we'd like to also have callbacks or other properties set on the task
         before sending it to the worker for execution.
         """
-        task_id = str(uuid.uuid7())
         attempts = retries.RetryAttempts.default()
         policy = policy or retries.RetryPolicy.default()
 
         return cls(
-            task_id=task_id,
             should_dead_letter=should_dead_letter,
             acks_late=acks_late,
             attempts=attempts,
