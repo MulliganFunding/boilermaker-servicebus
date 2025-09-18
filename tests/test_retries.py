@@ -46,6 +46,13 @@ def test_policy_linear(attempts, linear):
 
 
 @pytest.mark.parametrize("attempts", ATTEMPTS)
+def test_policy_no_retry(attempts):
+    policy = retries.RetryPolicy.no_retry()
+    assert policy.get_delay_interval(attempts) == policy.delay
+    assert policy.max_tries == 1
+
+
+@pytest.mark.parametrize("attempts", ATTEMPTS)
 def test_policy_exponential(attempts, exponential):
     assert exponential.get_delay_interval(attempts) <= exponential.delay_max
 

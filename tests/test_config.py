@@ -32,6 +32,12 @@ def test_env_vars(mock_az_cred):
     conf.az_credential()
     conf.azure_credential_include_msi = True
     conf.az_credential()
+    # test reuse of existing credential
+    cred = object()
+    conf.service_bus_credential = cred
+    assert conf.az_credential() is cred
+
+    # restore old env vars
     if ns_url := old_environ.get("SERVICE_BUS_NAMESPACE_URL"):
         os.environ["SERVICE_BUS_NAMESPACE_URL"] = ns_url
     else:

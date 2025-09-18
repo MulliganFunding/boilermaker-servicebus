@@ -44,6 +44,14 @@ addopts = "--cov-report=term-missing:skip-covered --cov=boilermaker --strict-con
 testpaths = ["tests"]
 filterwarnings = ["error"]
 
+[tool.coverage.report]
+exclude_also = ["def __repr__"]
+
+[tool.coverage.run]
+omit = [
+    # omit tracing.py and run
+    "*/tracing.py",
+]
 
 [tool.ruff]
 src = ["boilermaker", "tests"]
