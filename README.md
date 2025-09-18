@@ -134,13 +134,16 @@ worker.register_async(sad_path, policy=retries.NoRetry())
 
 # Now we can create a happy task and add callbacks
 happy_task = worker.create_task(a_background_task, "success")
-# This callback should get scheduled
-happy_task.on_success = worker.create_task(happy_path)
-# This callback will not
-happy_task.on_failure = worker.create_task(sad_path)
 
 # For good measure, we'll create a sad task too
 sad_task = worker.create_task(a_background_task, "uh oh!")
+
+# This callback should get scheduled on success
+happy_task >= worker.create_task(happy_path)
+# This callback will get scheduled on failure
+happy_task.on_failure >> worker.create_task(sad_path)
+
+# It's also possible to assign tasks directly to `on_success` and `on_failure`.
 # This callback should not get scheduled
 sad_task.on_success = worker.create_task(happy_path)
 # This callback should get scheduled

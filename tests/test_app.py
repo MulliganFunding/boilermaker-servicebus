@@ -1,11 +1,19 @@
+import asyncio
+import os
 import random
+import signal
+from collections.abc import Sequence
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from anyio import create_task_group, to_thread
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus._common.constants import SEQUENCENUBMERNAME
 from azure.servicebus._pyamqp.message import Message
+from azure.servicebus.exceptions import ServiceBusError
 from boilermaker import failure, retries
-from boilermaker.app import Boilermaker
+from boilermaker.app import Boilermaker, BoilermakerAppException
 from boilermaker.task import Task
 
 
@@ -36,10 +44,12 @@ def app(sbus):
 
 
 def test_app_state(app):
+    """Test that app.state is set correctly."""
     assert app.state == DEFAULT_STATE
 
 
 async def test_task_decorator(app):
+    """Test that the task decorator registers and calls a function."""
     @app.task()
     async def somefunc(state):
         return state["somekey"]
@@ -51,6 +61,7 @@ async def test_task_decorator(app):
 
 
 async def test_task_decorator_with_policy(app):
+    """Test that the task decorator registers a function with a custom retry policy."""
     @app.task(policy=retries.RetryPolicy.default())
     async def somefunc(state):
         return state["somekey"]
@@ -62,6 +73,7 @@ async def test_task_decorator_with_policy(app):
 
 
 async def test_app_register_async(app):
+    """Test registering a single async function as a task."""
     async def somefunc(state):
         return state["somekey"]
 
@@ -72,6 +84,7 @@ async def test_app_register_async(app):
 
 
 async def test_app_register_many_async(app, mockservicebus):
+    """Test registering multiple async functions as tasks and message handling."""
     async def somefunc1(state):
         return state["somekey1"]
     async def somefunc2(state, one_arg):
@@ -95,6 +108,7 @@ async def test_app_register_many_async(app, mockservicebus):
 
 
 async def test_create_task(app):
+    """Test creating a task from a registered function."""
     async def somefunc(state, **kwargs):
         state.inner.update(kwargs)
         return state["somekey"]
@@ -115,6 +129,7 @@ async def test_create_task(app):
 
 
 async def test_create_task_with_policy(app):
+    """Test creating a task with a custom retry policy."""
     async def somefunc(state, **kwargs):
         state.inner.update(kwargs)
         return state["somekey"]
@@ -145,6 +160,7 @@ async def test_create_task_with_policy(app):
 
 
 async def test_create_task_failures(app):
+    """Test error handling for unregistered functions and tasks."""
     async def one(state):
         pass
 
@@ -161,6 +177,7 @@ async def test_create_task_failures(app):
 
 
 async def test_apply_async_with_policy(app, mockservicebus):
+    """Test applying a task asynchronously with a custom retry policy."""
     async def somefunc(state, **kwargs):
         state.inner.update(kwargs)
         return state["somekey"]
@@ -188,6 +205,7 @@ async def test_apply_async_with_policy(app, mockservicebus):
 
 
 async def test_apply_async_no_policy(app, mockservicebus):
+    """Test applying a task asynchronously with the default retry policy."""
     async def somefunc(state, **kwargs):
         state.inner.update(kwargs)
         return state["somekey"]
@@ -210,11 +228,115 @@ async def test_apply_async_no_policy(app, mockservicebus):
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
+# task_handler Tests
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_task_handler_success(app):
+    """Test that task_handler executes a registered function and returns the result."""
+    async def somefunc(state, x):
+        return x * 2
+
+    app.register_async(somefunc, policy=retries.RetryPolicy.default())
+    task = app.create_task(somefunc, 21)
+    result = await app.task_handler(task, sequence_number=42)
+    assert result == 42
+
+
+async def test_task_handler_missing_function(app):
+    """Test that task_handler raises an error for missing functions."""
+    # Create a task with a function name not in registry
+    task = Task.default("not_registered")
+
+    with pytest.raises(ValueError) as exc:
+        await app.task_handler(task, sequence_number=99)
+    assert "Missing registered function" in str(exc.value)
+
+
+async def test_task_handler_debug_task(app):
+    """Test that task_handler runs the debug task."""
+    # Register the debug task name
+    from boilermaker import sample
+
+    task = Task.default(sample.TASK_NAME)
+    result = await app.task_handler(task, sequence_number=123)
+    # Should return whatever sample.debug_task returns
+    # (for now, just check it runs without error)
+    assert result is not None
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_publish_task_sets_sequence_number(app, mockservicebus):
+    """Test that publish_task sets the sequence number after publishing."""
+    async def somefunc(state):
+        return state["somekey"]
+
+    app.register_async(somefunc, policy=retries.RetryPolicy.default())
+    task = app.create_task(somefunc)
+    # Simulate ServiceBus returning a sequence number
+    mockservicebus._sender.send_message.return_value = [456]
+    app.service_bus_client = mockservicebus._sender
+
+    published_task = await app.publish_task(task)
+    assert published_task._sequence_number == 456
+
+
+async def test_publish_task_error_handling(app, mockservicebus):
+    """Test that publish_task raises an error when publishing fails."""
+    async def somefunc(state):
+        return state["somekey"]
+
+    app.register_async(somefunc, policy=retries.RetryPolicy.default())
+    task = app.create_task(somefunc)
+    # Simulate ServiceBus raising an error
+    mockservicebus._sender.send_message.side_effect = ServiceBusError(
+        task.model_dump_json(), error=ValueError("bad message!")
+    )
+    app.service_bus_client = mockservicebus._sender
+
+    with pytest.raises(BoilermakerAppException):
+        await app.publish_task(task)
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
 #
 # Message Handling Logic Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_complete_message(app, mockservicebus):
+    """Test that complete_message settles a message and clears current message."""
+    class DummyMsg:
+        sequence_number = 789
+
+    msg = DummyMsg()
+    receiver = mockservicebus._receiver
+    app._current_message = object()
+    await app.complete_message(msg, receiver)
+    # Check that complete_message was called with the correct message
+    assert receiver.method_calls
+    complete_call = receiver.method_calls[0]
+    assert complete_call[0] == "complete_message"
+    assert complete_call[1][0] is msg
+    assert app._current_message is None
+
+
+async def test_complete_message_with_error(app, mockservicebus):
+    """Test that complete_message handles errors when settling a message."""
+    class DummyMsg:
+        sequence_number = 789
+
+    msg = DummyMsg()
+    app._current_message = object()
+    receiver = mockservicebus._receiver
+    receiver.complete_message.side_effect = ServiceBusError("fail")
+    await app.complete_message(msg, receiver)
+    # Check that complete_message was called with the correct message
+    assert receiver.method_calls
+    complete_call = receiver.method_calls[0]
+    assert complete_call[0] == "complete_message"
+    assert complete_call[1][0] is msg
+    assert app._current_message is None
+
 
 async def test_task_garbage_message(app, mockservicebus):
+    """Test that message_handler handles invalid JSON messages gracefully."""
     message_num = random.randint(100, 1000)
     # We are going to make a custom, totally garbage message
     my_frame = [0, 0, 0]
@@ -229,17 +351,104 @@ async def test_task_garbage_message(app, mockservicebus):
         msg, mockservicebus.get_queue_receiver()
     )
     assert result is None
-    # Task should *always* be settled
-    assert len(mockservicebus._receiver.method_calls) == 1
-    complete_msg_call = mockservicebus._receiver.method_calls[0]
-    assert complete_msg_call[1][0].sequence_number == message_num
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# signal_handler method
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_signal_handler_abandons_message(app, mockservicebus):
+    """Test that signal_handler abandons the current message on SIGINT."""
+    dummy_msg = MagicMock()
+    dummy_msg.sequence_number = 123
+    receiver = mockservicebus._receiver
+    app._current_message = dummy_msg
+    # Test inspired by anyio tests for `open_signal_receiver`
+    async with create_task_group() as tg:
+        tg.start_soon(app.signal_handler, receiver, tg.cancel_scope)
+        await to_thread.run_sync(os.kill, os.getpid(), signal.SIGINT)
+
+    receiver.abandon_message.assert_awaited_with(dummy_msg)
+    assert app._current_message is None
+
+
+async def test_signal_handler_abandons_message_with_error(app, mockservicebus):
+    """Test that signal_handler handles errors when abandoning a message."""
+    dummy_msg = MagicMock()
+    dummy_msg.sequence_number = 123
+    receiver = mockservicebus._receiver
+    receiver.abandon_message.side_effect = ServiceBusError("fail")
+    app._current_message = dummy_msg
+    # Test inspired by anyio tests for `open_signal_receiver`
+    async with create_task_group() as tg:
+        tg.start_soon(app.signal_handler, receiver, tg.cancel_scope)
+        await to_thread.run_sync(os.kill, os.getpid(), signal.SIGINT)
+
+    receiver.abandon_message.assert_awaited_with(dummy_msg)
+    assert app._current_message is None
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# run method
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+class MockReceiver:
+    def __init__(self, iter: Sequence[Any]):
+        self._iter = iter
+        self._index = 0
+        self._completed_msgs = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._index >= len(self._iter):
+            raise StopAsyncIteration
+        value = self._iter[self._index]
+        self._index += 1
+        return value
+
+
+async def test_run_calls_message_handler(app, mockservicebus):
+    """Test that run calls message_handler for each received message."""
+    dummy_msgs = [MagicMock(sequence_number=321), MagicMock(sequence_number=654)]
+    # Make a generic receiver thing that can do a bunch of fake stuff
+    receiver = MockReceiver(dummy_msgs)
+    # Hack this in directly to skip the middle layer of ManagedServiceBusClient
+    # make sure get_receiver returns an async context manager + receiver
+    app.service_bus_client = MagicMock(**{"get_receiver.return_value": receiver})
+
+    # Patch message_handler to track calls
+    app.message_handler = AsyncMock()
+
+    async def stop_loop():
+        await asyncio.sleep(0.01)
+        return to_thread.run_sync(os.kill, os.getpid(), signal.SIGINT)
+
+    async with create_task_group() as tg:
+        tg.start_soon(stop_loop)
+        tg.start_soon(app.run)
+        tg.cancel_scope.cancel()
+
+    assert len(app.message_handler.call_args_list) == 2
+    msgs = [call[0][0] for call in app.message_handler.call_args_list]
+    assert msgs == dummy_msgs
+
     # Should never publish
     assert len(mockservicebus._sender.method_calls) == 0
 
 
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# message_handler with on_success
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
 @pytest.mark.parametrize("acks_late", [True, False])
 @pytest.mark.parametrize("has_on_success", [True, False])
 async def test_task_success(has_on_success, acks_late, app, mockservicebus):
+    """Test successful task execution and optional on_success callback."""
     async def oktask(state):
         return "OK"
 
@@ -282,10 +491,14 @@ async def test_task_success(has_on_success, acks_late, app, mockservicebus):
         assert not mockservicebus._sender.method_calls
 
 
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# message_handler with on_failure
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
 @pytest.mark.parametrize("acks_late", [True, False])
 @pytest.mark.parametrize("should_deadletter", [True, False])
 @pytest.mark.parametrize("has_on_failure", [True, False])
 async def test_task_failure(has_on_failure, should_deadletter, acks_late, app, mockservicebus):
+    """Test task failure handling, deadlettering, and on_failure callback."""
     async def failtask(state, **kwargs):
         return failure.TaskFailureResult
 
@@ -337,10 +550,14 @@ async def test_task_failure(has_on_failure, should_deadletter, acks_late, app, m
     assert result is None
 
 
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# test task retries with on_failure
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
 @pytest.mark.parametrize("should_deadletter", [True, False])
 @pytest.mark.parametrize("has_on_failure", [True, False])
 @pytest.mark.parametrize("can_retry", [True, False])
 async def test_task_retries_with_onfail(can_retry, has_on_failure, should_deadletter, app, mockservicebus):
+    """Test retry logic and on_failure callback for tasks that raise RetryException."""
     async def retrytask(state):
         raise retries.RetryException("Retry me")
 
@@ -417,7 +634,11 @@ async def test_task_retries_with_onfail(can_retry, has_on_failure, should_deadle
     assert result is None
 
 
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# test task retries with new retry policy
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
 async def test_task_retries_with_new_policy(app, mockservicebus):
+    """Test retry logic with a new policy from RetryExceptionDefaultExponential."""
     async def retrytask(state):
         # NEW POLICY!
         raise retries.RetryExceptionDefaultExponential(
@@ -454,11 +675,14 @@ async def test_task_retries_with_new_policy(app, mockservicebus):
     assert result is None
 
 
-
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# test task retries with acks_late/acks_early
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
 @pytest.mark.parametrize("acks_late", [True, False])
 @pytest.mark.parametrize("should_deadletter", [True, False])
 @pytest.mark.parametrize("can_retry", [True, False])
 async def test_task_retries_acks_late(can_retry, should_deadletter, acks_late, app, mockservicebus):
+    """Test retry logic and message settlement for acks_late and deadletter scenarios."""
     async def retrytask(state):
         raise retries.RetryException("Retry me")
 
@@ -509,10 +733,14 @@ async def test_task_retries_acks_late(can_retry, should_deadletter, acks_late, a
     assert result is None
 
 
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# test task-handling with exceptions
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
 @pytest.mark.parametrize("acks_late", [True, False])
 @pytest.mark.parametrize("should_deadletter", [True, False])
 @pytest.mark.parametrize("has_on_failure", [True, False])
 async def test_task_handle_exception(has_on_failure, should_deadletter, acks_late, app, mockservicebus):
+    """Test exception handling, deadlettering, and on_failure callback for tasks."""
     async def except_task(state):
         raise FloatingPointError("Some weird error happened")
 

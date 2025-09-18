@@ -22,3 +22,35 @@ def test_get_next_delay():
     assert first_delay <= atask.policy.delay_max
     assert second_delay <= atask.policy.delay_max
     assert second_delay >= first_delay
+
+
+def test_rightwise_bitshift_on_failure():
+    t1 = task.Task.default("func1")
+    t2 = task.Task.default("func2")
+    result = t1 >> t2
+    assert t1.on_failure is t2
+    assert result is t1
+
+
+def test_leftwise_bitshift_on_failure():
+    t1 = task.Task.default("func1")
+    t2 = task.Task.default("func2")
+    result = t1 << t2
+    assert t2.on_failure is t1
+    assert result is t2
+
+
+def test_gte_success_callback():
+    t1 = task.Task.default("func1")
+    t2 = task.Task.default("func2")
+    result = t1 >= t2
+    assert t1.on_success is t2
+    assert result is t2
+
+
+def test_lte_success_callback():
+    t1 = task.Task.default("func1")
+    t2 = task.Task.default("func2")
+    result = t1 <= t2
+    assert t2.on_success is t1
+    assert result is t1
