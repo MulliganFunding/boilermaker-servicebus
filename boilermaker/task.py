@@ -6,6 +6,8 @@ from pydantic import BaseModel
 
 from . import retries
 
+DEFAULT_RETRY_ATTEMPTS = 1
+
 
 class Task(BaseModel):
     # Unique identifier for this task: UUID7 for timestamp ordered identifiers.
@@ -35,9 +37,7 @@ class Task(BaseModel):
 
     @classmethod
     def default(cls, function_name: str, **kwargs):
-        attempts = retries.RetryAttempts(
-            attempts=0, last_retry=datetime.datetime.now(datetime.UTC)
-        )
+        attempts = retries.RetryAttempts.default()
         policy = retries.RetryPolicy.default()
         if "policy" in kwargs:
             policy = kwargs.pop("policy")
@@ -68,43 +68,69 @@ class Task(BaseModel):
 
     def __rshift__(self, other: "Task") -> "Task":
         """
-        Adds a failure callback (`other`) to this task with >> operator.
+        Adds a success callback (`other`) to this task with >> operator.
 
-        Returns self to allow chaining `on_success` callback also.
+        Returns other to allow chaining
 
         In other words:
 
-        (task1 >> task2) >= task3 means:
-        - if task1 fails, run task2
-        - if task1 succeeds, run task3
-        """
-        self.on_failure = other
-        return self
-
-    def __lshift__(self, other: "Task") -> "Task":
-        """
-        Adds a failure callback (`other`) to this task with << operator
-
-        Returns other to allow chaining a success callback also.
-        """
-        other.on_failure = self
-        return other
-
-    def __ge__(self, other: "Task") -> "Task":
-        """
-        Adds a success callback (`other`) to this task with >= operator
-
-        Returns other to allow chaining additional tasks like this:
-        task1 >= task2 >= task3
+        task1 >> task2 >> task3 means:
+        - if task1 succeeds, run task2.
+        - if task2 succeeds, run task3.
         """
         self.on_success = other
         return other
 
-    def __le__(self, other: "Task") -> "Task":
+    def __lshift__(self, other: "Task") -> "Task":
         """
-        Adds a success callback (`other`) to this task with <= operator
-        Returns self to allow chaining additional tasks like this:
-        task1 <= task2 <= task3
+        Adds a success callback (`other`) to this task with << operator
+
+        Returns other to allow chaining.
+
+        In other words:
+
+        task1 << task2 << task3 means:
+        - if task3 succeeds, run task2.
+        - if task2 succeeds, run task1.
         """
         other.on_success = self
         return self
+
+    @classmethod
+    def si(
+        cls,
+        fn: typing.Callable,
+        *fn_args,
+        should_dead_letter: bool = True,
+        acks_late: bool = True,
+        policy: retries.RetryPolicy | None = None,
+        **fn_kwargs,
+    ) -> "Task":
+        """
+        Creates an "immutable signature" - a copy of this task with the given args/kwargs
+        and optional delay and retry policy.
+
+        Note: this app does not currently support mutable signatures and we don't pass
+        the output of one task to the next. Future versions may support this.
+
+        Creating an immutable signature is useful for *binding* arguments to a task before sending it,
+        in case we'd like to also have callbacks or other properties set on the task
+        before sending it to the worker for execution.
+        """
+        task_id = str(uuid.uuid7())
+        attempts = retries.RetryAttempts.default()
+        policy = policy or retries.RetryPolicy.default()
+
+        return cls(
+            task_id=task_id,
+            should_dead_letter=should_dead_letter,
+            acks_late=acks_late,
+            attempts=attempts,
+            function_name=fn.__name__,
+            policy=policy,
+            payload={
+                "args": fn_args,
+                "kwargs": fn_kwargs,
+            },
+            diagnostic_id=None,
+        )

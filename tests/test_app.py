@@ -106,6 +106,17 @@ async def test_app_register_many_async(app, mockservicebus):
     for task in [task1, task2, task3]:
         await app.message_handler(make_message(task), mockservicebus.get_queue_receiver())
 
+    # Failures
+    def not_a_coroutine(state):
+        return state["somekey"]
+
+    with pytest.raises(ValueError):
+        app.register_async(not_a_coroutine)
+
+    # Register previously registered function
+    with pytest.raises(ValueError):
+        app.register_async(somefunc1)
+
 
 async def test_create_task(app):
     """Test creating a task from a registered function."""
@@ -225,6 +236,74 @@ async def test_apply_async_no_policy(app, mockservicebus):
     assert published_task.function_name== "somefunc"
     assert published_task.on_success is None
     assert published_task.on_failure is None
+
+
+async def sample_task(state, number1: int, number2: int = 4):
+    if "sample_task_called" not in state.inner:
+        state.inner["sample_task_called"] = 0
+    state.inner["sample_task_called"] += 1
+    if "sample_task_payload" not in state.inner:
+        state.inner["sample_task_payload"] = []
+
+    state.inner["sample_task_payload"].append((number1, number2))
+    return number1 + number2
+
+
+async def failing_task(state) -> int:
+    if "fail_count" not in state.inner:
+        state.inner["fail_count"] = 0
+    state.inner["fail_count"] += 1
+    return state.inner["fail_count"]
+
+
+def test_chain_fail(app):
+    with pytest.raises(ValueError):
+        app.chain(Task.si(sample_task, 1), on_failure="not_a_task")
+
+
+@pytest.mark.parametrize("has_fail", [True, False])
+def test_chain_odd_task_count(app, has_fail):
+    fail = Task.si(failing_task) if has_fail else None
+    workflow = app.chain(
+        Task.si(sample_task, 1, 2),
+        Task.si(sample_task, 3),
+        Task.si(sample_task, 5, number2=6),
+        on_failure=fail,
+    )
+    assert isinstance(workflow, Task)
+    assert workflow.on_failure == fail
+    assert workflow.on_success is not None
+    # Evaluate the chain
+    current = workflow
+    count = 0
+    while current is not None:
+        assert current.on_failure == fail
+        count += 1
+        current = current.on_success
+    assert count == 3
+
+
+@pytest.mark.parametrize("has_fail", [True, False])
+def test_chain_even_task_count(app, has_fail):
+    fail = Task.si(failing_task) if has_fail else None
+    workflow = app.chain(
+        Task.si(sample_task, 1, 2),
+        Task.si(sample_task, 3),
+        Task.si(sample_task, 5, number2=6),
+        Task.si(sample_task, 4, number2=9),
+        on_failure=fail,
+    )
+    assert isinstance(workflow, Task)
+    assert workflow.on_failure == fail
+    assert workflow.on_success is not None
+    # Evaluate the chain
+    current = workflow
+    count = 0
+    while current is not None:
+        assert current.on_failure == fail
+        count += 1
+        current = current.on_success
+    assert count == 4
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #

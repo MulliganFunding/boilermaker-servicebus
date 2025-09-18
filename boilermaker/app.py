@@ -4,6 +4,8 @@ Async tasks received from Service Bus go in here
 """
 
 import copy
+import inspect
+import itertools
 import logging
 import signal
 import time
@@ -68,6 +70,7 @@ class Boilermaker:
         self.task_registry: dict[str, Task] = {}
         self._current_message: ServiceBusReceivedMessage | None = None
 
+    # ~~ ** Task Registration and Publishing ** ~~
     def task(self, **options):
         """A task decorator can mark a task as backgroundable"""
 
@@ -85,6 +88,15 @@ class Boilermaker:
     def register_async(self, fn: TaskHandler, **options):
         """Register a task to be callable as background"""
         fn_name = fn.__name__
+
+        # Check if already registered
+        if fn_name in self.function_registry:
+            raise ValueError(f"Function already registered: {fn_name}")
+
+        # Check if TaskHandler is async callable
+        if not inspect.iscoroutinefunction(fn):
+            raise ValueError(f"Function must be async: {fn_name}")
+
         task = Task.default(fn_name, **options)
         self.function_registry[fn_name] = fn
         self.task_registry[fn_name] = task
@@ -188,6 +200,28 @@ class Boilermaker:
                 encountered_errors,
             )
 
+    def chain(self, *tasks: Task, on_failure: Task | None = None) -> Task:
+        """
+        Chain tasks together so that each task runs after the previous one
+        completes successfully.
+
+        :param tasks: The tasks to chain together
+        :returns: The first task in the chain.
+        """
+        if len(tasks) < 2:
+            raise ValueError("At least two tasks are required to form a chain")
+
+        # Maintain pointer to the head of the chain
+        task1 = tasks[0]
+        task1.on_failure = on_failure
+        for t1, t2 in itertools.pairwise(tasks):
+            t1.on_success = t2
+            # Set on_failure for all tasks if provided (None is fine here)
+            t2.on_failure = on_failure
+
+        return task1
+
+    # ~~ ** Signal handling, receiver run, and message processing methods ** ~~
     async def signal_handler(self, receiver: ServiceBusReceiver, scope: CancelScope):
         """We would like to reschedule any open messages on SIGINT/SIGTERM"""
         with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
