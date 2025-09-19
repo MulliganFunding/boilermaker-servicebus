@@ -88,7 +88,7 @@ class Boilermaker:
         self,
         state: typing.Any,
         service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender = None,
-        enable_opentelemetry=False,
+        enable_opentelemetry: bool = False,
     ):
         # This is likely going to be circular, the app referencing
         # the worker as well. Opt for weakrefs for improved mem safety.
@@ -187,7 +187,7 @@ class Boilermaker:
         return self
 
     def create_task(
-        self, fn, *args, policy: RetryPolicy | None = None, **kwargs
+        self, fn: TaskHandler, *args, policy: RetryPolicy | None = None, **kwargs
     ) -> Task:
         """Create a Task instance without publishing it to the queue.
 
@@ -232,7 +232,7 @@ class Boilermaker:
 
     async def apply_async(
         self,
-        fn,
+        fn: TaskHandler,
         *args,
         delay: int = 0,
         publish_attempts: int = 1,

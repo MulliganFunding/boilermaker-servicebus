@@ -97,10 +97,6 @@ nav:
     - Common Issues: troubleshooting/common-issues.md
     - Debugging: troubleshooting/debugging.md
     - Performance: troubleshooting/performance.md
-  - Contributing:
-    - Development Setup: contributing/development.md
-    - Running Tests: contributing/testing.md
-    - Release Process: contributing/releasing.md
 
 extra:
   social:

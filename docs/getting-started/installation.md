@@ -65,17 +65,6 @@ For development, the easiest method is:
 az login
 ```
 
-## Development Installation
-
-If you plan to contribute to Boilermaker:
-
-```bash
-git clone https://github.com/MulliganFunding/boilermaker-servicebus.git
-cd boilermaker-servicebus
-uv sync
-```
-
-See our [Development Guide](../contributing/development.md) for more details.
 
 ## Next Steps
 
