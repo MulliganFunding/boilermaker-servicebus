@@ -24,6 +24,7 @@ Here are some decisions we made in this library, which may give you pause in con
 - **JSON Serialization**: All task arguments must be JSON-serializable
 - **No DAGs**: Nothing like Chords or Groups (from Celery) present at this time.
 - **No ServiceBus Message in Handlers**: We require some `state` as the first arg for all background tasks, but we don't bind the message itself or pass it.
+- **Requires [`aio-azure-clients-toolbox`](https://pypi.org/project/aio-azure-clients-toolbox/)**: We found that publishing to ServiceBus was extremely slow (too slow for us!), so built a connection-pooling ServiceBus [`aio-azure-clients-toolbox`](https://pypi.org/project/aio-azure-clients-toolbox/) that we load as a dependency in this library.
 
 !!! note "Why Not Boilermaker?"
     If you need a fully-featured task runner with multiple backends, consider [Celery](https://github.com/celery/celery/tree/main) instead. Boilermaker is purpose-built for Azure ServiceBus with a focus on simplicity and async Python.
@@ -137,6 +138,7 @@ All task functions in Boilermaker must:
 
 !!! warning "Important Notes"
     - Boilermaker does not store or use task results
+    - **Task chaining does not pass results between tasks** - all task signatures must be specified up-front when scheduling
     - All task arguments must be JSON-serializable
     - The `state` parameter is injected automatically
     - Tasks run in separate processes from publishers
@@ -153,12 +155,11 @@ When running workers, you'll see logs such as the following from the `boilermake
 
 ## Learn More
 
-- **[Getting Started](getting-started/installation.md)** - Installation and basic setup
 - **[Quick Start Guide](getting-started/quickstart.md)** - Your first task in 5 minutes
 - **[User Guide](guides/task-registration.md)** - Comprehensive feature documentation
 - **[API Reference](api-reference/app.md)** - Complete API documentation
-- **[Examples](examples/basic-usage.md)** - Real-world usage patterns
 
-## Why the Name?
+
+## Where's the Name Come From?
 
 The name comes from a band named [Boilermaker](https://www.discogs.com/artist/632957-Boilermaker).

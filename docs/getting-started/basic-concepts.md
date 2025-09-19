@@ -315,28 +315,7 @@ Boilermaker uses `DefaultAzureCredential`:
     config = Config(azure_credential_include_msi=True)
     ```
 
-## Performance Considerations
-
-### Worker Scaling
-
-- Run **multiple worker processes** for parallel task execution
-- Each worker processes one task at a time
-- Scale horizontally by adding more worker instances
-
-### Memory Management
-
-- Keep state objects lightweight
-- Avoid storing large objects in task state
-- Use external storage (database, cache) for large data
-
-### Queue Management
-
-- Use separate queues for different task types if needed
-- Monitor queue depth and dead letter queues
-- Consider message TTL for time-sensitive tasks
-
 ## Next Steps
 
 - **[Task Registration](../guides/task-registration.md)** - Learn different registration patterns
 - **[Retry Policies](../guides/retry-policies.md)** - Master error handling
-- **[Examples](../examples/basic-usage.md)** - See real-world usage patterns

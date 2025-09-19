@@ -39,11 +39,11 @@ print(f"Boilermaker version: {boilermaker.__version__}")
 
 ## Azure ServiceBus Setup
 
-You'll need an Azure ServiceBus namespace and queue. If you don't have these set up yet, see our [Azure Setup Guide](../guides/azure-setup.md).
+You'll need an Azure ServiceBus namespace and queue.
 
-### Required Environment Variables
+### Environment Variables
 
-Set these environment variables for your application:
+You can set these environment variables for your application or specify them elsewhere in your app:
 
 ```bash
 export SERVICE_BUS_NAMESPACE_URL="https://your-namespace.servicebus.windows.net"
@@ -70,4 +70,3 @@ az login
 
 - **[Quick Start](quickstart.md)** - Create your first background task
 - **[Basic Concepts](basic-concepts.md)** - Understand how Boilermaker works
-- **[Azure Setup](../guides/azure-setup.md)** - Set up Azure ServiceBus

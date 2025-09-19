@@ -1,6 +1,6 @@
 # Callbacks & Chains
 
-Boilermaker supports powerful task orchestration through callbacks and chains, allowing you to build complex workflows where tasks run in response to success or failure of other tasks.
+Boilermaker supports success or failure callbacks and chains, allowing you to build complex orkflows where tasks run in response to success or failure of other tasks.
 
 ## Overview
 
@@ -57,7 +57,7 @@ worker.register_async(failure_handler, policy=retries.NoRetry())
 
 ### Setting Up Callbacks
 
-There are two ways to set up callbacks:
+There are **three** ways to set up callbacks:
 
 #### Method 1: Direct Assignment
 
@@ -86,6 +86,20 @@ success = worker.create_task(success_handler)
 main >> success  # Same as: main.on_success = success
 
 await worker.publish_task(main)
+```
+
+
+#### Method 2: Using the `chain` method
+
+```python
+from Boilermaker import Task
+# Create tasks with bound args/kwargs and chain them
+worflow = worker.chain(
+    Task.si(main_task, "success"),
+    Task.si(success_handler)
+    on_failure=...
+)
+await worker.publish_task(workflow)
 ```
 
 !!! tip "Callback Execution"
@@ -136,10 +150,13 @@ Task chains allow you to run multiple tasks in sequence, where each task only ru
 
 ```python
 workflow = worker.chain(
+    # create a Task from a function with bound args
     worker.create_task(step1, "input_data"),
-    worker.create_task(step2),
+    # alternately, use the Task.si classmethod
+    Task.si(step2),
     worker.create_task(step3),
-    on_failure=worker.create_task(cleanup_handler)
+    # any unhandled exception or retries exhausted will fire this task
+    on_failure=Task.si(cleanup_handler)
 )
 
 await worker.publish_task(workflow)
@@ -247,32 +264,6 @@ await worker.apply_async(process_email_batch, batch_3)
 # These will be processed by different workers in parallel
 ```
 
-### Fan-out/Fan-in Pattern
-
-```python
-async def split_work(state, large_dataset):
-    """Split large work into smaller chunks."""
-    chunks = split_into_chunks(large_dataset)
-
-    # Schedule a task for each chunk
-    for i, chunk in enumerate(chunks):
-        await worker.apply_async(process_chunk, chunk, batch_id=f"batch_{i}")
-
-    # Schedule aggregation task with a delay to allow chunks to complete
-    await worker.apply_async(aggregate_results, delay=300)  # 5 minute delay
-
-async def process_chunk(state, chunk, batch_id: str):
-    """Process a chunk of work."""
-    result = process_data(chunk)
-    await state.db.save_partial_result(batch_id, result)
-
-async def aggregate_results(state):
-    """Aggregate all partial results."""
-    all_results = await state.db.get_all_partial_results()
-    final_result = combine_results(all_results)
-    await state.db.save_final_result(final_result)
-```
-
 ## Best Practices
 
 ### 1. Keep Tasks Focused
@@ -308,7 +299,14 @@ async def process_data(state):
     state.cache[f"job_{state.current_job_id}"] = processed
 ```
 
-### 3. Design for Observability
+### 3. Keep Args, Kwargs, and Chains **SMALL**
+
+All args, kwargs, and nested `Tasks` will be serialized into a **single ServiceBus Message**.
+
+Try to keep task args and kwargs small, and try not to build large chains.
+
+
+### 4. Design for Observability
 
 ```python
 async def trackable_task(state, operation_id: str):
@@ -326,7 +324,7 @@ async def trackable_task(state, operation_id: str):
         raise
 ```
 
-### 4. Error Handling
+### 5. Error Handling
 
 ```python
 async def robust_task(state, data):
@@ -362,4 +360,4 @@ When you run callback and chain workflows, you'll see logs like this:
 
 - **[Retry Policies](retry-policies.md)** - Configure how tasks retry on failure
 - **[Error Handling](error-handling.md)** - Robust error handling strategies
-- **[Examples](../examples/advanced-patterns.md)** - More complex workflow examples
+- **[Quick Start](../getting-started/quickstart.md)** - See chaining examples in action

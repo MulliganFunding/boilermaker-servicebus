@@ -80,23 +80,12 @@ nav:
     - Callbacks & Chains: guides/callbacks-chains.md
     - Retry Policies: guides/retry-policies.md
     - Error Handling: guides/error-handling.md
-    - Azure Setup: guides/azure-setup.md
-    - Production Deployment: guides/production-deployment.md
-  - Examples:
-    - Basic Usage: examples/basic-usage.md
-    - Advanced Patterns: examples/advanced-patterns.md
-    - Testing: examples/testing.md
-    - Real World Scenarios: examples/real-world-scenarios.md
   - API Reference:
     - Boilermaker: api-reference/app.md
     - Task: api-reference/task.md
     - Retries: api-reference/retries.md
     - Configuration: api-reference/config.md
     - Exceptions: api-reference/exceptions.md
-  - Troubleshooting:
-    - Common Issues: troubleshooting/common-issues.md
-    - Debugging: troubleshooting/debugging.md
-    - Performance: troubleshooting/performance.md
 
 extra:
   social:

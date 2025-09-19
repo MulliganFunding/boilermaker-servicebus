@@ -413,29 +413,8 @@ async def test_retry_behavior():
     # Task should succeed on the 3rd attempt
 ```
 
-## Troubleshooting
-
-### Common Issues
-
-1. **Tasks not retrying**: Make sure you're raising `RetryException`, not other exceptions
-2. **Retries taking too long**: Check your `delay_max` settings
-3. **Infinite retries**: Ensure you have reasonable `max_tries` limits
-4. **Failure callbacks not running**: They only run after ALL retries are exhausted
-
-### Debugging Retry Behavior
-
-Enable debug logging to see retry behavior:
-
-```python
-import logging
-logging.getLogger("boilermaker.app").setLevel(logging.DEBUG)
-
-# You'll see logs like:
-# "Retry attempt 2 of 5 for task_name, next delay: 60s"
-```
-
 ## Next Steps
 
 - **[Error Handling](error-handling.md)** - Comprehensive error handling strategies
 - **[Callbacks & Chains](callbacks-chains.md)** - Combine retries with workflows
-- **[Examples](../examples/advanced-patterns.md)** - See retry patterns in action
+- **[Quick Start](../getting-started/quickstart.md)** - See retry patterns in action
