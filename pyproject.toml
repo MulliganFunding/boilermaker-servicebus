@@ -23,8 +23,8 @@ Documentation = "https://mulliganfunding.github.io/boilermaker-servicebus/"
 Repository = "https://github.com/MulliganFunding/boilermaker-servicebus"
 Issues = "https://github.com/MulliganFunding/boilermaker-servicebus/issues"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "build>=1.3.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",

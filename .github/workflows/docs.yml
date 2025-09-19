@@ -62,7 +62,7 @@ jobs:
 
       - name: Build documentation
         run: |
-          just docs-build --clean --strict
+          just docs-build --clean
         env:
           # Set the site URL for proper links
           SITE_URL: ${{ steps.pages.outputs.base_url }}

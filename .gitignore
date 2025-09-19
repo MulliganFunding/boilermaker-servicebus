@@ -18,3 +18,4 @@ venv
 htmlcov/
 coverage.xml
 unittest.junit.xml
+site/
