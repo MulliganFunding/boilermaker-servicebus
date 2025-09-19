@@ -175,6 +175,9 @@ class Boilermaker:
         if len(tasks) < 2:
             raise ValueError("At least two tasks are required to form a chain")
 
+        if on_failure is not None and not isinstance(on_failure, Task):
+            raise ValueError("if passed, `on_failure` must be a Task instance")
+
         # Maintain pointer to the head of the chain
         task1 = tasks[0]
         task1.on_failure = on_failure

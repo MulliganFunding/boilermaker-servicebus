@@ -264,8 +264,16 @@ async def failing_task(state) -> int:
 
 
 def test_chain_fail(app):
+    # on_failure must be a Task or None
     with pytest.raises(ValueError):
-        app.chain(Task.si(sample_task, 1), on_failure="not_a_task")
+        app.chain(
+            Task.si(sample_task, 1), Task.si(sample_task, 2), on_failure="not_a_task"
+        )
+    # must have enough tasks
+    with pytest.raises(ValueError):
+        app.chain(
+            Task.si(sample_task, 1),
+        )
 
 
 @pytest.mark.parametrize("has_fail", [True, False])
