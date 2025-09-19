@@ -1,6 +1,6 @@
 [project]
 name = "boilermaker-servicebus"
-version = "0.7.1"
+version = "0.7.2"
 description = "An async python Background task system using Azure Service Bus Queues"
 authors = [{ "name" = "Erik Aker", "email" = "eaker@mulliganfunding.com" }]
 license = { file = "LICENSE" }
