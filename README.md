@@ -7,7 +7,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Documentation](https://img.shields.io/badge/docs-github--pages-blue)](https://mulliganfunding.github.io/boilermaker-servicebus/)
 
-Boilermaker is an extremely lightweight task runner exclusively for **async Python** and Azure Service Bus Queues. If you need a fully-featured task runner with multiple backends, consider [Celery](https://github.com/celery/celery/tree/main) instead.
+Boilermaker is a lightweight task runner exclusively for **async Python** and Azure Service Bus Queues. If you need a fully-featured task runner with multiple backends, consider [Celery](https://github.com/celery/celery/tree/main) instead.
 
 ## Quick Start
 
@@ -70,16 +70,11 @@ export SERVICE_BUS_QUEUE_NAME="your-queue-name"
 - **Async-only**: Built for async Python applications
 - **Retry Policies**: Exponential, linear, and fixed backoff strategies
 - **Task Chaining**: Success/failure callbacks and workflows
-- **Azure Native**: Deep Azure ServiceBus integration
-- **Observability**: Built-in OpenTelemetry tracing
-- **Simple**: Focused scope, minimal configuration
 
 ## Documentation
 
 📖 **[Complete Documentation](https://mulliganfunding.github.io/boilermaker-servicebus/)**
-
 - **[Getting Started](https://mulliganfunding.github.io/boilermaker-servicebus/)** - Installation and basic usage
-- **[Examples & Patterns](https://mulliganfunding.github.io/boilermaker-servicebus/guides/examples/)** - Comprehensive examples
 - **[Callbacks & Chains](https://mulliganfunding.github.io/boilermaker-servicebus/guides/callbacks-chains/)** - Task workflows
 - **[Retry Policies](https://mulliganfunding.github.io/boilermaker-servicebus/guides/retry-policies/)** - Error handling and retries
 - **[API Reference](https://mulliganfunding.github.io/boilermaker-servicebus/reference/boilermaker/)** - Complete API docs
@@ -89,7 +84,3 @@ export SERVICE_BUS_QUEUE_NAME="your-queue-name"
 - Python 3.11+
 - Azure ServiceBus namespace and queue
 - All task arguments must be JSON-serializable
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
