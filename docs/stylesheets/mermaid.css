@@ -1,0 +1,22 @@
+/* Mermaid diagram styling */
+.mermaid {
+  text-align: center;
+  margin: 1em 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Ensure diagrams are responsive */
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Dark mode support for diagrams */
+[data-md-color-scheme="slate"] .mermaid {
+  filter: invert("1") hue-rotate(180deg);
+}
+
+[data-md-color-scheme="slate"] .mermaid svg {
+  background: transparent;
+}

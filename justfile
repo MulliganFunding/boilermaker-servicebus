@@ -39,3 +39,11 @@ test *args:
 # Run the project tests for CI environment (e.g. with code coverage)
 ci-test coverage_dir='./coverage':
     uv run pytest --cov=boilermaker --cov-report xml --junitxml=./coverage/unittest.junit.xml
+
+# Build documentation locally
+docs-build *args:
+    uv run mkdocs build {{args}}
+
+# Serve documentation locally with auto-reload
+docs-serve:
+    uv run mkdocs serve
