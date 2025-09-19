@@ -49,16 +49,46 @@ class BoilermakerAppException(Exception):
 
 
 class Boilermaker:
-    """
-    A Boilermaker instance is a worker that can run a tasks-processing worker
-    or send tasks to the Service Bus queue.
+    """Async task runner for Azure Service Bus queues.
+
+    Boilermaker allows you to register async functions as background tasks,
+    schedule them for execution, and run workers to process them. It provides
+    retry policies, task chaining, callbacks, and comprehensive error handling.
+
+    Args:
+        state: Shared application state passed to all tasks as first argument
+        service_bus_client: Azure Service Bus client for message handling
+        enable_opentelemetry: Enable OpenTelemetry tracing (default: False)
+
+    Example:
+        >>> from boilermaker import Boilermaker
+        >>> from boilermaker.service_bus import AzureServiceBus
+        >>>
+        >>> # Set up ServiceBus client
+        >>> client = AzureServiceBus.from_config(config)
+        >>>
+        >>> # Create app with shared state
+        >>> app = Boilermaker({"counter": 0}, client)
+        >>>
+        >>> # Register a task
+        >>> @app.task()
+        >>> async def my_task(state, message: str):
+        >>>     state["counter"] += 1
+        >>>     print(f"Processing: {message}")
+        >>>     return "completed"
+        >>>
+        >>> # Schedule a task
+        >>> await app.apply_async(my_task, "hello world")
+        >>>
+        >>> # Run worker (in separate process)
+        >>> await app.run()
     """
 
     def __init__(
         self,
         state: typing.Any,
         service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender = None,
-        enable_opentelemetry=False,
+        enable_opentelemetry: bool = False,
     ):
         # This is likely going to be circular, the app referencing
         # the worker as well. Opt for weakrefs for improved mem safety.
@@ -72,7 +102,19 @@ class Boilermaker:
 
     # ~~ ** Task Registration and Publishing ** ~~
     def task(self, **options):
-        """A task decorator can mark a task as backgroundable"""
+        """Decorator to register an async function as a background task.
+
+        Args:
+            **options: Optional task configuration including 'policy' for retry settings
+
+        Returns:
+            Decorator function that registers the task and returns the original function
+
+        Example:
+            >>> @app.task(policy=retries.RetryPolicy.default())
+            >>> async def process_data(state, item_id: str):
+            >>>     return await state.db.process(item_id)
+        """
 
         def deco(fn):
             self.register_async(fn, **options)
@@ -86,7 +128,30 @@ class Boilermaker:
         return deco
 
     def register_async(self, fn: TaskHandler, **options):
-        """Register a task to be callable as background"""
+        """Register an async function as a background task.
+
+        Args:
+            fn: Async function that takes state as first parameter
+            **options: Task configuration options including:
+                - policy: RetryPolicy for handling failures
+                - should_dead_letter: Whether to dead letter failed messages
+                - acks_late: Message acknowledgment timing
+
+        Returns:
+            self: For method chaining
+
+        Raises:
+            ValueError: If function is already registered or not async
+
+        Example:
+            >>> async def send_email(state, recipient: str, subject: str):
+            >>>     await state.email_client.send(recipient, subject)
+            >>>
+            >>> app.register_async(
+            >>>     send_email,
+            >>>     policy=retries.RetryPolicy(max_tries=3)
+            >>> )
+        """
         fn_name = fn.__name__
 
         # Check if already registered
@@ -104,16 +169,52 @@ class Boilermaker:
         return self
 
     def register_many_async(self, fns: list[TaskHandler], **options):
-        """Register many tasks at once using the same `options` for each"""
+        """Register multiple async functions with the same configuration.
+
+        Args:
+            fns: List of async functions to register
+            **options: Common task configuration applied to all functions
+
+        Returns:
+            self: For method chaining
+
+        Example:
+            >>> tasks = [process_email, send_notification, update_metrics]
+            >>> app.register_many_async(tasks, policy=retries.NoRetry())
+        """
         for fn in fns:
             self.register_async(fn, **options)
         return self
 
     def create_task(
-        self, fn, *args, policy: RetryPolicy | None = None, **kwargs
+        self, fn: TaskHandler, *args, policy: RetryPolicy | None = None, **kwargs
     ) -> Task:
-        """
-        Create a Task object (but do not publish it).
+        """Create a Task instance without publishing it to the queue.
+
+        This allows you to set up callbacks, modify task properties, or
+        build workflows before publishing.
+
+        Args:
+            fn: Registered async function to create task for
+            *args: Positional arguments to pass to the function
+            policy: Optional retry policy override for this task instance
+            **kwargs: Keyword arguments to pass to the function
+
+        Returns:
+            Task: Configured task instance ready for publishing
+
+        Raises:
+            ValueError: If function is not registered
+
+        Example:
+            >>> # Create task without publishing
+            >>> task = app.create_task(send_email, "user@example.com", subject="Welcome")
+            >>>
+            >>> # Set up callback
+            >>> task.on_success = app.create_task(track_email_sent)
+            >>>
+            >>> # Publish when ready
+            >>> await app.publish_task(task)
         """
         if fn.__name__ not in self.function_registry:
             raise ValueError(f"Unregistered function invoked: {fn.__name__}")
@@ -131,30 +232,46 @@ class Boilermaker:
 
     async def apply_async(
         self,
-        fn,
+        fn: TaskHandler,
         *args,
         delay: int = 0,
         publish_attempts: int = 1,
         policy: RetryPolicy | None = None,
         **kwargs,
     ) -> Task:
-        """
-        Wrap up this function call as a task and publish to broker.
+        """Schedule a task for background execution.
 
-        The task will be retried `publish_attempts` times if there are
-        transient errors publishing to the broker.
+        Creates a task and immediately publishes it to the Azure Service Bus queue.
+        This is the most common way to schedule background work.
 
-        After publishing, the task's `sequence_number` will be set.
+        Args:
+            fn: Registered async function to execute
+            *args: Positional arguments for the function
+            delay: Seconds to delay before task becomes visible (default: 0)
+            publish_attempts: Retry attempts for publishing failures (default: 1)
+            policy: Override retry policy for this task instance
+            **kwargs: Keyword arguments for the function
 
-        Raises `BoilermakerAppException` if unable to publish.
+        Returns:
+            Task: The published task with sequence_number set
 
-        :param fn: The function to call
-        :param args: Positional arguments to the (backgrounded) function
-        :param delay: Optional delay in seconds before task is visible
-        :param publish_attempts: How many times to attempt publishing
-        :param policy: Optional retry policy to use for this task
-        :param kwargs: Keyword arguments to the (backgrounded) function
-        :returns: The published Task.
+        Raises:
+            BoilermakerAppException: If publishing fails after all attempts
+            ValueError: If function is not registered
+
+        Example:
+            >>> # Simple task scheduling
+            >>> await app.apply_async(send_email, "user@example.com")
+            >>>
+            >>> # With custom retry policy
+            >>> await app.apply_async(
+            >>>     process_image,
+            >>>     image_url="https://example.com/image.jpg",
+            >>>     policy=retries.RetryPolicy(max_tries=3)
+            >>> )
+            >>>
+            >>> # Delayed execution (5 minutes)
+            >>> await app.apply_async(cleanup_temp_files, delay=300)
         """
         task = self.create_task(fn, *args, policy=policy, **kwargs)
         return await self.publish_task(
@@ -162,15 +279,34 @@ class Boilermaker:
         )
 
     def chain(self, *tasks: Task, on_failure: Task | None = None) -> Task:
-        """
-        Chain tasks together so that each task runs after the previous one
-        completes successfully.
+        """Chain multiple tasks to run sequentially on success.
 
-        The `on_failure` task (if provided) will be set as the
-        on_failure callback for *all* tasks in the chain.
+        Creates a workflow where each task runs only if the previous one
+        succeeds. If any task fails, the chain stops and the optional
+        failure handler runs.
 
-        :param tasks: The tasks to chain together
-        :returns: The first task in the chain.
+        Args:
+            *tasks: Task instances to chain together (minimum 2 required)
+            on_failure: Optional task to run if any task in the chain fails
+
+        Returns:
+            Task: The first task in the chain (publish this to start the workflow)
+
+        Raises:
+            ValueError: If fewer than 2 tasks provided or on_failure is not a Task
+
+        Example:
+            >>> # Create individual tasks
+            >>> fetch = app.create_task(fetch_data, url)
+            >>> process = app.create_task(process_data)
+            >>> save = app.create_task(save_results)
+            >>> cleanup = app.create_task(cleanup_on_failure)
+            >>>
+            >>> # Chain them together
+            >>> workflow = app.chain(fetch, process, save, on_failure=cleanup)
+            >>>
+            >>> # Start the workflow
+            >>> await app.publish_task(workflow)
         """
         if len(tasks) < 2:
             raise ValueError("At least two tasks are required to form a chain")
@@ -195,14 +331,26 @@ class Boilermaker:
         delay: int = 0,
         publish_attempts: int = 1,
     ) -> Task:
-        """
-        Turn the task into JSON and publish to Service Bus.
-        Assign the sequence number once published.
+        """Publish a task to the Azure Service Bus queue.
 
-        :param task: The Task to publish
-        :param delay: Optional delay in seconds before task is visible
-        :param publish_attempts: How many times to attempt publishing
-        :returns: The published Task.
+        Serializes the task to JSON and sends it to the configured queue.
+        Sets the task's sequence_number after successful publishing.
+
+        Args:
+            task: Task instance to publish
+            delay: Seconds to delay before task becomes visible (default: 0)
+            publish_attempts: Number of retry attempts for publishing (default: 1)
+
+        Returns:
+            Task: The same task with sequence_number populated
+
+        Raises:
+            BoilermakerAppException: If publishing fails after all attempts
+
+        Example:
+            >>> task = app.create_task(my_function, "arg1", kwarg="value")
+            >>> published = await app.publish_task(task, delay=60)  # 1 minute delay
+            >>> print(f"Published with sequence: {published._sequence_number}")
         """
         encountered_errors = []
         for _i in range(publish_attempts):
@@ -255,14 +403,32 @@ class Boilermaker:
                 return
 
     async def run(self):
-        """
-        Task-Worker processing message queue loop.
+        """Start the worker to process tasks from the queue.
 
-        This method uses the service bus to run a receive loop.
+        This is the main worker loop that:
+        1. Connects to Azure Service Bus queue
+        2. Receives messages containing tasks
+        3. Executes the tasks with registered functions
+        4. Handles retries, callbacks, and error scenarios
+        5. Manages graceful shutdown on SIGINT/SIGTERM
 
-        Note: *all* messages will be marked "complete" after the handler runs.
+        The worker runs indefinitely until interrupted. Each message is
+        processed according to its task configuration (retries, callbacks, etc.).
 
-        See `AzureServiceBus` for details.
+        Note:
+            - Run this in a separate process from your main application
+            - Multiple workers can run in parallel for horizontal scaling
+            - Workers automatically handle message acknowledgment
+            - Interrupted workers will abandon current message back to queue
+
+        Example:
+            >>> # In your worker process
+            >>> app = Boilermaker(app_state, service_bus_client)
+            >>> # Register your tasks...
+            >>> await app.run()  # Runs forever
+
+        Raises:
+            Various Azure Service Bus exceptions for connection issues
         """
         async with create_task_group() as tg:
             async with self.service_bus_client.get_receiver() as receiver:
