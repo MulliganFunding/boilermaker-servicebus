@@ -103,6 +103,11 @@ class RetryAttempts(BaseModel):
     # Timestamp of last retry
     last_retry: datetime.datetime
 
+    @classmethod
+    def default(cls):
+        now = datetime.datetime.now(datetime.UTC)
+        return cls(attempts=0, last_retry=now)
+
     @field_validator("attempts")
     def attempts_is_positive(cls, v):
         if v < 0:

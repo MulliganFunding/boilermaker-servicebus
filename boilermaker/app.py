@@ -2,7 +2,10 @@
 Async tasks received from Service Bus go in here
 
 """
+
 import copy
+import inspect
+import itertools
 import logging
 import signal
 import time
@@ -67,6 +70,7 @@ class Boilermaker:
         self.task_registry: dict[str, Task] = {}
         self._current_message: ServiceBusReceivedMessage | None = None
 
+    # ~~ ** Task Registration and Publishing ** ~~
     def task(self, **options):
         """A task decorator can mark a task as backgroundable"""
 
@@ -84,6 +88,15 @@ class Boilermaker:
     def register_async(self, fn: TaskHandler, **options):
         """Register a task to be callable as background"""
         fn_name = fn.__name__
+
+        # Check if already registered
+        if fn_name in self.function_registry:
+            raise ValueError(f"Function already registered: {fn_name}")
+
+        # Check if TaskHandler is async callable
+        if not inspect.iscoroutinefunction(fn):
+            raise ValueError(f"Function must be async: {fn_name}")
+
         task = Task.default(fn_name, **options)
         self.function_registry[fn_name] = fn
         self.task_registry[fn_name] = task
@@ -124,30 +137,83 @@ class Boilermaker:
         publish_attempts: int = 1,
         policy: RetryPolicy | None = None,
         **kwargs,
-    ):
+    ) -> Task:
         """
         Wrap up this function call as a task and publish to broker.
+
+        The task will be retried `publish_attempts` times if there are
+        transient errors publishing to the broker.
+
+        After publishing, the task's `sequence_number` will be set.
+
+        Raises `BoilermakerAppException` if unable to publish.
+
+        :param fn: The function to call
+        :param args: Positional arguments to the (backgrounded) function
+        :param delay: Optional delay in seconds before task is visible
+        :param publish_attempts: How many times to attempt publishing
+        :param policy: Optional retry policy to use for this task
+        :param kwargs: Keyword arguments to the (backgrounded) function
+        :returns: The published Task.
         """
         task = self.create_task(fn, *args, policy=policy, **kwargs)
         return await self.publish_task(
             task, delay=delay, publish_attempts=publish_attempts
         )
 
-    @tracer.start_as_current_span("publish-task")
+    def chain(self, *tasks: Task, on_failure: Task | None = None) -> Task:
+        """
+        Chain tasks together so that each task runs after the previous one
+        completes successfully.
+
+        The `on_failure` task (if provided) will be set as the
+        on_failure callback for *all* tasks in the chain.
+
+        :param tasks: The tasks to chain together
+        :returns: The first task in the chain.
+        """
+        if len(tasks) < 2:
+            raise ValueError("At least two tasks are required to form a chain")
+
+        if on_failure is not None and not isinstance(on_failure, Task):
+            raise ValueError("if passed, `on_failure` must be a Task instance")
+
+        # Maintain pointer to the head of the chain
+        task1 = tasks[0]
+        task1.on_failure = on_failure
+        for t1, t2 in itertools.pairwise(tasks):
+            t1.on_success = t2
+            # Set on_failure for all tasks if provided (None is fine here)
+            t2.on_failure = on_failure
+
+        return task1
+
+    @tracer.start_as_current_span("boilermaker.publish-task")
     async def publish_task(
         self,
         task: Task,
         delay: int = 0,
         publish_attempts: int = 1,
-    ):
-        """Turn the task into JSON and publish to Service Bus"""
+    ) -> Task:
+        """
+        Turn the task into JSON and publish to Service Bus.
+        Assign the sequence number once published.
+
+        :param task: The Task to publish
+        :param delay: Optional delay in seconds before task is visible
+        :param publish_attempts: How many times to attempt publishing
+        :returns: The published Task.
+        """
         encountered_errors = []
         for _i in range(publish_attempts):
             try:
-                return await self.service_bus_client.send_message(
+                result: list[int] = await self.service_bus_client.send_message(
                     task.model_dump_json(),
                     delay=delay,
                 )
+                if result and len(result) > 0:
+                    task._sequence_number = result[0]
+                return task
             except (
                 ServiceBusError,
                 ServiceBusConnectionError,
@@ -161,6 +227,7 @@ class Boilermaker:
                 encountered_errors,
             )
 
+    # ~~ ** Signal handling, receiver run, and message processing methods ** ~~
     async def signal_handler(self, receiver: ServiceBusReceiver, scope: CancelScope):
         """We would like to reschedule any open messages on SIGINT/SIGTERM"""
         with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
