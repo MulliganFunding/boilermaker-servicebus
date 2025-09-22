@@ -531,7 +531,7 @@ async def test_renew_message_lock(app, mockservicebus):
 
 
 async def test_renew_message_lock_errors(app, mockservicebus):
-    """Test that renew_message_lock is called with the correct message."""
+    """Test that renew_message_lock handles errors gracefully."""
     msg = DummyMsg()
     app._current_message = msg
     receiver = mockservicebus._receiver
