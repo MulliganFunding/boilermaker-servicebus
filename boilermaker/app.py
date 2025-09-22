@@ -4,6 +4,7 @@ Async tasks received from Service Bus go in here
 """
 
 import copy
+import datetime
 import inspect
 import itertools
 import logging
@@ -21,6 +22,7 @@ from anyio.abc import CancelScope
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus.aio import ServiceBusReceiver
 from azure.servicebus.exceptions import (
+    MessageAlreadySettled,
     MessageLockLostError,
     ServiceBusAuthenticationError,
     ServiceBusAuthorizationError,
@@ -99,6 +101,7 @@ class Boilermaker:
         self.function_registry: dict[str, typing.Any] = {}
         self.task_registry: dict[str, Task] = {}
         self._current_message: ServiceBusReceivedMessage | None = None
+        self._receiver: ServiceBusReceiver | None = None
 
     # ~~ ** Task Registration and Publishing ** ~~
     def task(self, **options):
@@ -395,6 +398,7 @@ class Boilermaker:
                         )
                         logger.error(msg)
                     self._current_message = None
+                    self._receiver = None
                     logger.warning(
                         f"Signal {signum=} received: shutting down. "
                         f"Msg returned to queue {sequence_number=}"
@@ -434,7 +438,9 @@ class Boilermaker:
             async with self.service_bus_client.get_receiver() as receiver:
                 # Handle SIGTERM: when found, agbandon message
                 tg.start_soon(self.signal_handler, receiver, tg.cancel_scope)
-
+                # Keep reference to receiver for lock renewals
+                self._receiver = receiver
+                # Main message loop
                 async for msg in receiver:
                     # This separate method is easier to test
                     # and easier to early-return from in case of skip or fail msg
@@ -451,13 +457,38 @@ class Boilermaker:
     ):
         try:
             await receiver.complete_message(msg)
-        except (MessageLockLostError, ServiceBusError, SessionLockLostError):
+        except (
+            MessageAlreadySettled,
+            MessageLockLostError,
+            ServiceBusError,
+            SessionLockLostError,
+        ):
             logmsg = (
                 f"Failed to settle message sequence_number={msg.sequence_number} "
                 f"exc_info={traceback.format_exc()}"
             )
             logger.error(logmsg)
         self._current_message = None
+
+    async def renew_message_lock(self) -> datetime.datetime | None:
+        """Renew the lock on the current message being processed."""
+        if self._receiver is None:
+            logger.warning("No receiver to renew lock for")
+            return None
+        if self._current_message is None:
+            logger.warning("No current message to renew lock for")
+            return None
+
+        try:
+            # Returns new expiration time if successful
+            return await self._receiver.renew_message_lock(self._current_message)
+        except (MessageLockLostError, MessageAlreadySettled, SessionLockLostError):
+            logmsg = (
+                f"Failed to renew message lock sequence_number={self._current_message.sequence_number} "
+                f"exc_info={traceback.format_exc()}"
+            )
+            logger.error(logmsg)
+            return None
 
     async def message_handler(
         self, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver

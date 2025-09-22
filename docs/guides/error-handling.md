@@ -51,6 +51,31 @@ async def resilient_task(state, data: dict):
         return {"status": "failed", "error": str(e)}
 ```
 
+## Message Lock Renewal for Long Tasks
+
+For long-running tasks that may exceed the Azure Service Bus message lock duration, renew the lock periodically:
+
+```python
+@app.task()
+async def long_running_task(state, data_file: str):
+    """Process large dataset with lock renewal."""
+    items = await load_large_dataset(data_file)
+
+    for i, item in enumerate(items):
+        await process_item(item)
+
+        # Renew lock every 100 items to prevent timeout
+        if i % 100 == 0:
+            await state.app.renew_message_lock()
+
+    return f"Processed {len(items)} items"
+```
+
+!!! note "More information"
+    Use message lock renewal for tasks that take longer than the message-lease duration for your queue.
+
+    Consult the [Azure documentation](https://learn.microsoft.com/en-us/azure/service-bus-messaging/message-transfers-locks-settlement#peeklock) for more information.
+
 ## Success/Failure Callbacks
 
 Chain tasks for error handling workflows.
