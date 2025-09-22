@@ -482,11 +482,12 @@ async def test_publish_task_error_handling(app, mockservicebus):
 #
 # Message Handling Logic Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
+class DummyMsg:
+    sequence_number = 789
+
+
 async def test_complete_message(app, mockservicebus):
     """Test that complete_message settles a message and clears current message."""
-    class DummyMsg:
-        sequence_number = 789
-
     msg = DummyMsg()
     receiver = mockservicebus._receiver
     app._current_message = object()
@@ -501,9 +502,6 @@ async def test_complete_message(app, mockservicebus):
 
 async def test_complete_message_with_error(app, mockservicebus):
     """Test that complete_message handles errors when settling a message."""
-    class DummyMsg:
-        sequence_number = 789
-
     msg = DummyMsg()
     app._current_message = object()
     receiver = mockservicebus._receiver
@@ -515,6 +513,55 @@ async def test_complete_message_with_error(app, mockservicebus):
     assert complete_call[0] == "complete_message"
     assert complete_call[1][0] is msg
     assert app._current_message is None
+
+
+async def test_renew_message_lock(app, mockservicebus):
+    """Test that renew_message_lock is called with the correct message."""
+    msg = DummyMsg()
+    receiver = mockservicebus._receiver
+    app._current_message = msg
+    app._receiver = receiver
+    await app.renew_message_lock()
+    # Check that renew_message_lock was called with the correct message
+    assert receiver.method_calls
+    renew_call = receiver.method_calls[0]
+    assert renew_call[0] == "renew_message_lock"
+    assert renew_call[1][0] is msg
+    assert app._current_message is msg
+
+
+async def test_renew_message_lock_errors(app, mockservicebus):
+    """Test that renew_message_lock is called with the correct message."""
+    msg = DummyMsg()
+    app._current_message = msg
+    receiver = mockservicebus._receiver
+    receiver.renew_message_lock.side_effect = ServiceBusError("fail")
+    app._receiver = receiver
+    await app.renew_message_lock()
+    # Check that renew_message_lock was called with the correct message
+    assert receiver.method_calls
+    renew_call = receiver.method_calls[0]
+    assert renew_call[0] == "renew_message_lock"
+    assert renew_call[1][0] is msg
+    assert app._current_message is msg
+
+
+async def test_renew_message_lock_missing(app, mockservicebus):
+    """Test that renew_message_lock is called with the correct message."""
+
+    msg = DummyMsg()
+    app._current_message = msg
+    app._receiver = None
+
+    # Should log warnings but not raise
+    await app.renew_message_lock()
+    assert not mockservicebus._receiver.method_calls
+
+    receiver = mockservicebus._receiver
+    app._current_message = None
+    app._receiver = receiver
+    await app.renew_message_lock()
+    assert not mockservicebus._receiver.method_calls
 
 
 async def test_task_garbage_message(app, mockservicebus):
