@@ -71,6 +71,11 @@ async def long_running_task(state, data_file: str):
     return f"Processed {len(items)} items"
 ```
 
+!!! note "More information"
+    Use message lock renewal for tasks that take longer than the message-lease duration for your queue.
+
+    Consult the [Azure documentation](https://learn.microsoft.com/en-us/azure/service-bus-messaging/message-transfers-locks-settlement#peeklock) for more information.
+
 ## Success/Failure Callbacks
 
 Chain tasks for error handling workflows.

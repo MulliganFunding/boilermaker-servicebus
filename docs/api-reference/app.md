@@ -8,7 +8,7 @@
 
 ## Message Lock Renewal
 
-For long-running tasks that may exceed Azure Service Bus message lock duration, use `renew_message_lock()` to maintain exclusive access to the message:
+For long-running tasks that may exceed Azure Service Bus message lock duration, it's possible to use `renew_message_lock()` to maintain exclusive access to the message (and prevent it from being redelivered):
 
 ```python
 @app.task()
@@ -27,13 +27,7 @@ async def process_large_file(state, file_path: str):
     return f"Processed {len(lines)} lines"
 ```
 
-!!! note "When to Use"
-    Use message lock renewal for tasks that:
+!!! note "More information"
+    Use message lock renewal for tasks that take longer than the message-lease duration for your queue.
 
-    - Process large datasets or files
-    - Make multiple external API calls
-    - Perform complex computations taking several minutes
-    - Cannot be easily broken into smaller tasks
-
-!!! warning "Lock Duration Limits"
-    Azure Service Bus has maximum lock duration limits. For extremely long operations, consider breaking them into smaller, chainable tasks instead.
+    Consult the [Azure documentation](https://learn.microsoft.com/en-us/azure/service-bus-messaging/message-transfers-locks-settlement#peeklock) for more information.
