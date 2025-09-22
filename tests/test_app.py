@@ -11,7 +11,7 @@ from anyio import create_task_group, to_thread
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus._common.constants import SEQUENCENUBMERNAME
 from azure.servicebus._pyamqp.message import Message
-from azure.servicebus.exceptions import ServiceBusError
+from azure.servicebus.exceptions import MessageLockLostError, ServiceBusError
 from boilermaker import failure, retries
 from boilermaker.app import Boilermaker, BoilermakerAppException
 from boilermaker.task import Task
@@ -535,7 +535,7 @@ async def test_renew_message_lock_errors(app, mockservicebus):
     msg = DummyMsg()
     app._current_message = msg
     receiver = mockservicebus._receiver
-    receiver.renew_message_lock.side_effect = ServiceBusError("fail")
+    receiver.renew_message_lock.side_effect = MessageLockLostError()
     app._receiver = receiver
     await app.renew_message_lock()
     # Check that renew_message_lock was called with the correct message

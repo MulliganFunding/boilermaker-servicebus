@@ -4,6 +4,7 @@ Async tasks received from Service Bus go in here
 """
 
 import copy
+import datetime
 import inspect
 import itertools
 import logging
@@ -21,6 +22,7 @@ from anyio.abc import CancelScope
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus.aio import ServiceBusReceiver
 from azure.servicebus.exceptions import (
+    MessageAlreadySettled,
     MessageLockLostError,
     ServiceBusAuthenticationError,
     ServiceBusAuthorizationError,
@@ -455,7 +457,12 @@ class Boilermaker:
     ):
         try:
             await receiver.complete_message(msg)
-        except (MessageLockLostError, ServiceBusError, SessionLockLostError):
+        except (
+            MessageAlreadySettled,
+            MessageLockLostError,
+            ServiceBusError,
+            SessionLockLostError,
+        ):
             logmsg = (
                 f"Failed to settle message sequence_number={msg.sequence_number} "
                 f"exc_info={traceback.format_exc()}"
@@ -463,7 +470,7 @@ class Boilermaker:
             logger.error(logmsg)
         self._current_message = None
 
-    async def renew_message_lock(self) -> None:
+    async def renew_message_lock(self) -> datetime.datetime | None:
         """Renew the lock on the current message being processed."""
         if self._receiver is None:
             logger.warning("No receiver to renew lock for")
@@ -473,13 +480,15 @@ class Boilermaker:
             return None
 
         try:
-            await self._receiver.renew_message_lock(self._current_message)
-        except (MessageLockLostError, ServiceBusError, SessionLockLostError):
+            # Returns new expiration time if successful
+            return await self._receiver.renew_message_lock(self._current_message)
+        except (MessageLockLostError, MessageAlreadySettled, SessionLockLostError):
             logmsg = (
                 f"Failed to renew message lock sequence_number={self._current_message.sequence_number} "
                 f"exc_info={traceback.format_exc()}"
             )
             logger.error(logmsg)
+            return None
 
     async def message_handler(
         self, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
