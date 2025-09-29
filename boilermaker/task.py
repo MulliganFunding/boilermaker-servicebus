@@ -1,12 +1,26 @@
 import datetime
+import enum
+import logging
 import typing
+from collections import defaultdict
+from pathlib import Path
 
 import uuid_utils as uuid
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, Json
 
 from . import retries
 
+logger = logging.getLogger(__name__)
 DEFAULT_RETRY_ATTEMPTS = 1
+TaskId = typing.NewType("TaskId", str)
+GraphId = typing.NewType("GraphId", str)
+
+
+class CallbackType(enum.IntEnum):
+    """Enumeration of callback types for task execution."""
+
+    Success = 1
+    Failure = 2
 
 
 class Task(BaseModel):
@@ -41,9 +55,9 @@ class Task(BaseModel):
         >>> task1 >> task2 >> task3  # Success chain
         >>> task1.on_failure = error_handler_task
     """
+
     # Unique identifier for this task: UUID7 for timestamp ordered identifiers.
-    # We include a default for users upgrading previous versions where this key is missing.
-    task_id: str = Field(default_factory=lambda: str(uuid.uuid7()))
+    task_id: TaskId = Field(default_factory=lambda: TaskId(str(uuid.uuid7())))
     # Whether we should dead-letter a failing message
     should_dead_letter: bool = True
     # At-most-once vs at-least-once (default)
@@ -56,13 +70,18 @@ class Task(BaseModel):
     policy: retries.RetryPolicy
     # Represents actual arguments: must be jsonable!
     payload: dict[str, typing.Any]
+
     # Eventhub event metadata below
     # opentelemetry parent trace id is included here
     diagnostic_id: str | None
+
     # Internal use: Service Bus sequence number once published
     _sequence_number: int | None = None
 
-    # Callbacks for success and failure
+    # If this task is a member of a TaskGraph, this will identify the root node.
+    graph_id: GraphId | None = None
+
+    # Callbacks for success and failure (used for chains)
     on_success: typing.Optional["Task"] = None
     on_failure: typing.Optional["Task"] = None
 
@@ -142,6 +161,10 @@ class Task(BaseModel):
         """
         now = datetime.datetime.now(datetime.UTC)
         return self.attempts.inc(now)
+
+    def __hash__(self) -> int:
+        """Hash based on unique task_id for use in sets and dicts."""
+        return hash(self.task_id)
 
     def __rshift__(self, other: "Task") -> "Task":
         """Set success callback using >> operator (right-shift chaining).
@@ -236,3 +259,201 @@ class Task(BaseModel):
             },
             diagnostic_id=None,
         )
+
+
+class TaskStatus(enum.StrEnum):
+    """Enumeration of possible task execution statuses."""
+
+    Pending = "pending"
+    Started = "started"
+    Success = "success"
+    Failure = "failure"
+    Retry = "retry"
+    Deadlettered = "deadlettered"
+    # In case we want to explicitly abandon a message
+    # We do not currently offer this functionality
+    Abandoned = "abandoned"
+
+
+class TaskResultSlim(BaseModel):
+    """Slim representation of a task result for lightweight status checks.
+
+    This class provides a minimal view of a task's execution result,
+    focusing on essential attributes like task ID, status, and error messages.
+    It is useful for scenarios where full task result details (return value, exception, errors)
+    are not required.
+
+    Attributes:
+        task_id: Identifier of the task.
+        graph_id: Optional identifier of the task graph this task belongs to.
+        status: Execution status of the task.
+    """
+
+    task_id: TaskId
+    graph_id: GraphId | None = None
+    status: TaskStatus
+
+    def directory_path(self) -> Path:
+        """Returns the directory path for storing this task result.
+
+        The directory is based on the root and parent task IDs to group related tasks.
+
+        Returns:
+            A string representing the directory path.
+        """
+        if self.graph_id:
+            return Path(self.graph_id)
+        return Path(self.task_id)
+
+    def storage_path(self) -> Path:
+        """Returns the storage path for this task result.
+
+        The storage path is based on the root and parent task IDs to group related tasks.
+
+        Returns:
+            A string representing the storage path.
+        """
+        directory = self.directory_path()
+        return directory / f"{self.task_id}.json"
+
+
+class TaskResult(TaskResultSlim):
+    """Represents the result of a task execution.
+
+    Encapsulates the outcome of a task, including success status,
+    return value, and any exception raised during execution.
+
+    Attributes:
+        task_id: Identifier of the task.
+        status: Execution status of the task.
+        result: The return value of the task if successful.
+        errors: List of error messages if any occurred.
+        exception: Formatted exception (as a string) raised if the task failed.
+    """
+
+    # Inherits task_id, graph_id, and status from TaskResultSlim
+
+    # Out from evaluation of Task: must be jsonable!
+    result: Json[typing.Any] | None = None
+    # Custom error messages, if any.
+    errors: list[str] | None = None
+    # String-formatted exception, if any.
+    formatted_exception: str | None = None
+
+
+class TaskGraph(BaseModel):
+    """
+    Represents a Directed Acyclic Graph (DAG) of tasks.
+
+    A TaskGraph encapsulates a collection of tasks with defined dependencies ("antecedents").
+    Each task can have multiple child tasks that depend on its successful completion.
+
+    Each task in the graph is represented as a node, and edges define the
+    parent-child relationships between tasks. When all antecedent tasks
+    of a given task are completed successfully, that task becomes eligible
+    for execution.
+
+    Every task eligible for execution can be immediately published to the task queue
+    (which allows for parallel execution of independent tasks).
+
+    In short, if all parent tasks have succeeded, we can immediately
+    *schedule* their children.
+
+    We expect the graph to be a DAG: no cycles are allowed.
+
+    Each completed task will have its result stored in persistent storage,
+    and checking whether the *next* set of tasks is "ready" means deserializing
+    their antecedents and checking their statuses. In other words,
+    we expect the graph to be serialized to storage when a TaskGraph is *first* published
+    but we also expect it to be loaded into memory from storage at the conclusion of each task execution.
+
+    The order of operations is like this:
+    - [Send]: Task published -> Graph serialized to storage. We do not write it again!
+    - [Receive]: Task invoked
+        -> Evaluation -> TaskResult stored to storage.
+        -> Graph loaded from storage (includes latest TaskResultSlim instances).
+        -> Check which tasks are ready.
+        -> Publish ready tasks.
+
+    Attributes:
+        root_id: Unique identifier for the root of the DAG
+        children: Mapping of task IDs to Task instances
+        edges: Mapping of parent task IDs to lists of child task IDs
+        # On write -> TaskResult; on read -> TaskResultSlim
+        results: Mapping of task IDs to their TaskResult or TaskResultSlim
+    """
+
+    StorageName: typing.ClassVar[str] = "graph.json"
+
+    # The graph has an ID
+    root_id: GraphId = Field(default_factory=lambda: GraphId(str(uuid.uuid7())))
+    # Children is a mapping of task IDs to tasks
+    children: dict[TaskId, Task] = Field(default_factory=dict)
+    # Edges is a mapping of parent task IDs to sets of child task IDs
+    edges: dict[TaskId, set[TaskId]] = Field(default_factory=lambda: defaultdict(set))
+
+    # Task results go here; these get loaded from JSON files on deserialization.
+    # We do not write these back because we write only one time: when first publishing this TaskGraph.
+    results: dict[TaskId, TaskResultSlim | TaskResult] = Field(default_factory=dict)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @classmethod
+    def graph_path(cls, root_id: GraphId) -> Path:
+        """Returns the storage path for an arbitrary GraphId."""
+        return Path(root_id) / cls.StorageName
+
+    @property
+    def storage_path(self) -> Path:
+        """Returns the storage path for this task graph."""
+        return self.graph_path(self.root_id)
+
+    def add_task(self, task: Task, parent_id: TaskId | None = None) -> None:
+        """Add a task to the graph.
+
+        Args:
+            task: The Task instance to add to the graph.
+        """
+        self.children[task.task_id] = task
+        if parent_id:
+            if parent_id not in self.edges:
+                self.edges[parent_id] = set()
+            self.edges[parent_id].add(task.task_id)
+
+    def complete_task(self, result: TaskResult) -> TaskResult:
+        """Mark a task as completed with result."""
+        if result is not None:
+            self.results[result.task_id] = result
+        return result
+
+    def task_is_unrunnable(self, task_id: str) -> bool:
+        """Check if a task is ready to be executed."""
+        return self.all_antecedents_succeeded(task_id)
+
+    def all_antecedents_succeeded(self, task_id: TaskId) -> bool:
+        """Check if all antecedent tasks of a given task are completed with `Success` result."""
+        for parent_id, children_ids in self.edges.items():
+            if task_id in children_ids:
+                if parent_id not in self.results:
+                    return False
+                if not self.results[parent_id].status == TaskStatus.Success:
+                    return False
+        # If we get here, all antecedents succeeded *OR* there are no antecedents.
+        return True
+
+    def ready_tasks(self) -> typing.Generator[Task, None, None]:
+        """Get a list of tasks that are ready to be executed."""
+        for task_id in self.children.keys():
+            if task_id not in self.results and self.task_is_unrunnable(task_id):
+                yield self.children[task_id]
+
+    def get_result(self, task_id: TaskId) -> TaskResultSlim | TaskResult | None:
+        """Get the result of a completed task."""
+        return self.results.get(task_id)
+
+    def get_status(self, task_id: str) -> TaskStatus | None:
+        """Check if a task is completed."""
+        tr = self.get_result(task_id)
+        if tr is None:
+            return None
+        return tr.status

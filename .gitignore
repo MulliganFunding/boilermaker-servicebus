@@ -19,3 +19,5 @@ htmlcov/
 coverage.xml
 unittest.junit.xml
 site/
+todo*.md
+tmp/

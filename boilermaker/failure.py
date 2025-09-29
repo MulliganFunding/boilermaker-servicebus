@@ -10,7 +10,6 @@ class _TaskFailureResult:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            # Put any initialization here.
         return cls._instance
 
     def __call__(self):  # pragma: no cover
