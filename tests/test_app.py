@@ -467,13 +467,13 @@ async def test_signal_handler_abandons_message(app, mockservicebus, evaluator):
     dummy_msg.sequence_number = 123
     receiver = mockservicebus._receiver
     evaluator.task.msg = dummy_msg
+    app._message_evaluators[123] = evaluator
     # Test inspired by anyio tests for `open_signal_receiver`
     async with create_task_group() as tg:
         tg.start_soon(app.signal_handler, tg.cancel_scope)
         await to_thread.run_sync(os.kill, os.getpid(), signal.SIGINT)
 
     receiver.abandon_message.assert_awaited_with(dummy_msg)
-    assert evaluator._current_message is None
 
 
 async def test_signal_handler_abandons_message_with_error(
@@ -485,14 +485,14 @@ async def test_signal_handler_abandons_message_with_error(
     evaluator.task.msg = dummy_msg
     receiver = mockservicebus._receiver
     receiver.abandon_message.side_effect = ServiceBusError("fail")
-    evaluator._current_message = dummy_msg
+    evaluator.task.msg = dummy_msg
+    app._message_evaluators[123] = evaluator
     # Test inspired by anyio tests for `open_signal_receiver`
     async with create_task_group() as tg:
         tg.start_soon(app.signal_handler, tg.cancel_scope)
         await to_thread.run_sync(os.kill, os.getpid(), signal.SIGINT)
 
     receiver.abandon_message.assert_awaited_with(dummy_msg)
-    assert evaluator._current_message is None
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #

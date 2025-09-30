@@ -381,7 +381,8 @@ class Boilermaker:
             async for signum in signals:
                 # We want all of these evaluators to abandon their current message
                 async with create_task_group() as abandon_group:
-                    for evaluator in self._message_evaluators:
+                    for sequence_number, evaluator in self._message_evaluators.items():
+                        logger.info(f"Pushing message back to queue {sequence_number=}")
                         abandon_group.start_soon(evaluator.abandon_current_message)
 
                 logger.warning(f"Signal {signum=} received: shutting down. ")

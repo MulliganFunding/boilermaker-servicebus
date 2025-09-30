@@ -50,16 +50,6 @@ class TaskGraphEvaluator(MessageHandler):
     ):
         """Individual message handler"""
         message_settled = False
-        sequence_number = msg.sequence_number
-        self._current_message = msg
-        try:
-            task = Task.model_validate_json(str(msg))
-        except (JSONDecodeError, ValidationError):
-            log_err_msg = f"Invalid task sequence_number={sequence_number} exc_info={traceback.format_exc()}"
-            logger.error(log_err_msg)
-            # This task is not parseable
-            await self.complete_message()
-            return None
 
         # Immediately record an attempt
         task.record_attempt()
