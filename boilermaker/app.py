@@ -374,14 +374,15 @@ class Boilermaker:
     # ~~ ** Signal handling, receiver run, and message processing methods ** ~~
     async def signal_handler(
         self,
-        tg: TaskGroup,
         scope: CancelScope,
     ):
         """We would like to reschedule any open messages on SIGINT/SIGTERM"""
         with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
             async for signum in signals:
-                for evaluator in self._message_evaluators:
-                    tg.start_soon(evaluator.abandon_current_message)
+                # We want all of these evaluators to abandon their current message
+                async with create_task_group() as abandon_group:
+                    for evaluator in self._message_evaluators:
+                        abandon_group.start_soon(evaluator.abandon_current_message)
 
                 logger.warning(f"Signal {signum=} received: shutting down. ")
                 scope.cancel()
@@ -418,7 +419,7 @@ class Boilermaker:
         async with create_task_group() as tg:
             async with self.service_bus_client.get_receiver() as receiver:
                 # Handle SIGTERM: when found -> instruct evaluator to abandon message
-                tg.start_soon(self.signal_handler, tg, tg.cancel_scope)
+                tg.start_soon(self.signal_handler, tg.cancel_scope)
 
                 # Main message loop
                 async for msg in receiver:

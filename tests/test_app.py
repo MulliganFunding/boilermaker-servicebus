@@ -466,10 +466,10 @@ async def test_signal_handler_abandons_message(app, mockservicebus, evaluator):
     dummy_msg = MagicMock()
     dummy_msg.sequence_number = 123
     receiver = mockservicebus._receiver
-    evaluator._current_message = dummy_msg
+    evaluator.task.msg = dummy_msg
     # Test inspired by anyio tests for `open_signal_receiver`
     async with create_task_group() as tg:
-        tg.start_soon(app.signal_handler, evaluator, tg.cancel_scope)
+        tg.start_soon(app.signal_handler, tg.cancel_scope)
         await to_thread.run_sync(os.kill, os.getpid(), signal.SIGINT)
 
     receiver.abandon_message.assert_awaited_with(dummy_msg)
@@ -482,12 +482,13 @@ async def test_signal_handler_abandons_message_with_error(
     """Test that signal_handler handles errors when abandoning a message."""
     dummy_msg = MagicMock()
     dummy_msg.sequence_number = 123
+    evaluator.task.msg = dummy_msg
     receiver = mockservicebus._receiver
     receiver.abandon_message.side_effect = ServiceBusError("fail")
     evaluator._current_message = dummy_msg
     # Test inspired by anyio tests for `open_signal_receiver`
     async with create_task_group() as tg:
-        tg.start_soon(app.signal_handler, evaluator, tg.cancel_scope)
+        tg.start_soon(app.signal_handler, tg.cancel_scope)
         await to_thread.run_sync(os.kill, os.getpid(), signal.SIGINT)
 
     receiver.abandon_message.assert_awaited_with(dummy_msg)
@@ -542,7 +543,7 @@ async def test_run_calls_message_handler(app, mockservicebus):
         tg.cancel_scope.cancel()
 
     assert len(app.message_handler.call_args_list) == 2
-    msgs = [call[0][1] for call in app.message_handler.call_args_list]
+    msgs = [call[0][0] for call in app.message_handler.call_args_list]
     assert msgs == dummy_msgs
 
     # Should never publish

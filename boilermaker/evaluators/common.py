@@ -63,10 +63,10 @@ class MessageActions:
             return None
 
     @staticmethod
-    async def abandon_current_message(
+    async def abandon_message(
         msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
     ) -> None:
-        """Abandon the current message being processed."""
+        """Abandon the message being processed."""
         if msg is not None:
             sequence_number = msg.sequence_number
             try:
@@ -209,7 +209,7 @@ class MessageHandler:
 
     # Message handling actions
     async def abandon_current_message(self) -> None:
-        return await MessageActions.abandon_current_message(self.current_msg, self._receiver)
+        return await MessageActions.abandon_message(self.current_msg, self._receiver)
 
     async def complete_message(self) -> None:
         return await MessageActions.complete_message(self.current_msg, self._receiver)

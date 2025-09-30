@@ -52,7 +52,6 @@ def app(sbus):
     return Boilermaker(DEFAULT_STATE, sbus)
 
 
-
 @pytest.fixture
 def dummy_task():
     """Create a basic task for testing."""
@@ -209,7 +208,6 @@ async def test_message_handler_renew_message_lock_errors_integration(mockservice
 async def test_message_handler_renew_message_lock_missing_integration(mockservicebus, dummy_task):
     """Test that MessageHandler renew_message_lock handles missing receiver/message through NoStorageEvaluator."""
 
-
     mock_task_publisher = AsyncMock()
     function_registry = {"test_function": AsyncMock()}
 
@@ -243,29 +241,29 @@ async def test_message_handler_renew_message_lock_missing_integration(mockservic
     assert mockservicebus._receiver.renew_message_lock.called
 
 
-async def test_abandon_current_message_success(mockservicebus):
-    """Test that abandon_current_message successfully abandons a message."""
+async def test_abandon_message_success(mockservicebus):
+    """Test that abandon_message successfully abandons a message."""
     msg = DummyMsg()
 
-    await MessageActions.abandon_current_message(msg, mockservicebus._receiver)
+    await MessageActions.abandon_message(msg, mockservicebus._receiver)
 
     mockservicebus._receiver.abandon_message.assert_called_once_with(msg)
 
 
-async def test_abandon_current_message_with_error(mockservicebus):
-    """Test that abandon_current_message handles errors gracefully."""
+async def test_abandon_message_with_error(mockservicebus):
+    """Test that abandon_message handles errors gracefully."""
     msg = DummyMsg()
     mockservicebus._receiver.abandon_message.side_effect = ServiceBusError("abandon failed")
 
     # Should not raise an exception
-    await MessageActions.abandon_current_message(msg, mockservicebus._receiver)
+    await MessageActions.abandon_message(msg, mockservicebus._receiver)
 
     mockservicebus._receiver.abandon_message.assert_called_once_with(msg)
 
 
-async def test_abandon_current_message_none_msg(mockservicebus):
-    """Test that abandon_current_message handles None message gracefully."""
-    await MessageActions.abandon_current_message(None, mockservicebus._receiver)
+async def test_abandon_message_none_msg(mockservicebus):
+    """Test that abandon_message handles None message gracefully."""
+    await MessageActions.abandon_message(None, mockservicebus._receiver)
 
     # Should not have called abandon_message
     mockservicebus._receiver.abandon_message.assert_not_called()
