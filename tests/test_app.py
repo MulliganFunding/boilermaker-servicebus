@@ -1,9 +1,10 @@
 import asyncio
 import os
+import random
 import signal
 from collections.abc import Sequence
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from anyio import create_task_group, to_thread
@@ -548,3 +549,28 @@ async def test_run_calls_message_handler(app, mockservicebus):
 
     # Should never publish
     assert len(mockservicebus._sender.method_calls) == 0
+
+
+async def test_handler_garbage_message(app, mockservicebus):
+    """Test that message_handler handles invalid JSON messages gracefully."""
+    message_num = random.randint(100, 1000)
+    # We are going to make a custom, totally garbage message
+    my_frame = [0, 0, 0]
+    amqp_received_message = Message(
+        data=[b"{{\\]]))"],  # Invalid JSON
+        message_annotations={SEQUENCENUBMERNAME: message_num},
+    )
+    msg = ServiceBusReceivedMessage(
+        amqp_received_message, receiver=None, frame=my_frame
+    )
+    with patch("boilermaker.app.evaluator_factory") as mock_eval:
+        # *EVALUATE*: We can handle the failure task now
+        result = await app.message_handler(msg, mockservicebus._receiver)
+        assert result is None
+        mock_eval.assert_not_called()
+
+
+async def test_close(app, mockservicebus):
+    app.service_bus_client = AsyncMock()
+    await app.close()
+    app.service_bus_client.close.assert_called_once()

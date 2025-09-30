@@ -93,7 +93,8 @@ async def test_task_handler_debug_task(evaluator):
 # Message Handling Logic Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-async def test_task_garbage_message(evaluator, mockservicebus):
+
+async def test_handler_garbage_message(evaluator, mockservicebus):
     """Test that message_handler handles invalid JSON messages gracefully."""
     message_num = random.randint(100, 1000)
     # We are going to make a custom, totally garbage message
@@ -105,7 +106,7 @@ async def test_task_garbage_message(evaluator, mockservicebus):
     msg = ServiceBusReceivedMessage(
         amqp_received_message, receiver=None, frame=my_frame
     )
-
+    evaluator.task.msg = msg
     # Now we can run the task
     result = await evaluator.message_handler()
     assert result is None
