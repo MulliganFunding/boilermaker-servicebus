@@ -371,7 +371,7 @@ class TaskResult(TaskResultSlim):
     # Inherits task_id, graph_id, and status from TaskResultSlim
 
     # Out from evaluation of Task: must be jsonable!
-    result: Json[typing.Any] | None = None
+    result: typing.Any | None = None
     # Custom error messages, if any.
     errors: list[str] | None = None
     # String-formatted exception, if any.
@@ -423,7 +423,7 @@ class TaskGraph(BaseModel):
     StorageName: typing.ClassVar[str] = "graph.json"
 
     # The graph has an ID
-    root_id: GraphId = Field(default_factory=lambda: GraphId(str(uuid.uuid7())))
+    graph_id: GraphId = Field(default_factory=lambda: GraphId(str(uuid.uuid7())))
     # Children is a mapping of task IDs to tasks
     children: dict[TaskId, Task] = Field(default_factory=dict)
     # Edges is a mapping of parent task IDs to sets of child task IDs
@@ -436,14 +436,14 @@ class TaskGraph(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @classmethod
-    def graph_path(cls, root_id: GraphId) -> Path:
+    def graph_path(cls, graph_id: GraphId) -> Path:
         """Returns the storage path for an arbitrary GraphId."""
-        return Path(root_id) / cls.StorageName
+        return Path(graph_id) / cls.StorageName
 
     @property
     def storage_path(self) -> Path:
         """Returns the storage path for this task graph."""
-        return self.graph_path(self.root_id)
+        return self.graph_path(self.graph_id)
 
     def add_task(self, task: Task, parent_id: TaskId | None = None) -> None:
         """Add a task to the graph.
@@ -451,20 +451,33 @@ class TaskGraph(BaseModel):
         Args:
             task: The Task instance to add to the graph.
         """
+        # Ensure task is part of this graph
+        task.graph_id = self.graph_id
         self.children[task.task_id] = task
+
         if parent_id:
             if parent_id not in self.edges:
                 self.edges[parent_id] = set()
             self.edges[parent_id].add(task.task_id)
 
-    def complete_task(self, result: TaskResult) -> TaskResult:
-        """Mark a task as completed with result."""
-        if result is not None:
-            self.results[result.task_id] = result
+    def start_task(self, task_id: TaskId) -> TaskResultSlim:
+        """Mark a task as started to prevent double-scheduling."""
+        result = TaskResultSlim(
+            task_id=task_id, graph_id=self.graph_id, status=TaskStatus.Started
+        )
+        self.results[task_id] = result
         return result
 
-    def task_is_unrunnable(self, task_id: str) -> bool:
-        """Check if a task is ready to be executed."""
+    def add_result(self, result: TaskResult) -> TaskResult:
+        """Mark a task as completed with result."""
+        if result.task_id not in self.children:
+            raise ValueError(f"Task {result.task_id} not found in graph")
+
+        self.results[result.task_id] = result
+        return result
+
+    def task_is_ready(self, task_id: TaskId) -> bool:
+        """Check if a task is ready to be executed (antecedents succeeded and not yet started)."""
         return self.all_antecedents_succeeded(task_id)
 
     def all_antecedents_succeeded(self, task_id: TaskId) -> bool:
@@ -479,9 +492,16 @@ class TaskGraph(BaseModel):
         return True
 
     def ready_tasks(self) -> typing.Generator[Task, None, None]:
-        """Get a list of tasks that are ready to be executed."""
+        """Get a list of tasks that are ready to be executed (not started and all antecedents succeeded)."""
         for task_id in self.children.keys():
-            if task_id not in self.results and self.task_is_unrunnable(task_id):
+            # Task is ready if:
+            # 1. It has no result yet (never started) OR it has Pending status
+            # 2. All its antecedents have succeeded
+            task_result = self.results.get(task_id)
+            is_not_started = (
+                task_result is None or task_result.status == TaskStatus.Pending
+            )
+            if is_not_started and self.task_is_ready(task_id):
                 yield self.children[task_id]
 
     def get_result(self, task_id: TaskId) -> TaskResultSlim | TaskResult | None:

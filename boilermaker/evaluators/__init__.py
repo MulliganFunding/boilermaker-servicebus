@@ -10,7 +10,7 @@ from boilermaker.types import TaskHandler
 from .base import NoStorageEvaluator
 from .common import MessageActions, MessageHandler
 from .results_store import ResultsStorageTaskEvaluator
-from .task_graphs import TaskGraphEvaluator
+from .task_graph import TaskGraphEvaluator
 
 
 def evaluator_factory(

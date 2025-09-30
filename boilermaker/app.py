@@ -28,7 +28,7 @@ from . import tracing
 from .evaluators import evaluator_factory, MessageActions, MessageHandler
 from .retries import RetryPolicy
 from .storage import StorageInterface
-from .task import Task
+from .task import Task, TaskGraph
 from .types import TaskHandler
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
@@ -320,10 +320,30 @@ class Boilermaker:
 
         return task1
 
+    def create_graph(self) -> TaskGraph:
+        """Create a new TaskGraph for building complex workflows.
+
+        Returns:
+            TaskGraph: New empty task graph ready for adding tasks and dependencies
+
+        Example:
+            >>> graph = app.create_graph()
+            >>> task1 = app.create_task(fetch_data, url="...")
+            >>> task2 = app.create_task(process_data)
+            >>> task3 = app.create_task(save_results)
+            >>>
+            >>> graph.add_task(task1)  # Root task with no dependencies
+            >>> graph.add_task(task2, parent_id=task1.task_id)  # Depends on task1
+            >>> graph.add_task(task3, parent_id=task2.task_id)  # Depends on task2
+            >>>
+            >>> await app.publish_graph(graph)
+        """
+        return TaskGraph()
+
     @tracer.start_as_current_span("boilermaker.publish-task")
     async def publish_task(
         self,
-        task: Task,  # or TaskGraph?
+        task: Task,
         delay: int = 0,
         publish_attempts: int = 1,
     ) -> Task:
@@ -370,6 +390,39 @@ class Boilermaker:
                 "Error encountered while publishing task to service bus",
                 encountered_errors,
             )
+
+    async def publish_graph(self, graph: TaskGraph) -> TaskGraph:
+        """Publish a TaskGraph workflow to storage and schedule initial tasks.
+
+        Args:
+            graph: TaskGraph instance to publish
+
+        Returns:
+            TaskGraph: The same graph instance
+
+        Raises:
+            BoilermakerAppException: If storage or task publishing fails
+        """
+        if not self.results_storage:
+            raise BoilermakerAppException(
+                "Results storage is required for TaskGraph workflows", []
+            )
+
+        # Set graph_id for all tasks in the graph
+        for task in graph.children.values():
+            if task.graph_id != graph.graph_id:
+                raise ValueError(
+                    f"All tasks must have a graph_id; expected {graph.graph_id}, found {task.graph_id}"
+                )
+
+        # Store the graph definition
+        await self.results_storage.store_graph(graph)
+
+        # Publish all ready tasks (should be root nodes with no dependencies)
+        for task in graph.ready_tasks():
+            await self.publish_task(task)
+
+        return graph
 
     # ~~ ** Signal handling, receiver run, and message processing methods ** ~~
     async def signal_handler(

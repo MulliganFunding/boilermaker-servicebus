@@ -3,14 +3,11 @@ import time
 import traceback
 import typing
 from collections.abc import Awaitable, Callable
-from json.decoder import JSONDecodeError
 
-from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus.aio import ServiceBusReceiver
-from pydantic import ValidationError
 
-from boilermaker import sample
-from boilermaker.failure import TaskFailureResult, TaskFailureResultType
+from boilermaker import failure, sample
+from boilermaker.failure import TaskFailureResultType
 from boilermaker.retries import RetryException
 from boilermaker.storage import StorageInterface
 from boilermaker.task import Task, TaskResult, TaskStatus
@@ -22,6 +19,8 @@ logger = logging.getLogger("boilermaker.app")
 
 
 class ResultsStorageTaskEvaluator(MessageHandler):
+    """Evaluator for standalone tasks (not part of TaskGraph) that stores results."""
+
     def __init__(
         self,
         receiver: ServiceBusReceiver,
@@ -46,128 +45,152 @@ class ResultsStorageTaskEvaluator(MessageHandler):
         )
 
     async def message_handler(self):
-        """Individual message handler"""
+        """Handle a standalone task message with result storage."""
         message_settled = False
 
-        # Immediately record an attempt
+        # Record attempt
         self.task.record_attempt()
 
-        # at-most once: "complete" msg even if it fails later
-        if task.acks_early:
+        # Handle early acknowledgment
+        if self.task.acks_early:
             await self.complete_message()
             message_settled = True
 
-        if not task.can_retry:
-            logger.error(f"Retries exhausted for event {task.function_name}")
+        # Check retry eligibility
+        if not self.task.can_retry:
+            logger.error(f"Retries exhausted for task {self.task.function_name}")
             if not message_settled:
                 await self.deadletter_or_complete_task(
                     "ProcessingError", detail="Retries exhausted"
                 )
 
-            # TODO: Storage task result as failure
+            # Store failure result
+            failure_result = TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                status=TaskStatus.Failure,
+                errors=["Retries exhausted"],
+            )
+            await self.storage_interface.store_task_result(failure_result)
 
-            # This task is a failure because it did not succeed and retries are exhausted
-            if task.on_failure is not None:
-                await self.publish_task(task.on_failure)
-            # Early return here: no more processing
+            # Handle callback
+            if self.task.on_failure is not None:
+                await self.publish_task(self.task.on_failure)
             return None
 
-        # Actually handle the task or TaskGraph here
+        # Execute the task
         try:
-            result = await self.task_handler(task, sequence_number)
+            result = await self.task_handler()
 
-            # TODO: modify behavior here for DAG invocations...
-            # Check and handle failure first
-            if result is TaskFailureResult:
+            # Check if result is TaskFailureResult (special failure case)
+            if result is failure.TaskFailureResult:
                 # Deadletter or complete the message
                 if not message_settled:
-                    await self.deadletter_or_complete_task(
-                        "TaskFailed",
-                    )
+                    await self.deadletter_or_complete_task("TaskFailed")
                     message_settled = True
-                if task.on_failure is not None:
+                if self.task.on_failure is not None:
                     # Schedule on_failure task
-                    await self.publish_task(task.on_failure)
-            # Success case: publish the next task (if desired)
-            elif task.on_success is not None:
-                # Success case: publish the next task
-                await self.publish_task(task.on_success)
+                    await self.publish_task(self.task.on_failure)
+            else:
+                # Handle success callback
+                if self.task.on_success is not None:
+                    await self.publish_task(self.task.on_success)
+
         except RetryException as retry:
-            # A retry has been requested:
-            # Calculate next delay and publish retry.
-            # Do not run on_failure run until after retries exhausted!
-            # The `retry` RetryException may have a policy -> What if it's different from the Task?
-            if retry.policy and retry.policy != task.policy:
-                # This will publish the *next* instance of the task using *this* policy
-                task.policy = retry.policy
+            # Handle retry request
+            if retry.policy and retry.policy != self.task.policy:
+                self.task.policy = retry.policy
                 logger.warning(f"Task policy updated to retry policy {retry.policy}")
 
-            delay = task.get_next_delay()
-            warn_msg = (
-                f"{retry.msg} "
-                f"[attempt {task.attempts.attempts} of {task.policy.max_tries}] "
-                f"Publishing retry... {sequence_number=} <function={task.function_name}> with {delay=} "
+            delay = self.task.get_next_delay()
+            logger.warning(
+                f"{retry.msg} [attempt {self.task.attempts.attempts} of {self.task.policy.max_tries}] "
+                f"Publishing retry for task {self.task.task_id} with {delay=}s"
             )
-            logger.warning(warn_msg)
-            await self.publish_task(
-                task,
-                delay=delay,
-            )
+            await self.publish_task(self.task, delay=delay)
+
         except Exception as exc:
-            # Some other exception has been thrown
-            err_msg = f"Failed processing task sequence_number={sequence_number}  {traceback.format_exc()}"
-            logger.error(err_msg)
-            if task.on_failure is not None:
-                await self.publish_task(task.on_failure)
+            logger.error(
+                f"Failed processing task {self.task.task_id}: {traceback.format_exc()}"
+            )
+
+            # Store failure result
+            failure_result = TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                status=TaskStatus.Failure,
+                errors=[str(exc)],
+                formatted_exception=traceback.format_exc(),
+            )
+            await self.storage_interface.store_task_result(failure_result)
+
+            # Handle callback
+            if self.task.on_failure is not None:
+                await self.publish_task(self.task.on_failure)
 
             if not message_settled:
                 await self.deadletter_or_complete_task("ExceptionThrown", detail=exc)
                 message_settled = True
 
-        # at-least once: settle at the end
-        if task.acks_late and not message_settled:
+        # Handle late acknowledgment
+        if self.task.acks_late and not message_settled:
             await self.complete_message()
-            message_settled = True
 
     async def task_handler(self) -> typing.Any | TaskFailureResultType:
-        """
-        Dynamically look up function requested and then evaluate it.
-        """
+        """Execute task function and store results."""
         start = time.monotonic()
         logger.info(f"[{self.task.function_name}] Begin Task {self.sequence_number=}")
 
-        # Check if it's a debug task
-        if self.task.function_name == sample.TASK_NAME:
-            return await sample.debug_task(self.state)
-
-        # Look up function associated with the task
-        function = self.function_registry.get(self.task.function_name)
-        if not function:
-            raise ValueError(f"Missing registered function {self.task.function_name}")
+        # Execute the actual task function
         try:
-            result = await function(
-                self.state, *self.task.payload["args"], **self.task.payload["kwargs"]
-            )
-            task_result = TaskResult(
-                task_id=self.task.id,
-                graph_id=self.task.graph_id,
-                result=result,
-                status=TaskStatus.SUCCESS,
-            )
-            await self.results_storage.store_task_result(task_result)
-        except Exception as exc:
-            logger.error(f"Function {task.function_name} raised exception: {exc}")
-            task_result = TaskResult(
-                task_id=task.id,
-                graph_id=task.graph_id,
-                status=TaskStatus.Failure,
-                errors=str(exc),
-                formatted_exception=traceback.format_exc(),
-            )
-            await self.results_storage.store_task_result(task_result)
-            raise
+            if self.task.function_name == sample.TASK_NAME:
+                result = await sample.debug_task(self.state)
+            else:
+                function = self.function_registry.get(self.task.function_name)
+                if not function:
+                    raise ValueError(
+                        f"Missing registered function {self.task.function_name}"
+                    )
 
-        logger.info(
-            f"[{task.function_name}] Completed Task {sequence_number=} in {time.monotonic()-start}s"
-        )
-        return result
+                result = await function(
+                    self.state,
+                    *self.task.payload["args"],
+                    **self.task.payload["kwargs"],
+                )
+
+            # Check if result is TaskFailureResult (special failure case)
+            if result is failure.TaskFailureResult:
+                # Store as failure result (no actual result data to store)
+                task_result = TaskResult(
+                    task_id=self.task.task_id,
+                    graph_id=self.task.graph_id,
+                    result=None,  # No result data for failures
+                    status=TaskStatus.Failure,
+                    errors=["Task returned TaskFailureResult"],
+                )
+                await self.storage_interface.store_task_result(task_result)
+                logger.info(
+                    f"[{self.task.function_name}] Task {self.sequence_number=} "
+                    f"returned TaskFailureResult in {time.monotonic()-start:.2f}s"
+                )
+                return result  # Return the failure result to trigger failure handling in message_handler
+            else:
+                # Store successful result
+                task_result = TaskResult(
+                    task_id=self.task.task_id,
+                    graph_id=self.task.graph_id,
+                    result=result,
+                    status=TaskStatus.Success,
+                )
+                await self.storage_interface.store_task_result(task_result)
+
+                logger.info(
+                    f"[{self.task.function_name}] Completed Task {self.sequence_number=} "
+                    f"in {time.monotonic()-start:.2f}s"
+                )
+                return result
+
+        except Exception as exc:
+            logger.error(f"Task {self.task.task_id} failed: {exc}")
+            # Let the exception bubble up to message_handler for proper error handling
+            raise
