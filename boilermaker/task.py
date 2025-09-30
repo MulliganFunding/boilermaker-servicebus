@@ -8,7 +8,7 @@ from pathlib import Path
 
 import uuid_utils as uuid
 from azure.servicebus import ServiceBusReceivedMessage
-from pydantic import BaseModel, ConfigDict, Field, Json
+from pydantic import BaseModel, ConfigDict, Field
 
 from boilermaker import tracing
 
@@ -109,11 +109,15 @@ class Task(BaseModel):
         policy = retries.RetryPolicy.default()
         if "policy" in kwargs:
             policy = kwargs.pop("policy")
+        if "payload" in kwargs:
+            payload = kwargs.pop("payload")
+        else:
+            payload = {}
         return cls(
             attempts=attempts,
             function_name=function_name,
             policy=policy,
-            payload={},
+            payload=payload,
             **kwargs,
         )
 

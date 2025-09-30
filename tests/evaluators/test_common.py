@@ -66,6 +66,7 @@ class DummyMsg:
 # MessageActions Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
+
 async def test_task_decoder_valid_json(dummy_task, mockservicebus):
     """Test that task_decoder successfully decodes valid Task messages."""
     msg = make_message(dummy_task)
@@ -96,7 +97,6 @@ async def test_task_decoder_invalid_json(mockservicebus):
 async def test_message_handler_complete_message_integration(mockservicebus, dummy_task):
     """Test that MessageHandler complete_message works through NoStorageEvaluator interface."""
 
-
     mock_task_publisher = AsyncMock()
     function_registry = {"test_function": AsyncMock()}
 
@@ -105,7 +105,7 @@ async def test_message_handler_complete_message_integration(mockservicebus, dumm
         task=dummy_task,
         task_publisher=mock_task_publisher,
         function_registry=function_registry,
-        state=DEFAULT_STATE
+        state=DEFAULT_STATE,
     )
 
     # Set up a dummy message on the task
@@ -120,9 +120,10 @@ async def test_message_handler_complete_message_integration(mockservicebus, dumm
     mockservicebus._receiver.complete_message.assert_called_once_with(msg)
 
 
-async def test_message_handler_complete_message_with_error_integration(mockservicebus, dummy_task):
+async def test_message_handler_complete_message_with_error_integration(
+    mockservicebus, dummy_task
+):
     """Test that MessageHandler complete_message handles errors through NoStorageEvaluator."""
-
 
     mock_task_publisher = AsyncMock()
     function_registry = {"test_function": AsyncMock()}
@@ -132,7 +133,7 @@ async def test_message_handler_complete_message_with_error_integration(mockservi
         task=dummy_task,
         task_publisher=mock_task_publisher,
         function_registry=function_registry,
-        state=DEFAULT_STATE
+        state=DEFAULT_STATE,
     )
 
     class DummyMsg:
@@ -148,9 +149,10 @@ async def test_message_handler_complete_message_with_error_integration(mockservi
     mockservicebus._receiver.complete_message.assert_called_once_with(msg)
 
 
-async def test_message_handler_renew_message_lock_integration(mockservicebus, dummy_task):
+async def test_message_handler_renew_message_lock_integration(
+    mockservicebus, dummy_task
+):
     """Test that MessageHandler renew_message_lock works through NoStorageEvaluator interface."""
-
 
     mock_task_publisher = AsyncMock()
     function_registry = {"test_function": AsyncMock()}
@@ -160,7 +162,7 @@ async def test_message_handler_renew_message_lock_integration(mockservicebus, du
         task=dummy_task,
         task_publisher=mock_task_publisher,
         function_registry=function_registry,
-        state=DEFAULT_STATE
+        state=DEFAULT_STATE,
     )
 
     class DummyMsg:
@@ -177,9 +179,10 @@ async def test_message_handler_renew_message_lock_integration(mockservicebus, du
     assert result is expected_time
 
 
-async def test_message_handler_renew_message_lock_errors_integration(mockservicebus, dummy_task):
+async def test_message_handler_renew_message_lock_errors_integration(
+    mockservicebus, dummy_task
+):
     """Test that MessageHandler renew_message_lock handles errors through NoStorageEvaluator."""
-
 
     mock_task_publisher = AsyncMock()
     function_registry = {"test_function": AsyncMock()}
@@ -189,7 +192,7 @@ async def test_message_handler_renew_message_lock_errors_integration(mockservice
         task=dummy_task,
         task_publisher=mock_task_publisher,
         function_registry=function_registry,
-        state=DEFAULT_STATE
+        state=DEFAULT_STATE,
     )
 
     class DummyMsg:
@@ -205,8 +208,13 @@ async def test_message_handler_renew_message_lock_errors_integration(mockservice
     assert result is None
 
 
-async def test_message_handler_renew_message_lock_missing_integration(mockservicebus, dummy_task):
-    """Test that MessageHandler renew_message_lock handles missing receiver/message through NoStorageEvaluator."""
+async def test_message_handler_renew_message_lock_missing_integration(
+    mockservicebus, dummy_task
+):
+    """
+    Test that MessageHandler renew_message_lock handles
+    missing receiver/message through NoStorageEvaluator.
+    """
 
     mock_task_publisher = AsyncMock()
     function_registry = {"test_function": AsyncMock()}
@@ -216,7 +224,7 @@ async def test_message_handler_renew_message_lock_missing_integration(mockservic
         task=dummy_task,
         task_publisher=mock_task_publisher,
         function_registry=function_registry,
-        state=DEFAULT_STATE
+        state=DEFAULT_STATE,
     )
 
     class DummyMsg:
@@ -253,7 +261,9 @@ async def test_abandon_message_success(mockservicebus):
 async def test_abandon_message_with_error(mockservicebus):
     """Test that abandon_message handles errors gracefully."""
     msg = DummyMsg()
-    mockservicebus._receiver.abandon_message.side_effect = ServiceBusError("abandon failed")
+    mockservicebus._receiver.abandon_message.side_effect = ServiceBusError(
+        "abandon failed"
+    )
 
     # Should not raise an exception
     await MessageActions.abandon_message(msg, mockservicebus._receiver)
@@ -281,7 +291,9 @@ async def test_complete_message_success(mockservicebus):
 async def test_complete_message_with_error(mockservicebus):
     """Test that complete_message handles errors gracefully."""
     msg = DummyMsg()
-    mockservicebus._receiver.complete_message.side_effect = ServiceBusError("complete failed")
+    mockservicebus._receiver.complete_message.side_effect = ServiceBusError(
+        "complete failed"
+    )
 
     # Should not raise an exception
     await MessageActions.complete_message(msg, mockservicebus._receiver)
@@ -361,6 +373,7 @@ async def test_deadletter_or_complete_task_complete(mockservicebus, dummy_task):
 # MessageHandler Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
+
 class ConcreteMessageHandler(MessageHandler):
     """Concrete implementation of MessageHandler for testing."""
 
@@ -382,7 +395,7 @@ def message_handler(dummy_task, mockservicebus):
         task=dummy_task,
         task_publisher=mock_task_publisher,
         function_registry=function_registry,
-        state=DEFAULT_STATE
+        state=DEFAULT_STATE,
     )
     return handler
 
@@ -408,8 +421,8 @@ async def test_message_handler_current_msg_property(message_handler, dummy_task)
     message_handler.task.msg = msg
 
     # Clear cached property to force recalculation
-    if hasattr(message_handler, '_current_msg'):
-        delattr(message_handler, '_current_msg')
+    if hasattr(message_handler, "_current_msg"):
+        delattr(message_handler, "_current_msg")
 
     assert message_handler.current_msg is msg
 
@@ -421,8 +434,8 @@ async def test_message_handler_sequence_number_property(message_handler, dummy_t
     message_handler.task.msg = msg
 
     # Clear cached property to force recalculation
-    if hasattr(message_handler, '_sequence_number'):
-        delattr(message_handler, '_sequence_number')
+    if hasattr(message_handler, "_sequence_number"):
+        delattr(message_handler, "_sequence_number")
 
     assert message_handler.sequence_number == 123
 
@@ -472,13 +485,17 @@ async def test_message_handler_renew_message_lock(message_handler, mockservicebu
     assert result is expected_time
 
 
-async def test_message_handler_deadletter_or_complete_task(message_handler, mockservicebus):
+async def test_message_handler_deadletter_or_complete_task(
+    message_handler, mockservicebus
+):
     """Test MessageHandler deadletter_or_complete_task delegates to MessageActions."""
     msg = DummyMsg()
     message_handler.task.msg = msg
     message_handler.task.should_dead_letter = True
 
-    await message_handler.deadletter_or_complete_task("TestReason", detail="Test detail")
+    await message_handler.deadletter_or_complete_task(
+        "TestReason", detail="Test detail"
+    )
 
     mockservicebus._receiver.dead_letter_message.assert_called_once_with(
         msg, reason="TestReason", error_description="Task failed: Test detail"

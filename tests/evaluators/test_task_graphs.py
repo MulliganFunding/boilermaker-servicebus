@@ -70,6 +70,7 @@ def sample_graph():
 def app(sbus):
     return Boilermaker(DEFAULT_STATE, sbus)
 
+
 async def somefunc(state, x):
     return x * 2
 
@@ -173,6 +174,7 @@ async def test_task_handler_with_graph_workflow(evaluator, mock_storage, sample_
 
 async def test_task_handler_exception_handling(evaluator, mock_storage):
     """Test that task_handler properly handles exceptions."""
+
     async def failing_func(state, x):
         raise ValueError("Test error")
 
@@ -192,10 +194,7 @@ async def test_task_handler_exception_handling(evaluator, mock_storage):
 async def testcontinue_graph_no_graph_id(evaluator):
     """Test continue_graph with no graph_id."""
     result = TaskResult(
-        task_id="test-task",
-        graph_id=None,
-        status=TaskStatus.Success,
-        result=42
+        task_id="test-task", graph_id=None, status=TaskStatus.Success, result=42
     )
 
     # Should not raise any errors and should return early
@@ -208,7 +207,7 @@ async def testcontinue_graph_graph_not_found(evaluator, mock_storage):
         task_id="test-task",
         graph_id="missing-graph",
         status=TaskStatus.Success,
-        result=42
+        result=42,
     )
 
     mock_storage.load_graph.return_value = None
@@ -218,7 +217,9 @@ async def testcontinue_graph_graph_not_found(evaluator, mock_storage):
     mock_storage.load_graph.assert_called_with("missing-graph")
 
 
-async def testcontinue_graph_publishes_ready_tasks(evaluator, mock_storage, sample_graph):
+async def testcontinue_graph_publishes_ready_tasks(
+    evaluator, mock_storage, sample_graph
+):
     """Test that continue_graph publishes newly ready tasks."""
     # Complete the root task
     root_task_id = list(sample_graph.edges.keys())[0]  # Get child tasks
@@ -226,7 +227,7 @@ async def testcontinue_graph_publishes_ready_tasks(evaluator, mock_storage, samp
         task_id=root_task_id,
         graph_id=sample_graph.graph_id,
         status=TaskStatus.Success,
-        result=42
+        result=42,
     )
     sample_graph.add_result(result)
 
@@ -234,6 +235,7 @@ async def testcontinue_graph_publishes_ready_tasks(evaluator, mock_storage, samp
 
     # Mock task publisher to track calls
     published_tasks = []
+
     async def mock_publish_task(task, *args, **kwargs):
         published_tasks.append(task)
 
@@ -252,13 +254,14 @@ async def testcontinue_graph_no_ready_tasks(evaluator, mock_storage, sample_grap
         task_id=next(iter(sample_graph.edges.keys())),
         graph_id=sample_graph.graph_id,
         status=TaskStatus.Started,
-        result=None
+        result=None,
     )
     sample_graph.add_result(parent_started)
 
     mock_storage.load_graph.return_value = sample_graph
 
     published_tasks = []
+
     async def mock_publish_task(task, *args, **kwargs):
         published_tasks.append(task)
 
@@ -267,7 +270,7 @@ async def testcontinue_graph_no_ready_tasks(evaluator, mock_storage, sample_grap
         task_id=first_child_task_id,
         graph_id=sample_graph.graph_id,
         status=TaskStatus.Success,
-        result=42
+        result=42,
     )
     evaluator.task_publisher = mock_publish_task
     await evaluator.continue_graph(child_result)
@@ -279,7 +282,9 @@ async def testcontinue_graph_no_ready_tasks(evaluator, mock_storage, sample_grap
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # Message Handler Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
-async def test_message_handler_retries_exhausted(evaluator, mock_storage, mockservicebus):
+async def test_message_handler_retries_exhausted(
+    evaluator, mock_storage, mockservicebus
+):
     """Test message_handler when retries are exhausted."""
     # Set up task with exhausted retries
     evaluator.task.attempts.attempts = evaluator.task.policy.max_tries + 1
@@ -299,7 +304,9 @@ async def test_message_handler_retries_exhausted(evaluator, mock_storage, mockse
 
 
 @pytest.mark.parametrize("acks_early", [True, False])
-async def test_message_handler_success(acks_early, evaluator, mock_storage, mockservicebus):
+async def test_message_handler_success(
+    acks_early, evaluator, mock_storage, mockservicebus
+):
     """Test successful message handling with early/late acks."""
     evaluator.task.acks_late = not acks_early
     evaluator.task.graph_id = "test-graph-id"
@@ -314,8 +321,11 @@ async def test_message_handler_success(acks_early, evaluator, mock_storage, mock
     assert len(mockservicebus._receiver.method_calls) == 1
 
 
-async def test_message_handler_with_on_success_callback(evaluator, mock_storage, mockservicebus, app):
+async def test_message_handler_with_on_success_callback(
+    evaluator, mock_storage, mockservicebus, app
+):
     """Test message_handler with on_success callback."""
+
     async def on_success_func(state):
         return "success"
 
@@ -331,8 +341,11 @@ async def test_message_handler_with_on_success_callback(evaluator, mock_storage,
     assert len(mockservicebus._sender.method_calls) == 1
 
 
-async def test_message_handler_with_retry_exception(evaluator, mock_storage, mockservicebus, app):
+async def test_message_handler_with_retry_exception(
+    evaluator, mock_storage, mockservicebus, app
+):
     """Test message_handler handling RetryException."""
+
     async def retry_func(state, x):
         raise retries.RetryException("Retry me")
 
@@ -351,8 +364,11 @@ async def test_message_handler_with_retry_exception(evaluator, mock_storage, moc
     assert len(mockservicebus._sender.method_calls) == 1
 
 
-async def test_message_handler_with_exception(evaluator, mock_storage, mockservicebus, app):
+async def test_message_handler_with_exception(
+    evaluator, mock_storage, mockservicebus, app
+):
     """Test message_handler handling regular exceptions."""
+
     async def failing_func(state, x):
         raise ValueError("Test error")
 
@@ -374,8 +390,11 @@ async def test_message_handler_with_exception(evaluator, mock_storage, mockservi
     assert "Test error" in stored_result.errors
 
 
-async def test_message_handler_with_on_failure_callback(evaluator, mock_storage, mockservicebus, app):
+async def test_message_handler_with_on_failure_callback(
+    evaluator, mock_storage, mockservicebus, app
+):
     """Test message_handler with on_failure callback."""
+
     async def failing_func(state, x):
         raise ValueError("Test error")
 
@@ -406,6 +425,7 @@ async def test_message_handler_with_on_failure_callback(evaluator, mock_storage,
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 async def test_full_graph_workflow_integration(app, mockservicebus, mock_storage):
     """Test full integration of TaskGraphEvaluator with a complete workflow."""
+
     # Create functions
     async def task_a(state, x):
         return x * 2
@@ -444,7 +464,7 @@ async def test_full_graph_workflow_integration(app, mockservicebus, mock_storage
         task_id=task_a_instance.task_id,
         graph_id=graph.graph_id,
         status=TaskStatus.Success,
-        result=42
+        result=42,
     )
     graph_after_success.add_result(result)
 
@@ -462,6 +482,7 @@ async def test_full_graph_workflow_integration(app, mockservicebus, mock_storage
 
     # Track published tasks
     published_tasks = []
+
     async def mock_publish_task(task, *args, **kwargs):
         published_tasks.append(task)
 
@@ -516,10 +537,7 @@ async def test_graph_workflow_exception_handling(evaluator, mock_storage):
     mock_storage.load_graph.side_effect = Exception("Storage error")
 
     result = TaskResult(
-        task_id="test-task",
-        graph_id="test-graph",
-        status=TaskStatus.Success,
-        result=42
+        task_id="test-task", graph_id="test-graph", status=TaskStatus.Success, result=42
     )
 
     # Should not raise exception, just log and continue
@@ -528,8 +546,11 @@ async def test_graph_workflow_exception_handling(evaluator, mock_storage):
 
 @pytest.mark.parametrize("should_deadletter", [True, False])
 @pytest.mark.parametrize("acks_late", [True, False])
-async def test_retry_policy_update(should_deadletter, acks_late, evaluator, mock_storage, mockservicebus, app):
+async def test_retry_policy_update(
+    should_deadletter, acks_late, evaluator, mock_storage, mockservicebus, app
+):
     """Test retry policy update from RetryException."""
+
     async def retry_func(state, x):
         raise retries.RetryExceptionDefaultExponential(
             "Retry with new policy", delay=800, max_delay=2000, max_tries=99

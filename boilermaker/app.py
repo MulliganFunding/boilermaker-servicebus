@@ -14,7 +14,7 @@ from functools import wraps
 
 from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender  # type: ignore
 from anyio import create_task_group, open_signal_receiver
-from anyio.abc import CancelScope, TaskGroup
+from anyio.abc import CancelScope
 from azure.servicebus import ServiceBusReceivedMessage, ServiceBusReceiver
 from azure.servicebus.exceptions import (
     ServiceBusAuthenticationError,
