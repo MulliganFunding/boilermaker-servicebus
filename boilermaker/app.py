@@ -14,8 +14,8 @@ from functools import wraps
 
 from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender  # type: ignore
 from anyio import create_task_group, open_signal_receiver
-from anyio.abc import CancelScope
-from azure.servicebus import ServiceBusReceivedMessage
+from anyio.abc import CancelScope, TaskGroup
+from azure.servicebus import ServiceBusReceivedMessage, ServiceBusReceiver
 from azure.servicebus.exceptions import (
     ServiceBusAuthenticationError,
     ServiceBusAuthorizationError,
@@ -25,7 +25,7 @@ from azure.servicebus.exceptions import (
 from opentelemetry import trace
 
 from . import tracing
-from .evaluators import BaseTaskEvaluator, evaluator_factory
+from .evaluators import evaluator_factory, MessageActions, MessageHandler
 from .retries import RetryPolicy
 from .storage import StorageInterface
 from .task import Task
@@ -94,6 +94,7 @@ class Boilermaker:
         # Callables and Tasks
         self.function_registry: dict[str, typing.Any] = {}
         self.task_registry: dict[str, Task] = {}
+        self._message_evaluators: dict[int, MessageHandler] = {}
 
     # ~~ ** Task Registration and Publishing ** ~~
     def task(self, **options):
@@ -373,13 +374,15 @@ class Boilermaker:
     # ~~ ** Signal handling, receiver run, and message processing methods ** ~~
     async def signal_handler(
         self,
-        evaluator: BaseTaskEvaluator,
+        tg: TaskGroup,
         scope: CancelScope,
     ):
         """We would like to reschedule any open messages on SIGINT/SIGTERM"""
         with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
             async for signum in signals:
-                await evaluator.abandon_current_message()
+                for evaluator in self._message_evaluators:
+                    tg.start_soon(evaluator.abandon_current_message)
+
                 logger.warning(f"Signal {signum=} received: shutting down. ")
                 scope.cancel()
                 return
@@ -414,44 +417,52 @@ class Boilermaker:
         """
         async with create_task_group() as tg:
             async with self.service_bus_client.get_receiver() as receiver:
-                evaluator = evaluator_factory(
-                    receiver,
-                    self.publish_task,
-                    self.function_registry,
-                    self.state,
-                    self.results_storage,
-                    graphs_enabled=False,
-                )
                 # Handle SIGTERM: when found -> instruct evaluator to abandon message
-                tg.start_soon(self.signal_handler, evaluator, tg.cancel_scope)
+                tg.start_soon(self.signal_handler, tg, tg.cancel_scope)
 
                 # Main message loop
                 async for msg in receiver:
-                    # This separate method is easier to test
-                    # and easier to early-return from in case of skip or fail msg
-                    await self.message_handler(evaluator, msg)
+                    # This separate method is easier to test and also allows for future enhancements:
+                    # - allow concurrent batch eval via receive_messages + prefetch (with a CapacityLimiter)
+                    # - allow prioritizing certain messages
+                    # - etc.
+                    await self.message_handler(msg, receiver)
 
     async def message_handler(
-        self, evaluator: BaseTaskEvaluator, msg: ServiceBusReceivedMessage
+        self, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
     ):
         """Process a single Service Bus message containing a Task.
 
         This method is called by the worker loop for each received message.
         It deserializes the Task, executes the associated function, and
         handles success, failure, retries, and callbacks.
-
         Args:
             msg: The received ServiceBusReceivedMessage containing the Task JSON
         Returns:
             None
         """
+        task = await MessageActions.task_decoder(msg, receiver)
+        if task is None:
+            # Message could not be decoded so it was dead-lettered or abandoned
+            return None
+
         async with tracing.start_span_from_parent_event_async(
             tracer,
             msg,
             "BoilermakerWorker",
             otel_enabled=self.otel_enabled,
         ):
-            await evaluator(msg)
+            evaluator = evaluator_factory(
+                receiver,
+                task,
+                self.publish_task,
+                self.function_registry,
+                state=self.state,
+                storage_interface=self.results_storage,
+            )
+            self._message_evaluators[task.sequence_number] = evaluator
+            await evaluator()
+            del self._message_evaluators[task.sequence_number]
 
     async def close(self):
         """Close any open connections to Azure Service Bus."""

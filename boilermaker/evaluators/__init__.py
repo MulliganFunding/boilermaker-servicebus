@@ -7,40 +7,54 @@ from boilermaker.storage.base import StorageInterface
 from boilermaker.task import Task
 from boilermaker.types import TaskHandler
 
-from .basic import BaseTaskEvaluator
+from .base import NoStorageEvaluator
+from .common import MessageActions, MessageHandler
 from .results_store import ResultsStorageTaskEvaluator
 from .task_graphs import TaskGraphEvaluator
 
 
 def evaluator_factory(
     receiver: ServiceBusReceiver,
+    task: Task,
     task_publisher: Callable[[Task], Awaitable[None]],
     function_registry: dict[str, TaskHandler],
     state: typing.Any | None = None,
     storage_interface: StorageInterface | None = None,
-    graphs_enabled: bool = False
-) -> BaseTaskEvaluator:
+) -> MessageHandler:
 
-    if storage_interface and graphs_enabled:
+    if storage_interface and task.graph_id is not None:
         return TaskGraphEvaluator(
             receiver,
+            task,
             task_publisher,
             function_registry,
-            state,
-            storage_interface
+            state=state,
+            storage_interface=storage_interface,
         )
-    elif storage_interface and not graphs_enabled:
+    elif storage_interface and task.graph_id is None:
         return ResultsStorageTaskEvaluator(
             receiver,
+            task,
             task_publisher,
             function_registry,
-            state,
-            storage_interface
+            state=state,
+            storage_interface=storage_interface,
         )
 
-    return BaseTaskEvaluator(
+    return NoStorageEvaluator(
         receiver,
+        task,
         task_publisher,
         function_registry,
-        state,
+        state=state,
     )
+
+
+__all__ = [
+    "evaluator_factory",
+    "MessageActions",
+    "MessageHandler",
+    "NoStorageEvaluator",
+    "ResultsStorageTaskEvaluator",
+    "TaskGraphEvaluator",
+]

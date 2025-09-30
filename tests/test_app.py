@@ -1,6 +1,5 @@
 import asyncio
 import os
-import random
 import signal
 from collections.abc import Sequence
 from typing import Any
@@ -11,10 +10,10 @@ from anyio import create_task_group, to_thread
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus._common.constants import SEQUENCENUBMERNAME
 from azure.servicebus._pyamqp.message import Message
-from azure.servicebus.exceptions import MessageLockLostError, ServiceBusError
-from boilermaker import failure, retries
+from azure.servicebus.exceptions import ServiceBusError
+from boilermaker import retries
 from boilermaker.app import Boilermaker, BoilermakerAppException
-from boilermaker.evaluators import BaseTaskEvaluator
+from boilermaker.evaluators import NoStorageEvaluator
 from boilermaker.task import Task
 
 
@@ -43,11 +42,17 @@ def make_message(task, sequence_number: int = 123):
 def app(sbus):
     return Boilermaker(DEFAULT_STATE, sbus)
 
-
 @pytest.fixture
 def evaluator(app, mockservicebus):
-    return BaseTaskEvaluator(
-        mockservicebus._receiver, app.publish_task, app.function_registry
+
+    async def somefunc(state, x):
+        return x * 2
+
+    app.register_async(somefunc, policy=retries.RetryPolicy.default())
+    task = app.create_task(somefunc, 21)
+
+    return NoStorageEvaluator(
+        mockservicebus._receiver, task, app.publish_task, app.function_registry
     )
 
 
@@ -112,7 +117,7 @@ async def test_app_register_many_async(app, mockservicebus, evaluator):
     task2 = app.create_task(somefunc2, "a")
     task3 = app.create_task(somefunc3, "b", 123, one_kwarg="11")
     for task in [task1, task2, task3]:
-        await app.message_handler(evaluator, make_message(task))
+        await app.message_handler(make_message(task), mockservicebus._receiver)
 
     # Failures
     def not_a_coroutine(state):
@@ -386,12 +391,9 @@ async def test_chain_publish_and_evaluate(app, mockservicebus):
     smb_msg1 = make_message(published_task, sequence_number=1)
 
     # *EVALUATE*: We should be able to run the task based on our published task
-    evaluator = BaseTaskEvaluator(
-        mockservicebus._receiver, app.publish_task, app.function_registry
-    )
     await app.message_handler(
-        evaluator,
         smb_msg1,
+        mockservicebus._receiver,
     )
 
     # *EVALUATE*: It should have scheduled the next task in the chain!
@@ -403,7 +405,7 @@ async def test_chain_publish_and_evaluate(app, mockservicebus):
     smb_msg2 = make_message(published_task2, sequence_number=2)
 
     #  *EVALUATE*: We expect this one to fail! Number too big!
-    await app.message_handler(evaluator, smb_msg2)
+    await app.message_handler(smb_msg2, mockservicebus._receiver)
 
     # It should have scheduled the failure task now!
     assert len(mockservicebus._sender.method_calls) == 3
@@ -415,7 +417,7 @@ async def test_chain_publish_and_evaluate(app, mockservicebus):
     smb_msg3 = make_message(published_task3, sequence_number=3)
 
     # *EVALUATE*: We can handle the failure task now
-    await app.message_handler(evaluator, smb_msg3)
+    await app.message_handler(smb_msg3, mockservicebus._receiver)
 
     # Our state has been updated correctly
     assert app.state.inner["sample_task_called"] == 2

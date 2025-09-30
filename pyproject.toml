@@ -55,7 +55,13 @@ testpaths = ["tests"]
 filterwarnings = ["error"]
 
 [tool.coverage.report]
-exclude_also = ["def __repr__"]
+exclude_also = [
+    "def __repr__",
+    "if self.debug",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
 
 [tool.coverage.run]
 omit = [

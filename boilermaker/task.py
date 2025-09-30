@@ -3,10 +3,14 @@ import enum
 import logging
 import typing
 from collections import defaultdict
+from functools import cached_property
 from pathlib import Path
 
 import uuid_utils as uuid
+from azure.servicebus import ServiceBusReceivedMessage
 from pydantic import BaseModel, ConfigDict, Field, Json
+
+from boilermaker import tracing
 
 from . import retries
 
@@ -38,7 +42,6 @@ class Task(BaseModel):
         attempts: Retry attempt tracking and metadata
         policy: Retry policy governing backoff and max attempts
         payload: Function arguments and keyword arguments (must be JSON-serializable)
-        diagnostic_id: OpenTelemetry parent trace ID for distributed tracing
         _sequence_number: Service Bus sequence number (set after publishing)
         on_success: Optional callback task to run on successful completion
         on_failure: Optional callback task to run on failure
@@ -71,12 +74,8 @@ class Task(BaseModel):
     # Represents actual arguments: must be jsonable!
     payload: dict[str, typing.Any]
 
-    # Eventhub event metadata below
-    # opentelemetry parent trace id is included here
-    diagnostic_id: str | None
-
-    # Internal use: Service Bus sequence number once published
-    _sequence_number: int | None = None
+    # Can set this once we receive the message
+    _msg: ServiceBusReceivedMessage | None = None
 
     # If this task is a member of a TaskGraph, this will identify the root node.
     graph_id: GraphId | None = None
@@ -115,9 +114,48 @@ class Task(BaseModel):
             function_name=function_name,
             policy=policy,
             payload={},
-            diagnostic_id=None,
             **kwargs,
         )
+
+    @cached_property
+    def diagnostic_id(self) -> str | None:
+        """Get the OpenTelemetry diagnostic ID if available.
+
+        Returns:
+            str | None: The diagnostic ID for tracing, or None if not set
+        """
+        if self._msg:
+            return tracing.get_traceparent(self._msg)
+        return None
+
+    @cached_property
+    def sequence_number(self) -> int | None:
+        """Get the Service Bus sequence number if available.
+
+        Returns:
+            int | None: The sequence number of the associated Service Bus message, or None if not set
+        """
+        if self._msg:
+            return self._msg.sequence_number
+        return None
+
+    @property
+    def msg(self) -> ServiceBusReceivedMessage | None:
+        """Get the associated Service Bus message if available.
+
+        Returns:
+            ServiceBusReceivedMessage | None: The associated Service Bus message, or None if not set
+        """
+        return self._msg
+
+    @msg.setter
+    def msg(self, value: ServiceBusReceivedMessage) -> None:
+        """Set the associated Service Bus message.
+
+        Args:
+            value: The Service Bus message to associate with this task
+        """
+        self._msg = value
 
     @property
     def acks_early(self):
@@ -257,7 +295,6 @@ class Task(BaseModel):
                 "args": fn_args,
                 "kwargs": fn_kwargs,
             },
-            diagnostic_id=None,
         )
 
 

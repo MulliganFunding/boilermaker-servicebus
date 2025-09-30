@@ -1,8 +1,8 @@
-
 import logging
 import time
 import traceback
 import typing
+from collections.abc import Awaitable, Callable
 from json.decoder import JSONDecodeError
 
 from azure.servicebus import ServiceBusReceivedMessage
@@ -12,12 +12,38 @@ from pydantic import ValidationError
 from boilermaker import sample
 from boilermaker.failure import TaskFailureResult, TaskFailureResultType
 from boilermaker.retries import RetryException
-from boilermaker.task import Task
+from boilermaker.storage import StorageInterface
+from boilermaker.task import Task, TaskResult, TaskStatus
+from boilermaker.types import TaskHandler
 
-logger = logging.getLogger(__name__)
+from .common import MessageHandler
+
+logger = logging.getLogger("boilermaker.app")
 
 
-class TaskGraphEvaluator:
+class TaskGraphEvaluator(MessageHandler):
+    def __init__(
+        self,
+        receiver: ServiceBusReceiver,
+        task: Task,
+        task_publisher: Callable[[Task], Awaitable[None]],
+        function_registry: dict[str, TaskHandler],
+        state: typing.Any | None = None,
+        storage_interface: StorageInterface | None = None,
+    ):
+        if storage_interface is None:
+            raise ValueError(
+                "Storage interface is required for ResultsStorageTaskEvaluator"
+            )
+
+        super().__init__(
+            receiver,
+            task,
+            task_publisher,
+            function_registry,
+            state=state,
+            storage_interface=storage_interface,
+        )
 
     async def message_handler(
         self, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
@@ -32,7 +58,7 @@ class TaskGraphEvaluator:
             log_err_msg = f"Invalid task sequence_number={sequence_number} exc_info={traceback.format_exc()}"
             logger.error(log_err_msg)
             # This task is not parseable
-            await self.complete_message(msg, receiver)
+            await self.complete_message()
             return None
 
         # Immediately record an attempt
@@ -40,14 +66,14 @@ class TaskGraphEvaluator:
 
         # at-most once: "complete" msg even if it fails later
         if task.acks_early:
-            await self.complete_message(msg, receiver)
+            await self.complete_message()
             message_settled = True
 
         if not task.can_retry:
             logger.error(f"Retries exhausted for event {task.function_name}")
             if not message_settled:
                 await self.deadletter_or_complete_task(
-                    receiver, msg, "ProcessingError", task, detail="Retries exhausted"
+                    "ProcessingError", detail="Retries exhausted"
                 )
 
             # TODO: Storage task result as failure
@@ -68,7 +94,7 @@ class TaskGraphEvaluator:
                 # Deadletter or complete the message
                 if not message_settled:
                     await self.deadletter_or_complete_task(
-                        receiver, msg, "TaskFailed", task
+                        "TaskFailed",
                     )
                     message_settled = True
                 if task.on_failure is not None:
@@ -107,14 +133,12 @@ class TaskGraphEvaluator:
                 await self.publish_task(task.on_failure)
 
             if not message_settled:
-                await self.deadletter_or_complete_task(
-                    receiver, msg, "ExceptionThrown", task, detail=exc
-                )
+                await self.deadletter_or_complete_task("ExceptionThrown", detail=exc)
                 message_settled = True
 
         # at-least once: settle at the end
         if task.acks_late and not message_settled:
-            await self.complete_message(msg, receiver)
+            await self.complete_message()
             message_settled = True
 
     async def task_handler(
@@ -161,22 +185,3 @@ class TaskGraphEvaluator:
             f"[{task.function_name}] Completed Task {sequence_number=} in {time.monotonic()-start}s"
         )
         return result
-
-    async def deadletter_or_complete_task(
-        self,
-        receiver: ServiceBusReceiver,
-        msg: ServiceBusReceivedMessage,
-        reason: str,
-        task: Task,
-        detail: Exception | str | None = None,
-    ):
-        description = f"Task failed: {detail}" if detail else "Task failed"
-        if task.should_dead_letter:
-            await receiver.dead_letter_message(
-                msg,
-                reason=reason,
-                error_description=description,
-            )
-        else:
-            await self.complete_message(msg, receiver)
-        return None
