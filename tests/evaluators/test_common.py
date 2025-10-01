@@ -9,7 +9,7 @@ from boilermaker import exc
 from boilermaker.app import Boilermaker
 from boilermaker.evaluators import NoStorageEvaluator
 from boilermaker.evaluators.common import MessageActions, MessageHandler
-from boilermaker.task import Task, TaskStatus
+from boilermaker.task import Task
 
 
 class State:

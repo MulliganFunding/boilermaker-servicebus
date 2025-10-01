@@ -107,13 +107,13 @@ class NoStorageEvaluator(MessageHandler):
                 return result
 
         # Failure case: publish the on_failure task
-        if result.status == TaskStatus.Failure and self.task.on_failure is not None:
+        if result.status == TaskStatus.Success and self.task.on_success is not None:
+            # Success case: publish the next task
+            await self.publish_task(self.task.on_success)
+        elif result.status == TaskStatus.Failure and self.task.on_failure is not None:
             # Schedule on_failure task
             await self.publish_task(self.task.on_failure)
         # Success case: publish the next task
-        elif result.status == TaskStatus.Success and self.task.on_success is not None:
-            # Success case: publish the next task
-            await self.publish_task(self.task.on_success)
         elif result.status == TaskStatus.Retry:
             await self.publish_task(
                 self.task,
