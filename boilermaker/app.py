@@ -26,7 +26,7 @@ from opentelemetry import trace
 
 from . import tracing
 from .evaluators import evaluator_factory, MessageActions, MessageHandler
-from .exc import BoilermakerAppException
+from .exc import BoilermakerAppException, BoilermakerStorageError
 from .retries import RetryPolicy
 from .storage import StorageInterface
 from .task import Task, TaskGraph
@@ -78,6 +78,7 @@ class Boilermaker:
         service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender = None,
         enable_opentelemetry: bool = False,
         results_storage: StorageInterface | None = None,
+        delete_successful_graphs: bool = False,
     ):
         # This is likely going to be circular, the app referencing
         # the worker as well. Opt for weakrefs for improved mem safety.
@@ -89,6 +90,7 @@ class Boilermaker:
         self.function_registry: dict[str, typing.Any] = {}
         self.task_registry: dict[str, Task] = {}
         self._message_evaluators: dict[int, MessageHandler] = {}
+        self.delete_successful_graphs = delete_successful_graphs
 
     # ~~ ** Task Registration and Publishing ** ~~
     def task(self, **options):
@@ -405,12 +407,18 @@ class Boilermaker:
         # Set graph_id for all tasks in the graph
         for task in graph.children.values():
             if task.graph_id != graph.graph_id:
-                raise ValueError(
-                    f"All tasks must have a graph_id; expected {graph.graph_id}, found {task.graph_id}"
+                raise BoilermakerAppException(
+                    "All tasks must have graph_id matching graph",
+                    [f"Expected graph_id={graph.graph_id}, found {task.graph_id=}"],
                 )
 
         # Store the graph definition
-        await self.results_storage.store_graph(graph)
+        try:
+            await self.results_storage.store_graph(graph)
+        except BoilermakerStorageError as exc:
+            raise BoilermakerAppException(
+                "Error storing TaskGraph to storage", [str(exc)]
+            ) from exc
 
         # Publish all ready tasks (should be root nodes with no dependencies)
         for task in graph.ready_tasks():
@@ -521,6 +529,7 @@ class Boilermaker:
                 self.function_registry,
                 state=self.state,
                 storage_interface=self.results_storage,
+                delete_successful_graphs=self.delete_successful_graphs,
             )
             self._message_evaluators[task.sequence_number] = evaluator
             await evaluator()

@@ -3,6 +3,7 @@ import logging
 
 from aio_azure_clients_toolbox import AzureBlobStorageClient as MFBlobClient
 from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
+from anyio import create_task_group
 from azure.identity.aio import DefaultAzureCredential
 
 from boilermaker.exc import BoilermakerStorageError
@@ -65,14 +66,54 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
                 )
         return graph
 
-    async def store_graph(self, graph: TaskGraph) -> None:
-        """Stores a TaskGraph to Azure Blob Storage.
+    async def store_graph(self, graph: TaskGraph) -> str:
+        """
+        Stores a TaskGraph to Azure Blob Storage.
+
+        Stores all children as pending tasks as well.
 
         Args:
             graph: The TaskGraph instance to store.
         """
         fname = f"{self.task_result_prefix}/{graph.storage_path()}"
-        return await self.upload_blob(fname, graph.model_dump_json())
+        graph_stored, _res = await self.upload_blob(fname, graph.model_dump_json())
+        if not graph_stored:
+            raise BoilermakerStorageError(
+                f"Failed to store TaskGraph {graph.graph_id}",
+                task_id=None,
+                graph_id=graph.graph_id,
+                status_code=500,
+                reason="Unknown",
+            )
+        # Store pending results for *all* tasks in the graph
+        try:
+            async with create_task_group() as tg:
+                for pending_result in graph.generate_pending_results():
+                    tg.start_soon(
+                        self.upload_blob,
+                        pending_result.storage_path(),
+                        pending_result.model_dump_json(),
+                        overwrite=True,
+                    )
+                if not pending_result:
+                    raise BoilermakerStorageError(
+                        f"Failed to store pending TaskResult {pending_result.task_id}",
+                        task_id=pending_result.task_id,
+                        graph_id=pending_result.graph_id,
+                        status_code=500,
+                        reason="Unknown",
+                    )
+        except* Exception as excgroup:
+            for exc in excgroup.exceptions:
+                logger.error(f"Error occurred while storing pending TaskResults: {exc}")
+            raise BoilermakerStorageError(
+                f"Failed to store pending TaskResults for graph {graph.graph_id}",
+                task_id=None,
+                graph_id=graph.graph_id,
+                status_code=500,
+                reason="Unknown",
+            ) from excgroup
+        return fname
 
     async def store_task_result(self, task_result: TaskResult) -> None:
         """Stores a TaskResult to Azure Blob Storage.

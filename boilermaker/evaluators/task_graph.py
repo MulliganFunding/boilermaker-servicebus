@@ -25,6 +25,7 @@ class TaskGraphEvaluator(MessageHandler):
         function_registry: dict[str, TaskHandler],
         state: typing.Any | None = None,
         storage_interface: StorageInterface | None = None,
+        delete_successful_graphs: bool = False,
     ):
         if storage_interface is None:
             raise ValueError("Storage interface is required for TaskGraphEvaluator")
@@ -37,6 +38,8 @@ class TaskGraphEvaluator(MessageHandler):
             state=state,
             storage_interface=storage_interface,
         )
+        # Whether to fire a clean-up task at the end if all tasks completed successfully
+        self.delete_successful_graphs = delete_successful_graphs
 
     # The main message handler
     async def message_handler(self) -> TaskResult:
@@ -105,6 +108,18 @@ class TaskGraphEvaluator(MessageHandler):
         result: TaskResult = await self.task_handler()
         await self.storage_interface.store_task_result(result)
 
+        if result.status == TaskStatus.Success and self.task.on_success is not None:
+            # Success case: continue evaluating the graph
+            await self.continue_graph(result)
+        elif result.status == TaskStatus.Failure and self.task.on_failure is not None:
+            # Schedule on_failure task
+            await self.publish_task(self.task.on_failure)
+        elif result.status == TaskStatus.Retry:
+            await self.publish_task(
+                self.task,
+                delay=self.task.get_next_delay(),
+            )
+
         # At-least once: settle at the end
         # IF we have lost the message lease, we *may* have *multiple* copies of this task running.
         # This means, we *may have* multiple `on_success` or `on_failure` tasks scheduled.
@@ -125,18 +140,6 @@ class TaskGraphEvaluator(MessageHandler):
                 logger.error("Unknown ServiceBusError", exc_info=True)
                 return result
 
-        if result.status == TaskStatus.Success and self.task.on_success is not None:
-            # Success case: continue evaluating the graph
-            await self.continue_graph(result)
-        elif result.status == TaskStatus.Failure and self.task.on_failure is not None:
-            # Schedule on_failure task
-            await self.publish_task(self.task.on_failure)
-        elif result.status == TaskStatus.Retry:
-            await self.publish_task(
-                self.task,
-                delay=self.task.get_next_delay(),
-            )
-
         return result
 
     async def continue_graph(self, completed_task_result: TaskResult) -> int | None:
@@ -154,17 +157,15 @@ class TaskGraphEvaluator(MessageHandler):
         # Find and publish newly ready tasks
         ready_count = 0
         for ready_task in graph.ready_tasks():
-            logger.info(
-                f"Publishing ready task {ready_task.task_id} in graph {graph_id}"
-            )
             # Publish the task
             await self.publish_task(ready_task)
             ready_count += 1
-
-        if ready_count == 0:
+            logger.info(
+                f"Publishing ready task {ready_task.task_id} in graph {graph_id} total={ready_count}"
+            )
+        else:
             logger.info(
                 f"No new tasks ready in graph {graph_id} after task {completed_task_result.task_id}"
             )
-        else:
-            logger.info(f"Published {ready_count} ready tasks in graph {graph_id}")
+
         return ready_count

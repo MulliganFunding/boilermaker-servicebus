@@ -603,3 +603,21 @@ class TaskGraph(BaseModel):
         if tr is None:
             return None
         return tr.status
+
+    def generate_pending_results(self) -> typing.Generator[TaskResultSlim]:
+        """Generate pending TaskResultSlim entries for all tasks."""
+        for task_id in self.children.keys():
+            yield TaskResultSlim(
+                task_id=task_id,
+                graph_id=self.graph_id,
+                status=TaskStatus.Pending,
+            )
+
+    def completed_successfully(self) -> bool:
+        """Check if all tasks in the graph have completed successfully."""
+        return all(
+            map(
+                lambda task_id: self.get_status(task_id) == TaskStatus.Success,
+                self.children.keys(),
+            )
+        )

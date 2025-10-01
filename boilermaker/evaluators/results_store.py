@@ -107,6 +107,18 @@ class ResultsStorageTaskEvaluator(MessageHandler):
         result: TaskResult = await self.task_handler()
         await self.storage_interface.store_task_result(result)
 
+        if result.status == TaskStatus.Success and self.task.on_success is not None:
+            # Success case: publish the next task
+            await self.publish_task(self.task.on_success)
+        elif result.status == TaskStatus.Failure and self.task.on_failure is not None:
+            # Schedule on_failure task
+            await self.publish_task(self.task.on_failure)
+        elif result.status == TaskStatus.Retry:
+            await self.publish_task(
+                self.task,
+                delay=self.task.get_next_delay(),
+            )
+
         # At-least once: settle at the end
         # IF we have lost the message lease, we *may* have *multiple* copies of this task running.
         # This means, we *may have* multiple `on_success` or `on_failure` tasks scheduled.
@@ -126,17 +138,5 @@ class ResultsStorageTaskEvaluator(MessageHandler):
             except exc.BoilermakerServiceBusError:
                 logger.error("Unknown ServiceBusError", exc_info=True)
                 return result
-
-        if result.status == TaskStatus.Success and self.task.on_success is not None:
-            # Success case: publish the next task
-            await self.publish_task(self.task.on_success)
-        elif result.status == TaskStatus.Failure and self.task.on_failure is not None:
-            # Schedule on_failure task
-            await self.publish_task(self.task.on_failure)
-        elif result.status == TaskStatus.Retry:
-            await self.publish_task(
-                self.task,
-                delay=self.task.get_next_delay(),
-            )
 
         return result
