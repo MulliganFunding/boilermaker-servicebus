@@ -310,10 +310,20 @@ class TaskStatus(enum.StrEnum):
     Success = "success"
     Failure = "failure"
     Retry = "retry"
+    RetriesExhausted = "retries_exhausted"
     Deadlettered = "deadlettered"
-    # In case we want to explicitly abandon a message
-    # We do not currently offer this functionality
+    # In case we want to explicitly abandon a message.
+    # We do not currently offer this functionality aside from shutdown.
     Abandoned = "abandoned"
+
+    @classmethod
+    def default(cls) -> "TaskStatus":
+        """Get the default task status.
+
+        Returns:
+            TaskStatus: The default status, which is Pending
+        """
+        return cls.Pending
 
 
 class TaskResultSlim(BaseModel):
@@ -333,6 +343,19 @@ class TaskResultSlim(BaseModel):
     task_id: TaskId
     graph_id: GraphId | None = None
     status: TaskStatus
+
+    @classmethod
+    def default(
+        cls, task_id: TaskId, graph_id: GraphId | None = None
+    ) -> "TaskResultSlim":
+        """Create a default TaskResultSlim with Pending status.
+
+        Returns:
+            TaskResultSlim: New instance with status set to Pending
+        """
+        return TaskResultSlim(
+            task_id=task_id, graph_id=graph_id, status=TaskStatus.default()
+        )
 
     def directory_path(self) -> Path:
         """Returns the directory path for storing this task result.
@@ -449,11 +472,62 @@ class TaskGraph(BaseModel):
         """Returns the storage path for this task graph."""
         return self.graph_path(self.graph_id)
 
+    def _has_cycle_dfs(
+        self, start_node: TaskId, visited: set[TaskId], rec_stack: set[TaskId]
+    ) -> bool:
+        """Check for cycles using DFS traversal.
+
+        Args:
+            start_node: Current node being visited
+            visited: Set of all visited nodes
+            rec_stack: Set of nodes in current recursion stack
+
+        Returns:
+            bool: True if cycle is detected, False otherwise
+        """
+        visited.add(start_node)
+        rec_stack.add(start_node)
+
+        # Check all children of current node
+        for child_id in self.edges.get(start_node, set()):
+            # If child not visited, recurse
+            if child_id not in visited:
+                if self._has_cycle_dfs(child_id, visited, rec_stack):
+                    return True
+            # If child is in recursion stack, we found a back edge (cycle)
+            elif child_id in rec_stack:
+                return True
+
+        # Remove from recursion stack before returning
+        rec_stack.remove(start_node)
+        return False
+
+    def _detect_cycles(self) -> bool:
+        """Detect if the graph contains any cycles.
+
+        Returns:
+            bool: True if any cycle is detected, False if DAG is valid
+        """
+        visited: set[TaskId] = set()
+        rec_stack: set[TaskId] = set()
+
+        # Check each unvisited node as potential start of cycle
+        for task_id in self.children.keys():
+            if task_id not in visited:
+                if self._has_cycle_dfs(task_id, visited, rec_stack):
+                    return True
+
+        return False
+
     def add_task(self, task: Task, parent_id: TaskId | None = None) -> None:
         """Add a task to the graph.
 
         Args:
             task: The Task instance to add to the graph.
+            parent_id: Optional parent task ID to create dependency
+
+        Raises:
+            ValueError: If adding this task would create a cycle in the DAG
         """
         # Ensure task is part of this graph
         task.graph_id = self.graph_id
@@ -463,6 +537,17 @@ class TaskGraph(BaseModel):
             if parent_id not in self.edges:
                 self.edges[parent_id] = set()
             self.edges[parent_id].add(task.task_id)
+
+            # Check for cycles after adding the edge
+            if self._detect_cycles():
+                # Rollback the changes
+                self.edges[parent_id].remove(task.task_id)
+                if not self.edges[parent_id]:  # Remove empty set
+                    del self.edges[parent_id]
+                del self.children[task.task_id]
+                raise ValueError(
+                    f"Adding task {task.task_id} with parent {parent_id} would create a cycle in the DAG"
+                )
 
     def start_task(self, task_id: TaskId) -> TaskResultSlim:
         """Mark a task as started to prevent double-scheduling."""

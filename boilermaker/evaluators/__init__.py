@@ -7,9 +7,9 @@ from boilermaker.storage.base import StorageInterface
 from boilermaker.task import Task
 from boilermaker.types import TaskHandler
 
-from .base import NoStorageEvaluator
 from .common import MessageActions, MessageHandler
 from .results_store import ResultsStorageTaskEvaluator
+from .simple import NoStorageEvaluator
 from .task_graph import TaskGraphEvaluator
 
 

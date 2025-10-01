@@ -2,12 +2,15 @@ import datetime
 import logging
 
 from aio_azure_clients_toolbox import AzureBlobStorageClient as MFBlobClient
+from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
 from azure.identity.aio import DefaultAzureCredential
 
-from boilermaker.storage.base import StorageInterface
+from boilermaker.exc import BoilermakerStorageError
+from boilermaker.storage import StorageInterface
 from boilermaker.task import GraphId, TaskGraph, TaskResult, TaskResultSlim
 
 logger = logging.getLogger(__name__)
+
 
 class BlobClientStorage(MFBlobClient, StorageInterface):
     """Client for uploading TaskResult instances to Azure Blob Storage.
@@ -87,4 +90,15 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
             "status": task_result.status,
             "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         }
-        return await self.upload_blob(fname, task_result.model_dump_json(), tags=blob_tags)
+        try:
+            return await self.upload_blob(
+                fname, task_result.model_dump_json(), tags=blob_tags, overwrite=True
+            )
+        except AzureBlobError as exc:
+            raise BoilermakerStorageError(
+                f"Failed to store TaskResult {task_result.task_id}",
+                task_id=task_result.task_id,
+                graph_id=task_result.graph_id,
+                status_code=exc.status_code,
+                reason=exc.reason,
+            ) from exc

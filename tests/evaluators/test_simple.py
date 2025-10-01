@@ -7,7 +7,7 @@ from azure.servicebus._pyamqp.message import Message
 from boilermaker import failure, retries
 from boilermaker.app import Boilermaker
 from boilermaker.evaluators import NoStorageEvaluator
-from boilermaker.task import Task
+from boilermaker.task import Task, TaskResult, TaskStatus
 
 
 class State:
@@ -55,13 +55,15 @@ def evaluator(app, mockservicebus):
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
-# task_handler Tests
+#
+# Message Handling Logic Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 async def test_task_handler_success(evaluator):
     """Test that task_handler executes a registered function and returns the result."""
 
     result = await evaluator.task_handler()
-    assert result == 42
+    assert result.status == TaskStatus.Success
+    assert result.result == 42
 
 
 async def test_task_handler_missing_function(evaluator):
@@ -85,31 +87,9 @@ async def test_task_handler_debug_task(evaluator):
     result = await evaluator.task_handler()
     # Should return whatever sample.debug_task returns
     # (for now, just check it runs without error)
-    assert result is not None
-
-
-# # # # # # # # # # # # # # # # # # # # # # # # # # #
-#
-# Message Handling Logic Tests
-# # # # # # # # # # # # # # # # # # # # # # # # # # #
-
-
-async def test_handler_garbage_message(evaluator, mockservicebus):
-    """Test that message_handler handles invalid JSON messages gracefully."""
-    message_num = random.randint(100, 1000)
-    # We are going to make a custom, totally garbage message
-    my_frame = [0, 0, 0]
-    amqp_received_message = Message(
-        data=[b"{{\\]]))"],  # Invalid JSON
-        message_annotations={SEQUENCENUBMERNAME: message_num},
-    )
-    msg = ServiceBusReceivedMessage(
-        amqp_received_message, receiver=None, frame=my_frame
-    )
-    evaluator.task.msg = msg
-    # Now we can run the task
-    result = await evaluator.message_handler()
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Success
+    assert result.result == 0
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -141,7 +121,11 @@ async def test_task_success(has_on_success, acks_late, app, mockservicebus, eval
     evaluator.task = task
 
     result = await evaluator.message_handler()
-    assert result is None
+    # Check result from evaluating the task
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Success
+    assert result.result == "OK"
+
     # Task should *always* be settled
     assert len(mockservicebus._receiver.method_calls) == 1
     complete_msg_call = mockservicebus._receiver.method_calls[0]
@@ -196,6 +180,10 @@ async def test_task_failure(
     task.msg = make_message(task, sequence_number=message_num)
     evaluator.task = task
     result = await evaluator.message_handler()
+    # Check result from evaluating the task
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert result.result is None
 
     # Task should *always* be settled
     assert len(mockservicebus._receiver.method_calls) == 1
@@ -222,7 +210,6 @@ async def test_task_failure(
     elif not acks_late:
         assert complete_msg_call[0] == "complete_message"
         assert complete_msg_call[1][0].sequence_number == message_num
-    assert result is None
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -260,6 +247,9 @@ async def test_task_retries_with_onfail(
     task.msg = make_message(task, sequence_number=message_num)
     evaluator.task = task
     result = await evaluator.message_handler()
+    # Check result from evaluating the task
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.RetriesExhausted if not can_retry else TaskStatus.Retry
 
     # Task should *always* be settled
     assert len(mockservicebus._receiver.method_calls) == 1
@@ -309,7 +299,6 @@ async def test_task_retries_with_onfail(
     elif not can_retry:
         assert complete_msg_call[0] == "complete_message"
         assert complete_msg_call[1][0].sequence_number == message_num
-    assert result is None
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -332,6 +321,8 @@ async def test_task_retries_with_new_policy(app, mockservicebus, evaluator):
     evaluator.task = task
     # Now we can run the task
     result = await evaluator.message_handler()
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Retry
 
     # Task should *always* be settled
     assert len(mockservicebus._receiver.method_calls) == 1
@@ -350,8 +341,6 @@ async def test_task_retries_with_new_policy(app, mockservicebus, evaluator):
     assert published_task.policy.delay > retries.RetryPolicy.default().delay
     assert published_task.on_success is None
     assert published_task.on_failure is None
-
-    assert result is None
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -383,6 +372,8 @@ async def test_task_retries_acks_late(
     task.msg = make_message(task, sequence_number=message_num)
     evaluator.task = task
     result = await evaluator.message_handler()
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.RetriesExhausted if not can_retry else TaskStatus.Retry
 
     # Task should *always* be settled
     assert len(mockservicebus._receiver.method_calls) == 1
@@ -411,8 +402,6 @@ async def test_task_retries_acks_late(
     else:
         # No new tasks published
         assert not mockservicebus._sender.method_calls
-
-    assert result is None
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -450,6 +439,12 @@ async def test_task_handle_exception(
     evaluator.task = task
     result = await evaluator.message_handler()
 
+    # Check result from evaluating the task
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert result.errors
+    assert "FloatingPointError" in result.formatted_exception
+
     # Task should *always* be settled
     assert len(mockservicebus._receiver.method_calls) == 1
     complete_msg_call = mockservicebus._receiver.method_calls[0]
@@ -476,5 +471,3 @@ async def test_task_handle_exception(
         assert published_task.function_name == "onfail"
         assert published_task.on_success is None
         assert published_task.on_failure is None
-
-    assert result is None

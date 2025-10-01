@@ -1,5 +1,6 @@
 import datetime
 import logging
+import time
 import traceback
 import typing
 from abc import abstractmethod
@@ -18,9 +19,12 @@ from azure.servicebus.exceptions import (
 from opentelemetry import trace
 from pydantic import ValidationError
 
-from boilermaker.failure import TaskFailureResultType
+from boilermaker import exc
+from boilermaker import sample
+from boilermaker.failure import TaskFailureResult
+from boilermaker.retries import RetryException
 from boilermaker.storage import StorageInterface
-from boilermaker.task import Task
+from boilermaker.task import Task, TaskResult, TaskStatus
 from boilermaker.types import TaskHandler
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
@@ -75,8 +79,8 @@ class MessageActions:
                     f"Abandoning message: returned to queue {sequence_number=}"
                 )
             except (
+                MessageAlreadySettled,
                 MessageLockLostError,
-                ServiceBusError,
                 SessionLockLostError,
             ):
                 msg = (
@@ -84,6 +88,14 @@ class MessageActions:
                     f"exc_info={traceback.format_exc()}"
                 )
                 logger.error(msg)
+                raise exc.BoilermakerTaskLeaseLost(msg) from None
+            except ServiceBusError as sb_exc:
+                msg = (
+                    f"ServiceBusError requeuing message {sequence_number=} "
+                    f"exc_info={traceback.format_exc()}"
+                )
+                logger.error(msg)
+                raise exc.BoilermakerServiceBusError(msg) from sb_exc
         return None
 
     @staticmethod
@@ -96,7 +108,6 @@ class MessageActions:
         except (
             MessageAlreadySettled,
             MessageLockLostError,
-            ServiceBusError,
             SessionLockLostError,
         ):
             logmsg = (
@@ -104,7 +115,48 @@ class MessageActions:
                 f"exc_info={traceback.format_exc()}"
             )
             logger.error(logmsg)
+            raise exc.BoilermakerTaskLeaseLost(msg) from None
+        except ServiceBusError as sb_exc:
+            logmsg = (
+                f"ServiceBusError settling message sequence_number={msg.sequence_number} "
+                f"exc_info={traceback.format_exc()}"
+            )
+            logger.error(logmsg)
+            raise exc.BoilermakerServiceBusError(msg) from sb_exc
         return None
+
+    @staticmethod
+    async def dead_letter_message(
+        msg: ServiceBusReceivedMessage,
+        receiver: ServiceBusReceiver,
+        reason: str,
+        error_description: str = "Task failed",
+    ) -> None:
+        """Deadletter-store the message being processed."""
+        try:
+            return await receiver.dead_letter_message(
+                msg,
+                reason=reason,
+                error_description=error_description,
+            )
+        except (
+            MessageAlreadySettled,
+            MessageLockLostError,
+            SessionLockLostError,
+        ):
+            logmsg = (
+                f"Failed to deadletter message sequence_number={msg.sequence_number} "
+                f"exc_info={traceback.format_exc()}"
+            )
+            logger.error(logmsg)
+            raise exc.BoilermakerTaskLeaseLost(msg) from None
+        except ServiceBusError as sb_exc:
+            logmsg = (
+                f"ServiceBusError deadlettering message sequence_number={msg.sequence_number} "
+                f"exc_info={traceback.format_exc()}"
+            )
+            logger.error(logmsg)
+            raise exc.BoilermakerServiceBusError(msg) from sb_exc
 
     @staticmethod
     async def renew_message_lock(
@@ -127,22 +179,30 @@ class MessageActions:
                 f"exc_info={traceback.format_exc()}"
             )
             logger.error(logmsg)
-            return None
+            raise exc.BoilermakerTaskLeaseLost(logmsg) from None
+        except ServiceBusError as sb_exc:
+            logmsg = (
+                f"ServiceBusError renewing message lock sequence_number={msg.sequence_number} "
+                f"exc_info={traceback.format_exc()}"
+            )
+            logger.error(logmsg)
+            raise exc.BoilermakerServiceBusError(logmsg) from sb_exc
 
     @classmethod
     async def deadletter_or_complete_task(
         cls,
+        task: Task,
         msg: ServiceBusReceivedMessage,
         receiver: ServiceBusReceiver,
         reason: str,
-        task: Task,
         detail: Exception | str | None = None,
     ):
         """Deadletter or complete the current task based on its configuration."""
-        description = f"Task failed: {detail}" if detail else "Task failed"
+        description = detail or "Task failed"
         if task.should_dead_letter:
-            await receiver.dead_letter_message(
+            await cls.dead_letter_message(
                 msg,
+                receiver,
                 reason=reason,
                 error_description=description,
             )
@@ -184,11 +244,6 @@ class MessageHandler:
         """Individual message handler"""
         raise NotImplementedError
 
-    @abstractmethod
-    async def task_handler(self) -> typing.Any | TaskFailureResultType:
-        """The actual task handler to be implemented by subclasses."""
-        raise NotImplementedError
-
     # Shared properties and methods
     @cached_property
     def current_msg(self) -> ServiceBusReceivedMessage | None:
@@ -224,5 +279,112 @@ class MessageHandler:
         detail: Exception | str | None = None,
     ) -> None:
         return await MessageActions.deadletter_or_complete_task(
-            self.current_msg, self._receiver, reason, self.task, detail=detail
+            self.task, self.current_msg, self._receiver, reason, detail=detail
         )
+
+    async def task_handler(self) -> TaskResult:
+        """
+        Dynamically look up function requested and then evaluate it.
+
+        Wrap results in TaskResult. If callers return the special TaskFailureResult,
+        store result as a failure result with no actual result data.
+
+        Note: special case for `sample.debug_task` which returns 0 and does not log.
+
+        Returns:
+            TaskResult instance or 0 for `sample.debug_task`.
+        Raises:
+            ValueError: If the function is not found in the registry.
+        """
+        start = time.monotonic()
+
+        # Check if it's a debug task
+        if self.task.function_name == sample.TASK_NAME:
+            await sample.debug_task(self.state)
+            return TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                result=0,
+                status=TaskStatus.Success,
+            )
+
+        function = self.function_registry.get(self.task.function_name)
+        if not function:
+            raise ValueError(f"Missing registered function {self.task.function_name}")
+
+        # Look up function associated with the task
+        logger.info(f"[{self.task.function_name}] Begin Task {self.sequence_number=}")
+
+        try:
+            result = await function(
+                self.state,
+                *self.task.payload["args"],
+                **self.task.payload["kwargs"],
+            )
+            # Check if result is TaskFailureResult (special failure case)
+            if result is TaskFailureResult:
+                # Store as failure result (no actual result data to store)
+                task_result = TaskResult(
+                    task_id=self.task.task_id,
+                    graph_id=self.task.graph_id,
+                    result=None,  # No result data for failures
+                    status=TaskStatus.Failure,
+                    errors=["Task returned TaskFailureResult"],
+                )
+                logger.warning(
+                    f"[{self.task.function_name}] Task {self.sequence_number=} "
+                    f"returned TaskFailureResult in {time.monotonic()-start:.3f}s"
+                )
+            else:
+                # Create success result
+                task_result = TaskResult(
+                    task_id=self.task.task_id,
+                    graph_id=self.task.graph_id,
+                    result=result,
+                    status=TaskStatus.Success,
+                )
+                logger.info(
+                    f"[{self.task.function_name}] Completed Task {self.sequence_number=} "
+                    f"in {time.monotonic()-start:.3f}s"
+                )
+        except RetryException as retry:
+            # A retry has been requested:
+            # Calculate next delay and publish retry.
+            # Do not run on_failure run until after retries exhausted!
+            # The `retry` RetryException may have a policy -> What if it's different from the Task?
+            if retry.policy and retry.policy != self.task.policy:
+                # This will publish the *next* instance of the task using *this* policy
+                self.task.policy = retry.policy
+                logger.warning(f"Task policy updated to retry policy {retry.policy}")
+
+            delay = self.task.get_next_delay()
+            warn_msg = (
+                f"{retry.msg} "
+                f"[attempt {self.task.attempts.attempts} of {self.task.policy.max_tries}] "
+                f"Publishing retry... {self.sequence_number=} "
+                f"<function={self.task.function_name}> with {delay=}"
+            )
+            logger.warning(warn_msg)
+            task_result = TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                status=TaskStatus.Retry,
+                errors=[str(retry)],
+                formatted_exception=traceback.format_exc(),
+            )
+        except Exception as exc:
+            # Some other exception has been thrown
+            err_msg = (
+                f"Exception in task sequence_number={self.sequence_number} "
+                f"{traceback.format_exc()}"
+            )
+            logger.error(err_msg)
+            task_result = TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                status=TaskStatus.Failure,
+                errors=[str(exc)],
+                formatted_exception=traceback.format_exc(),
+            )
+
+        return task_result

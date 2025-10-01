@@ -7,10 +7,11 @@ from collections.abc import Awaitable, Callable
 from azure.servicebus.aio import ServiceBusReceiver
 
 from boilermaker import sample
+from boilermaker.exc import BoilermakerStorageError
 from boilermaker.failure import TaskFailureResultType
 from boilermaker.retries import RetryException
 from boilermaker.storage import StorageInterface
-from boilermaker.task import Task, TaskResult, TaskStatus
+from boilermaker.task import Task, TaskResult, TaskResultSlim, TaskStatus
 from boilermaker.types import TaskHandler
 
 from .common import MessageHandler
@@ -45,11 +46,26 @@ class TaskGraphEvaluator(MessageHandler):
     async def message_handler(self):
         """Handle a message containing a task that's part of a TaskGraph."""
         message_settled = False
+        # First, mark task as started in the graph to prevent double-scheduling
+        if self.task.graph_id:
+            started_result = TaskResultSlim.default(
+                self.task.task_id, self.task.graph_id
+            )
+            started_result.status = TaskStatus.Started
+            # Explore leases around blob result writes!
+            try:
+                await self.storage_interface.store_task_result(started_result)
+            except BoilermakerStorageError as exc:
+                if exc.status_code == 409:
+                    logger.warning(
+                        f"Task {self.task.task_id} in graph {self.task.graph_id} already started!"
+                    )
+                    return None
 
-        # ...FIXME
-        # # Mark as started to prevent double-scheduling by other workers
-        # started_result = graph.start_task(ready_task.task_id)
-        # await self.storage_interface.store_task_result(started_result)
+                logger.error(
+                    f"Failed to mark task {self.task.task_id} as started in graph {self.task.graph_id}: {exc}"
+                )
+                return None
 
         # Record attempt
         self.task.record_attempt()

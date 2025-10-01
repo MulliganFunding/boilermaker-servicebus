@@ -1,0 +1,122 @@
+import logging
+import typing
+from collections.abc import Awaitable, Callable
+
+from azure.servicebus.aio import ServiceBusReceiver
+from opentelemetry import trace
+
+from boilermaker import exc
+from boilermaker.task import Task, TaskResult, TaskStatus
+from boilermaker.types import TaskHandler
+
+from .common import MessageHandler
+
+tracer: trace.Tracer = trace.get_tracer(__name__)
+logger = logging.getLogger("boilermaker.app")
+
+
+class NoStorageEvaluator(MessageHandler):
+    """
+    Base class for evaluating tasks from Azure Service Bus.
+
+    Use this if no storage interface is provided and no TaskGraph is involved.
+    """
+    def __init__(
+        self,
+        receiver: ServiceBusReceiver,
+        task: Task,
+        task_publisher: Callable[[Task], Awaitable[None]],
+        function_registry: dict[str, TaskHandler],
+        state: typing.Any | None = None,
+    ):
+        super().__init__(receiver, task, task_publisher, function_registry, state=state)
+
+    # The main message handler
+    async def message_handler(self) -> TaskResult:
+        """Individual message handler"""
+        message_settled = False
+
+        # Immediately record an attempt
+        self.task.record_attempt()
+
+        # at-most once: "complete" msg even if it fails later
+        if self.task.acks_early:
+            try:
+                await self.complete_message()
+                message_settled = True
+            except exc.BoilermakerTaskLeaseLost:
+                logger.error(
+                    f"Lost message lease when trying to complete early for task {self.task.function_name}"
+                )
+                return None
+            except exc.BoilermakerServiceBusError:
+                logger.error("Unknown ServiceBusError", exc_info=True)
+                return None
+
+        if not self.task.can_retry:
+            logger.error(f"Retries exhausted for event {self.task.function_name}")
+            if not message_settled:
+                try:
+                    await self.deadletter_or_complete_task(
+                        "ProcessingError", detail="Retries exhausted"
+                    )
+                    message_settled = True
+                except exc.BoilermakerTaskLeaseLost:
+                    logger.error(
+                        f"Lost message lease when trying to deadletter/complete for task {self.task.function_name}"
+                    )
+                    return None
+                except exc.BoilermakerServiceBusError:
+                    logger.error("Unknown ServiceBusError", exc_info=True)
+                    return None
+
+            # This task is a failure because it did not succeed and retries are exhausted
+            if self.task.on_failure is not None:
+                await self.publish_task(self.task.on_failure)
+
+            # Early return here: no more processing
+            return TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                status=TaskStatus.RetriesExhausted,
+                result=None,
+            )
+
+        # Actually invoke the task here
+        result: TaskResult = await self.task_handler()
+
+        # At-least once: settle at the end
+        # IF we have lost the message lease, we *may* have *multiple* copies of this task running.
+        # This means, we *may have* multiple `on_success` or `on_failure` tasks scheduled.
+        # This, we *DO NOT PUBLISH* callbacks if we have lost the message lease.
+        if not message_settled:
+            try:
+                if result.status == TaskStatus.Failure:
+                    await self.deadletter_or_complete_task("TaskFailed")
+                else:
+                    await self.complete_message()
+                message_settled = True
+            except exc.BoilermakerTaskLeaseLost:
+                logger.error(
+                    f"Lost message lease when trying to complete late for task {self.task.function_name}"
+                )
+                return result
+            except exc.BoilermakerServiceBusError:
+                logger.error("Unknown ServiceBusError", exc_info=True)
+                return result
+
+        # Check and handle failure first
+        if result.status == TaskStatus.Failure and self.task.on_failure is not None:
+            # Schedule on_failure task
+            await self.publish_task(self.task.on_failure)
+        # Success case: publish the next task (if desired)
+        elif result.status == TaskStatus.Success and self.task.on_success is not None:
+            # Success case: publish the next task
+            await self.publish_task(self.task.on_success)
+        elif result.status == TaskStatus.Retry:
+            await self.publish_task(
+                self.task,
+                delay=self.task.get_next_delay(),
+            )
+
+        return result

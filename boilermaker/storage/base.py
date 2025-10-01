@@ -5,6 +5,7 @@ from boilermaker.task import GraphId, TaskGraph, TaskResult
 
 logger = logging.getLogger(__name__)
 
+
 class StorageInterface(ABC):
     """Interface for storage operations related to TaskGraph and TaskResult objects."""
 

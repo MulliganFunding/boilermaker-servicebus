@@ -1,3 +1,4 @@
+import pytest
 from boilermaker import retries, task
 
 
@@ -516,3 +517,91 @@ def test_task_graph_complex_dependency():
     ready_tasks = list(graph.ready_tasks())
     assert len(ready_tasks) == 1
     assert ready_tasks[0].task_id == t4.task_id
+
+
+def test_task_graph_cycle_detection_simple():
+    """Test that simple cycles are detected and rejected."""
+    graph = task.TaskGraph()
+    t1 = task.Task.default("task1")
+    t2 = task.Task.default("task2")
+
+    # Add tasks: t1 -> t2
+    graph.add_task(t1)
+    graph.add_task(t2, parent_id=t1.task_id)
+
+    # Try to create cycle by manually adding edge t2 -> t1, then adding a task
+    # This simulates creating a cycle in the graph
+    graph.edges[t2.task_id] = {t1.task_id}
+
+    # Now any add_task operation should detect the cycle
+    t3 = task.Task.default("task3")
+    with pytest.raises(ValueError, match="would create a cycle in the DAG"):
+        graph.add_task(t3, parent_id=t1.task_id)
+
+
+def test_task_graph_cycle_detection_complex():
+    """Test that complex cycles (A->B->C->A) are detected."""
+    graph = task.TaskGraph()
+    t1 = task.Task.default("task1")
+    t2 = task.Task.default("task2")
+    t3 = task.Task.default("task3")
+
+    # Build: t1 -> t2 -> t3
+    graph.add_task(t1)
+    graph.add_task(t2, parent_id=t1.task_id)
+    graph.add_task(t3, parent_id=t2.task_id)
+
+    # Manually create cycle: t3 -> t1 (completing the cycle t1->t2->t3->t1)
+    graph.edges[t3.task_id] = {t1.task_id}
+
+    # Now any add_task should detect the cycle
+    t4 = task.Task.default("task4")
+    with pytest.raises(ValueError, match="would create a cycle in the DAG"):
+        graph.add_task(t4, parent_id=t1.task_id)
+
+
+def test_task_graph_cycle_detection_self_loop():
+    """Test that self-loops are detected."""
+    graph = task.TaskGraph()
+    t1 = task.Task.default("task1")
+
+    graph.add_task(t1)
+
+    # Manually create self-loop
+    graph.edges[t1.task_id] = {t1.task_id}
+
+    # Now any add_task should detect the self-loop cycle
+    t2 = task.Task.default("task2")
+    with pytest.raises(ValueError, match="would create a cycle in the DAG"):
+        graph.add_task(t2, parent_id=t1.task_id)
+
+
+def test_task_graph_no_false_positive_cycles():
+    """Test that valid DAG structures don't trigger false positive cycle detection."""
+    graph = task.TaskGraph()
+
+    # Create diamond pattern: t1 -> (t2, t3) -> t4
+    t1 = task.Task.default("task1")
+    t2 = task.Task.default("task2")
+    t3 = task.Task.default("task3")
+    t4 = task.Task.default("task4")
+
+    # This should all work without raising cycle detection errors
+    graph.add_task(t1)
+    graph.add_task(t2, parent_id=t1.task_id)
+    graph.add_task(t3, parent_id=t1.task_id)
+    graph.add_task(t4, parent_id=t2.task_id)
+
+    # Add t4 as child of t3 as well (multiple parents, but no cycle)
+    graph.edges[t3.task_id].add(t4.task_id)
+
+    # Verify the structure is correct
+    assert t2.task_id in graph.edges[t1.task_id]
+    assert t3.task_id in graph.edges[t1.task_id]
+    assert t4.task_id in graph.edges[t2.task_id]
+    assert t4.task_id in graph.edges[t3.task_id]
+
+    # Should be able to add more tasks without cycle detection issues
+    t5 = task.Task.default("task5")
+    graph.add_task(t5, parent_id=t4.task_id)
+    assert t5.task_id in graph.edges[t4.task_id]

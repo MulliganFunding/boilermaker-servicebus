@@ -1,13 +1,11 @@
 import logging
-import time
 import traceback
 import typing
 from collections.abc import Awaitable, Callable
 
 from azure.servicebus.aio import ServiceBusReceiver
 
-from boilermaker import failure, sample
-from boilermaker.failure import TaskFailureResultType
+from boilermaker import failure
 from boilermaker.retries import RetryException
 from boilermaker.storage import StorageInterface
 from boilermaker.task import Task, TaskResult, TaskStatus
@@ -136,61 +134,8 @@ class ResultsStorageTaskEvaluator(MessageHandler):
         if self.task.acks_late and not message_settled:
             await self.complete_message()
 
-    async def task_handler(self) -> typing.Any | TaskFailureResultType:
+    async def task_handler(self) -> TaskResult | typing.Literal[0]:
         """Execute task function and store results."""
-        start = time.monotonic()
-        logger.info(f"[{self.task.function_name}] Begin Task {self.sequence_number=}")
-
-        # Execute the actual task function
-        try:
-            if self.task.function_name == sample.TASK_NAME:
-                result = await sample.debug_task(self.state)
-            else:
-                function = self.function_registry.get(self.task.function_name)
-                if not function:
-                    raise ValueError(
-                        f"Missing registered function {self.task.function_name}"
-                    )
-
-                result = await function(
-                    self.state,
-                    *self.task.payload["args"],
-                    **self.task.payload["kwargs"],
-                )
-
-            # Check if result is TaskFailureResult (special failure case)
-            if result is failure.TaskFailureResult:
-                # Store as failure result (no actual result data to store)
-                task_result = TaskResult(
-                    task_id=self.task.task_id,
-                    graph_id=self.task.graph_id,
-                    result=None,  # No result data for failures
-                    status=TaskStatus.Failure,
-                    errors=["Task returned TaskFailureResult"],
-                )
-                await self.storage_interface.store_task_result(task_result)
-                logger.info(
-                    f"[{self.task.function_name}] Task {self.sequence_number=} "
-                    f"returned TaskFailureResult in {time.monotonic()-start:.2f}s"
-                )
-                return result  # Return the failure result to trigger failure handling in message_handler
-            else:
-                # Store successful result
-                task_result = TaskResult(
-                    task_id=self.task.task_id,
-                    graph_id=self.task.graph_id,
-                    result=result,
-                    status=TaskStatus.Success,
-                )
-                await self.storage_interface.store_task_result(task_result)
-
-                logger.info(
-                    f"[{self.task.function_name}] Completed Task {self.sequence_number=} "
-                    f"in {time.monotonic()-start:.2f}s"
-                )
-                return result
-
-        except Exception as exc:
-            logger.error(f"Task {self.task.task_id} failed: {exc}")
-            # Let the exception bubble up to message_handler for proper error handling
-            raise
+        task_result = await super().task_handler()
+        await self.storage_interface.store_task_result(task_result)
+        return task_result

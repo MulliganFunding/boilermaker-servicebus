@@ -26,6 +26,7 @@ from opentelemetry import trace
 
 from . import tracing
 from .evaluators import evaluator_factory, MessageActions, MessageHandler
+from .exc import BoilermakerAppException
 from .retries import RetryPolicy
 from .storage import StorageInterface
 from .task import Task, TaskGraph
@@ -33,13 +34,6 @@ from .types import TaskHandler
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
-
-
-class BoilermakerAppException(Exception):
-    def __init__(self, message: str, errors: list):
-        super().__init__(message + str(errors))
-
-        self.errors = errors
 
 
 class Boilermaker:

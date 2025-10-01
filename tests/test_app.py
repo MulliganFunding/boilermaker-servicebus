@@ -569,6 +569,12 @@ async def test_handler_garbage_message(app, mockservicebus):
         assert result is None
         mock_eval.assert_not_called()
 
+    # Garbage Tasks should *always* be settled
+    assert len(mockservicebus._receiver.method_calls) == 1
+    complete_msg_call = mockservicebus._receiver.method_calls[0]
+    assert complete_msg_call[1][0].sequence_number == message_num
+    assert complete_msg_call[0] == "dead_letter_message"
+
 
 async def test_close(app, mockservicebus):
     app.service_bus_client = AsyncMock()
