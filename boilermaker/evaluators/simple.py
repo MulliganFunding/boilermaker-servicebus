@@ -63,7 +63,8 @@ class NoStorageEvaluator(MessageHandler):
                     message_settled = True
                 except exc.BoilermakerTaskLeaseLost:
                     logger.error(
-                        f"Lost message lease when trying to deadletter/complete for task {self.task.function_name}"
+                        f"Lost message lease when trying to deadletter/complete "
+                        f" for task {self.task.function_name}"
                     )
                     return None
                 except exc.BoilermakerServiceBusError:
@@ -105,11 +106,11 @@ class NoStorageEvaluator(MessageHandler):
                 logger.error("Unknown ServiceBusError", exc_info=True)
                 return result
 
-        # Check and handle failure first
+        # Failure case: publish the on_failure task
         if result.status == TaskStatus.Failure and self.task.on_failure is not None:
             # Schedule on_failure task
             await self.publish_task(self.task.on_failure)
-        # Success case: publish the next task (if desired)
+        # Success case: publish the next task
         elif result.status == TaskStatus.Success and self.task.on_success is not None:
             # Success case: publish the next task
             await self.publish_task(self.task.on_success)

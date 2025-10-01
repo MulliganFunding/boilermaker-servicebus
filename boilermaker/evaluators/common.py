@@ -19,8 +19,7 @@ from azure.servicebus.exceptions import (
 from opentelemetry import trace
 from pydantic import ValidationError
 
-from boilermaker import exc
-from boilermaker import sample
+from boilermaker import exc, sample
 from boilermaker.failure import TaskFailureResult
 from boilermaker.retries import RetryException
 from boilermaker.storage import StorageInterface
@@ -192,22 +191,26 @@ class MessageActions:
     async def deadletter_or_complete_task(
         cls,
         task: Task,
-        msg: ServiceBusReceivedMessage,
         receiver: ServiceBusReceiver,
         reason: str,
         detail: Exception | str | None = None,
     ):
         """Deadletter or complete the current task based on its configuration."""
-        description = detail or "Task failed"
+        if task.msg is None:
+            logger.warning(
+                "No current message to settle for deadletter_or_complete_task"
+            )
+            return None
+
         if task.should_dead_letter:
             await cls.dead_letter_message(
-                msg,
+                task.msg,
                 receiver,
                 reason=reason,
-                error_description=description,
+                error_description=detail or "Task failed",
             )
         else:
-            await cls.complete_message(msg, receiver)
+            await cls.complete_message(task.msg, receiver)
         return None
 
 
@@ -279,7 +282,7 @@ class MessageHandler:
         detail: Exception | str | None = None,
     ) -> None:
         return await MessageActions.deadletter_or_complete_task(
-            self.task, self.current_msg, self._receiver, reason, detail=detail
+            self.task, self._receiver, reason, detail=detail
         )
 
     async def task_handler(self) -> TaskResult:

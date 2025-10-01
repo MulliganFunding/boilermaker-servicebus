@@ -427,10 +427,19 @@ class Boilermaker:
         with open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
             async for signum in signals:
                 # We want all of these evaluators to abandon their current message
-                async with create_task_group() as abandon_group:
-                    for sequence_number, evaluator in self._message_evaluators.items():
-                        logger.info(f"Pushing message back to queue {sequence_number=}")
-                        abandon_group.start_soon(evaluator.abandon_current_message)
+                try:
+                    async with create_task_group() as abandon_group:
+                        for (
+                            sequence_number,
+                            evaluator,
+                        ) in self._message_evaluators.items():
+                            logger.info(
+                                f"Pushing message back to queue {sequence_number=}"
+                            )
+                            abandon_group.start_soon(evaluator.abandon_current_message)
+                except* Exception as excgroup:
+                    for exc in excgroup.exceptions:
+                        logger.error(f"Error occurred while abandoning messages: {exc}")
 
                 logger.warning(f"Signal {signum=} received: shutting down. ")
                 scope.cancel()
@@ -475,7 +484,11 @@ class Boilermaker:
                     # - allow concurrent batch eval via receive_messages + prefetch (with a CapacityLimiter)
                     # - allow prioritizing certain messages
                     # - etc.
-                    await self.message_handler(msg, receiver)
+                    try:
+                        await self.message_handler(msg, receiver)
+                    except Exception as exc:
+                        # We catch everything here to avoid bringing down the worker
+                        logger.error(f"Error in message handler: {exc}", exc_info=True)
 
     async def message_handler(
         self, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
