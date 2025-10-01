@@ -72,9 +72,10 @@ async def test_task_handler_missing_function(evaluator):
     task = Task.default("not_registered")
     evaluator.task = task
 
-    with pytest.raises(ValueError) as exc:
-        await evaluator.task_handler()
-    assert "Missing registered function" in str(exc.value)
+    # Should not raise
+    result = await evaluator()
+    assert result.status == TaskStatus.Failure
+    assert "Pre-processing expectation failed" in result.errors
 
 
 async def test_task_handler_debug_task(evaluator):
@@ -84,7 +85,7 @@ async def test_task_handler_debug_task(evaluator):
 
     task = Task.default(sample.TASK_NAME)
     evaluator.task = task
-    result = await evaluator.task_handler()
+    result = await evaluator()
     # Should return whatever sample.debug_task returns
     # (for now, just check it runs without error)
     assert isinstance(result, TaskResult)
@@ -120,7 +121,7 @@ async def test_task_success(has_on_success, acks_late, app, mockservicebus, eval
     task.msg = make_message(task, sequence_number=message_num)
     evaluator.task = task
 
-    result = await evaluator.message_handler()
+    result = await evaluator()
     # Check result from evaluating the task
     assert isinstance(result, TaskResult)
     assert result.status == TaskStatus.Success
@@ -179,7 +180,7 @@ async def test_task_failure(
     message_num = random.randint(100, 1000)
     task.msg = make_message(task, sequence_number=message_num)
     evaluator.task = task
-    result = await evaluator.message_handler()
+    result = await evaluator()
     # Check result from evaluating the task
     assert isinstance(result, TaskResult)
     assert result.status == TaskStatus.Failure

@@ -238,12 +238,43 @@ class MessageHandler:
         self.task_publisher = task_publisher
         self.storage_interface = storage_interface
 
-    async def __call__(self):
+    async def __call__(self) -> TaskResult | None:
+        """Call pre-processing hook and then `message_handler`."""
+
+        try:
+            result = await self.pre_process()
+            if isinstance(result, TaskResult):
+                return result
+        except exc.BoilermakerExpectionFailed:
+            await self.deadletter_or_complete_task(
+                "ExpectationFailed", detail="Pre-processing expectation failed"
+            )
+            return TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                result=None,
+                status=TaskStatus.Failure,
+                errors=["Pre-processing expectation failed"],
+            )
+        except Exception:
+            logger.error("Exception in pre_process", exc_info=True)
+            await self.deadletter_or_complete_task(
+                "ProcessingError", detail="Pre-processing exception"
+            )
+            return TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                result=None,
+                status=TaskStatus.Failure,
+                errors=["Pre-processing exception"],
+                formatted_exception=traceback.format_exc(),
+            )
+
         return await self.message_handler()
 
     # TO BE IMPLEMENTED BY SUBCLASSES
     @abstractmethod
-    async def message_handler(self):
+    async def message_handler(self) -> TaskResult:
         """Individual message handler"""
         raise NotImplementedError
 
@@ -285,6 +316,32 @@ class MessageHandler:
             self.task, self._receiver, reason, detail=detail
         )
 
+    async def pre_process(self) -> None:
+        """Hook for pre-processing before task execution."""
+
+        # Check if it's a debug task
+        if self.task.function_name == sample.TASK_NAME:
+            await sample.debug_task(self.state)
+            try:
+                await self.complete_message()
+                status = TaskStatus.Success
+            except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                logger.error(
+                    f"Lost message lease when trying to complete early for task {self.task.function_name}"
+                )
+                status = TaskStatus.Failure
+            return TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                result=0,
+                status=status,
+            )
+
+        if not self.function_registry.get(self.task.function_name):
+            raise exc.BoilermakerExpectionFailed(
+                f"Missing registered function {self.task.function_name}"
+            )
+
     async def task_handler(self) -> TaskResult:
         """
         Dynamically look up function requested and then evaluate it.
@@ -300,20 +357,7 @@ class MessageHandler:
             ValueError: If the function is not found in the registry.
         """
         start = time.monotonic()
-
-        # Check if it's a debug task
-        if self.task.function_name == sample.TASK_NAME:
-            await sample.debug_task(self.state)
-            return TaskResult(
-                task_id=self.task.task_id,
-                graph_id=self.task.graph_id,
-                result=0,
-                status=TaskStatus.Success,
-            )
-
         function = self.function_registry.get(self.task.function_name)
-        if not function:
-            raise ValueError(f"Missing registered function {self.task.function_name}")
 
         # Look up function associated with the task
         logger.info(f"[{self.task.function_name}] Begin Task {self.sequence_number=}")

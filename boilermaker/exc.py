@@ -24,6 +24,11 @@ class BoilermakerStorageError(Exception):
         return self.details.get("status_code")
 
 
+class BoilermakerExpectionFailed(Exception):
+    """Custom exception indicating that a task's expectation has failed."""
+
+    pass
+
 
 class BoilermakerTaskLeaseLost(ValueError):
     """

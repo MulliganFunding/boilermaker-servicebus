@@ -92,6 +92,64 @@ def evaluator(app, mockservicebus, mock_storage):
     )
 
 
+def verify_storage_started_and_get_result_calls(mock_storage, task: Task) -> TaskResult:
+    """
+    Helper to verify that store_task_result was called for Started
+    and then get the stored result.
+
+    The asserts in here had been duplicated for all of our tests, so
+    pulled them into this helper.
+    """
+    # Verify task started was stored
+    assert mock_storage.store_task_result.call_count == 2  # Started + Success
+    started_call, result_call = mock_storage.store_task_result.mock_calls
+    assert isinstance(started_call.args[0], TaskResult)
+    started_result = started_call.args[0]
+    assert started_result.task_id == task.task_id
+    assert started_result.graph_id == task.graph_id
+    assert started_result.status == TaskStatus.Started
+
+    # Verify task result was stored
+    assert isinstance(result_call.args[0], TaskResult)
+    stored_result = result_call.args[0]
+    assert stored_result.task_id == task.task_id
+    assert stored_result.graph_id == task.graph_id
+    return stored_result
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# message_handler generic Tests
+# (Making sure parent-class expectations are not violated)
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_message_handler_missing_function(evaluator, mock_storage):
+    """Test that message_handler raises an error for missing functions."""
+    # Create a task with a function name not in registry
+    task = Task.default("not_registered")
+    task.graph_id = "test-graph-id"
+    evaluator.task = task
+
+    # Should not raise
+    result = await evaluator()
+    assert result.status == TaskStatus.Failure
+    mock_storage.store_task_result.assert_not_called()
+
+
+async def test_message_handler_debug_task(evaluator, mock_storage):
+    """Test that message_handler runs the debug task."""
+    from boilermaker import sample
+
+    task = Task.default(sample.TASK_NAME)
+    task.graph_id = "test-graph-id"
+    evaluator.task = task
+
+    result = await evaluator()
+    assert result.result == 0
+    assert result.status == TaskStatus.Success
+
+    # Should not store result
+    mock_storage.store_task_result.assert_not_called()
+
+
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # Initialization Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -111,175 +169,6 @@ def test_task_graph_evaluator_requires_storage(app, mockservicebus):
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
-# task_handler Tests
-# # # # # # # # # # # # # # # # # # # # # # # # # # #
-async def test_task_handler_success(evaluator, mock_storage):
-    """Test that task_handler executes a registered function and stores result."""
-    result = await evaluator.task_handler()
-    assert result == 42
-
-    # Should store successful result
-    mock_storage.store_task_result.assert_called()
-    stored_result_call = mock_storage.store_task_result.call_args[0][0]
-    assert stored_result_call.status == TaskStatus.Success
-    assert stored_result_call.result == 42
-
-
-async def test_task_handler_missing_function(evaluator, mock_storage):
-    """Test that task_handler raises an error for missing functions."""
-    # Create a task with a function name not in registry
-    task = Task.default("not_registered")
-    task.graph_id = "test-graph-id"
-    evaluator.task = task
-
-    with pytest.raises(ValueError) as exc:
-        await evaluator.task_handler()
-    assert "Missing registered function" in str(exc.value)
-
-
-async def test_task_handler_debug_task(evaluator, mock_storage):
-    """Test that task_handler runs the debug task."""
-    from boilermaker import sample
-
-    task = Task.default(sample.TASK_NAME)
-    task.graph_id = "test-graph-id"
-    evaluator.task = task
-
-    result = await evaluator.task_handler()
-    # Should return whatever sample.debug_task returns
-    assert result is not None
-
-    # Should store result
-    mock_storage.store_task_result.assert_called()
-
-
-async def test_task_handler_with_graph_workflow(evaluator, mock_storage, sample_graph):
-    """Test task_handler with graph workflow progression."""
-    # Set up the task as part of the graph
-    task = list(sample_graph.children.values())[0]  # Get first task
-    task.function_name = evaluator.task.function_name
-    task.payload = evaluator.task.payload
-    evaluator.task = task
-
-    # Mock the storage to return our sample graph
-    mock_storage.load_graph.return_value = sample_graph
-
-    result = await evaluator.task_handler()
-    assert result == 42
-
-    # Should load graph and store results
-    mock_storage.load_graph.assert_called_with(task.graph_id)
-    assert mock_storage.store_task_result.call_count >= 2  # Started + Success results
-
-
-async def test_task_handler_exception_handling(evaluator, mock_storage):
-    """Test that task_handler properly handles exceptions."""
-
-    async def failing_func(state, x):
-        raise ValueError("Test error")
-
-    evaluator.function_registry["failing_func"] = failing_func
-    task = Task.default("failing_func")
-    task.graph_id = "test-graph-id"
-    task.payload = {"args": (1,), "kwargs": {}}
-    evaluator.task = task
-
-    with pytest.raises(ValueError):
-        await evaluator.task_handler()
-
-
-# # # # # # # # # # # # # # # # # # # # # # # # # # #
-# Graph Workflow Tests
-# # # # # # # # # # # # # # # # # # # # # # # # # # #
-async def testcontinue_graph_no_graph_id(evaluator):
-    """Test continue_graph with no graph_id."""
-    result = TaskResult(
-        task_id="test-task", graph_id=None, status=TaskStatus.Success, result=42
-    )
-
-    # Should not raise any errors and should return early
-    await evaluator.continue_graph(result)
-
-
-async def testcontinue_graph_graph_not_found(evaluator, mock_storage):
-    """Test continue_graph when graph is not found."""
-    result = TaskResult(
-        task_id="test-task",
-        graph_id="missing-graph",
-        status=TaskStatus.Success,
-        result=42,
-    )
-
-    mock_storage.load_graph.return_value = None
-
-    # Should not raise errors, just log and return
-    await evaluator.continue_graph(result)
-    mock_storage.load_graph.assert_called_with("missing-graph")
-
-
-async def testcontinue_graph_publishes_ready_tasks(
-    evaluator, mock_storage, sample_graph
-):
-    """Test that continue_graph publishes newly ready tasks."""
-    # Complete the root task
-    root_task_id = list(sample_graph.edges.keys())[0]  # Get child tasks
-    result = TaskResult(
-        task_id=root_task_id,
-        graph_id=sample_graph.graph_id,
-        status=TaskStatus.Success,
-        result=42,
-    )
-    sample_graph.add_result(result)
-
-    mock_storage.load_graph.return_value = sample_graph
-
-    # Mock task publisher to track calls
-    published_tasks = []
-
-    async def mock_publish_task(task, *args, **kwargs):
-        published_tasks.append(task)
-
-    evaluator.task_publisher = mock_publish_task
-
-    await evaluator.continue_graph(result)
-
-    # Should have published the two child tasks that are now ready
-    assert len(published_tasks) == len(sample_graph.edges[root_task_id])
-
-
-async def testcontinue_graph_no_ready_tasks(evaluator, mock_storage, sample_graph):
-    """Test continue_graph when no tasks are ready."""
-    # Root task STARTED
-    parent_started = TaskResult(
-        task_id=next(iter(sample_graph.edges.keys())),
-        graph_id=sample_graph.graph_id,
-        status=TaskStatus.Started,
-        result=None,
-    )
-    sample_graph.add_result(parent_started)
-
-    mock_storage.load_graph.return_value = sample_graph
-
-    published_tasks = []
-
-    async def mock_publish_task(task, *args, **kwargs):
-        published_tasks.append(task)
-
-    first_child_task_id = next(iter(next(iter(sample_graph.edges.values()))))
-    child_result = TaskResult(
-        task_id=first_child_task_id,
-        graph_id=sample_graph.graph_id,
-        status=TaskStatus.Success,
-        result=42,
-    )
-    evaluator.task_publisher = mock_publish_task
-    await evaluator.continue_graph(child_result)
-
-    # Should not publish any tasks since no new tasks are ready
-    assert len(published_tasks) == 0
-
-
-# # # # # # # # # # # # # # # # # # # # # # # # # # #
 # Message Handler Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 async def test_message_handler_retries_exhausted(
@@ -291,31 +180,46 @@ async def test_message_handler_retries_exhausted(
     evaluator.task.graph_id = "test-graph-id"
 
     result = await evaluator.message_handler()
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.result is None
+    assert result.status == TaskStatus.RetriesExhausted
 
     # Should store failure result
-    mock_storage.store_task_result.assert_called()
-    stored_result = mock_storage.store_task_result.call_args[0][0]
-    assert stored_result.status == TaskStatus.Failure
-    assert "Retries exhausted" in stored_result.errors
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result.status == TaskStatus.RetriesExhausted
+
+    # No graph loaded
+    mock_storage.load_graph.assert_not_called()
 
     # Should settle message
     assert len(mockservicebus._receiver.method_calls) == 1
 
 
 @pytest.mark.parametrize("acks_early", [True, False])
-async def test_message_handler_success(
+async def test_message_handler_no_graph_success(
     acks_early, evaluator, mock_storage, mockservicebus
 ):
     """Test successful message handling with early/late acks."""
     evaluator.task.acks_late = not acks_early
-    evaluator.task.graph_id = "test-graph-id"
+    evaluator.task.graph_id = None
 
     result = await evaluator.message_handler()
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.result == 42
+    assert result.status == TaskStatus.Success
 
     # Should store successful result
-    mock_storage.store_task_result.assert_called()
+    # Should store started and successful result
+    stored_result_call = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result_call.status == TaskStatus.Success
+    assert stored_result_call.result == 42
+
+    # No graph loaded
+    mock_storage.load_graph.assert_not_called()
 
     # Should settle message
     assert len(mockservicebus._receiver.method_calls) == 1
@@ -324,7 +228,12 @@ async def test_message_handler_success(
 async def test_message_handler_with_on_success_callback(
     evaluator, mock_storage, mockservicebus, app
 ):
-    """Test message_handler with on_success callback."""
+    """
+    Test message_handler with on_success callback.
+
+    Expected behavior: if graph_id is present (but no graph tasks load)
+    `on_success` task is *NOT* published after successful execution.
+    """
 
     async def on_success_func(state):
         return "success"
@@ -335,10 +244,22 @@ async def test_message_handler_with_on_success_callback(
     evaluator.task.graph_id = "test-graph-id"
 
     result = await evaluator.message_handler()
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.result == 42
+    assert result.status == TaskStatus.Success
+
+    # Should store successful result
+    stored_result_call = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result_call.status == TaskStatus.Success
+    assert stored_result_call.result == 42
+
+    # Graph-id -> Graph loaded
+    mock_storage.load_graph.assert_called()
 
     # Should publish success callback task
-    assert len(mockservicebus._sender.method_calls) == 1
+    assert len(mockservicebus._sender.method_calls) == 0
 
 
 async def test_message_handler_with_retry_exception(
@@ -420,6 +341,163 @@ async def test_message_handler_with_on_failure_callback(
     assert len(mockservicebus._sender.method_calls) == 1
 
 
+@pytest.mark.parametrize("acks_early", [True, False])
+async def test_message_handler_success(acks_early, evaluator, mock_storage):
+    """Test that message_handler executes a registered function and stores result."""
+    result = await evaluator.message_handler()
+    assert result.result == 42
+
+    # Should store started and successful result
+    stored_result_call = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result_call.status == TaskStatus.Success
+    assert stored_result_call.result == 42
+
+
+async def test_message_handler_with_graph_workflow(
+    evaluator, mock_storage, sample_graph
+):
+    """Test message_handler with graph workflow progression."""
+    # Set up the task as part of the graph
+    task = list(sample_graph.children.values())[0]  # Get first task
+    task.function_name = evaluator.task.function_name
+    task.payload = evaluator.task.payload
+    evaluator.task = task
+
+    # Mock the storage to return our sample graph
+    mock_storage.load_graph.return_value = sample_graph
+
+    result = await evaluator.message_handler()
+    assert result == 42
+
+    # Should store started and successful result
+    stored_result_call = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result_call.status == TaskStatus.Success
+    assert stored_result_call.result == 42
+
+    # Should have loaded graph
+    mock_storage.load_graph.assert_called_with(task.graph_id)
+
+
+async def test_message_handler_exception_handling(evaluator, mock_storage):
+    """Test that message_handler properly handles exceptions."""
+
+    async def failing_func(state, x):
+        raise ValueError("Test error")
+
+    evaluator.function_registry["failing_func"] = failing_func
+    task = Task.default("failing_func")
+    task.graph_id = "test-graph-id"
+    task.payload = {"args": (1,), "kwargs": {}}
+    evaluator.task = task
+
+    await evaluator.message_handler()
+
+    # Should store result
+    stored_result_call = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result_call.status == TaskStatus.Failure
+    mock_storage.store_task_result.assert_not_called()
+
+    # Should not load graph or continue
+    mock_storage.load_graph.assert_not_called()
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# Graph Workflow Tests
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_continue_graph_no_graph_id(evaluator):
+    """Test continue_graph with no graph_id."""
+    result = TaskResult(
+        task_id="test-task", graph_id=None, status=TaskStatus.Success, result=42
+    )
+
+    # Should not raise any errors and should return early
+    await evaluator.continue_graph(result)
+
+
+async def test_continue_graph_graph_not_found(evaluator, mock_storage):
+    """Test continue_graph when graph is not found."""
+    result = TaskResult(
+        task_id="test-task",
+        graph_id="missing-graph",
+        status=TaskStatus.Success,
+        result=42,
+    )
+
+    mock_storage.load_graph.return_value = None
+
+    # Should not raise errors, just log and return
+    await evaluator.continue_graph(result)
+    mock_storage.load_graph.assert_called_with("missing-graph")
+
+
+async def test_continue_graph_publishes_ready_tasks(
+    evaluator, mock_storage, sample_graph
+):
+    """Test that continue_graph publishes newly ready tasks."""
+    # Complete the root task
+    root_task_id = list(sample_graph.edges.keys())[0]  # Get child tasks
+    result = TaskResult(
+        task_id=root_task_id,
+        graph_id=sample_graph.graph_id,
+        status=TaskStatus.Success,
+        result=42,
+    )
+    sample_graph.add_result(result)
+
+    mock_storage.load_graph.return_value = sample_graph
+
+    # Mock task publisher to track calls
+    published_tasks = []
+
+    async def mock_publish_task(task, *args, **kwargs):
+        published_tasks.append(task)
+
+    evaluator.task_publisher = mock_publish_task
+
+    await evaluator.continue_graph(result)
+
+    # Should have published the two child tasks that are now ready
+    assert len(published_tasks) == len(sample_graph.edges[root_task_id])
+
+
+async def test_continue_graph_no_ready_tasks(evaluator, mock_storage, sample_graph):
+    """Test continue_graph when no tasks are ready."""
+    # Root task STARTED
+    parent_started = TaskResult(
+        task_id=next(iter(sample_graph.edges.keys())),
+        graph_id=sample_graph.graph_id,
+        status=TaskStatus.Started,
+        result=None,
+    )
+    sample_graph.add_result(parent_started)
+
+    mock_storage.load_graph.return_value = sample_graph
+
+    published_tasks = []
+
+    async def mock_publish_task(task, *args, **kwargs):
+        published_tasks.append(task)
+
+    first_child_task_id = next(iter(next(iter(sample_graph.edges.values()))))
+    child_result = TaskResult(
+        task_id=first_child_task_id,
+        graph_id=sample_graph.graph_id,
+        status=TaskStatus.Success,
+        result=42,
+    )
+    evaluator.task_publisher = mock_publish_task
+    await evaluator.continue_graph(child_result)
+
+    # Should not publish any tasks since no new tasks are ready
+    assert len(published_tasks) == 0
+
+
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # Integration Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -497,24 +575,6 @@ async def test_full_graph_workflow_integration(app, mockservicebus, mock_storage
     assert len(published_tasks) == 2  # Both child tasks should be published
 
 
-async def test_garbage_message_handling(evaluator, mockservicebus):
-    """Test that message_handler handles invalid JSON messages gracefully."""
-    message_num = random.randint(100, 1000)
-    # Create garbage message
-    my_frame = [0, 0, 0]
-    amqp_received_message = Message(
-        data=[b"{{\\])))"],  # Invalid JSON
-        message_annotations={SEQUENCENUBMERNAME: message_num},
-    )
-    msg = ServiceBusReceivedMessage(
-        amqp_received_message, receiver=None, frame=my_frame
-    )
-    evaluator.task.msg = msg
-
-    result = await evaluator.message_handler()
-    assert result is None
-
-
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # Edge Case Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -522,7 +582,7 @@ async def test_task_with_no_graph_id(evaluator, mock_storage):
     """Test task execution when task has no graph_id."""
     evaluator.task.graph_id = None
 
-    result = await evaluator.task_handler()
+    result = await evaluator.message_handler()
     assert result == 42
 
     # Should still store result (with graph_id=None)

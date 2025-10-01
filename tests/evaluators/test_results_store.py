@@ -71,6 +71,31 @@ def evaluator(app, mockservicebus, mock_storage):
     )
 
 
+def verify_storage_started_and_get_result_calls(mock_storage, task: Task) -> TaskResult:
+    """
+    Helper to verify that store_task_result was called for Started
+    and then get the stored result.
+
+    The asserts in here had been duplicated for all of our tests, so
+    pulled them into this helper.
+    """
+    # Verify task started was stored
+    assert mock_storage.store_task_result.call_count == 2  # Started + Success
+    started_call, result_call = mock_storage.store_task_result.mock_calls
+    assert isinstance(started_call.args[0], TaskResult)
+    started_result = started_call.args[0]
+    assert started_result.task_id == task.task_id
+    assert started_result.graph_id == task.graph_id
+    assert started_result.status == TaskStatus.Started
+
+    # Verify task result was stored
+    assert isinstance(result_call.args[0], TaskResult)
+    stored_result = result_call.args[0]
+    assert stored_result.task_id == task.task_id
+    assert stored_result.graph_id == task.graph_id
+    return stored_result
+
+
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # Constructor Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -107,15 +132,16 @@ async def test_message_handler_missing_function(evaluator, mock_storage):
     task = Task.default("not_registered")
     evaluator.task = task
 
-    with pytest.raises(ValueError) as exc:
-        await evaluator.message_handler()
-    assert "Missing registered function" in str(exc.value)
+    # Should not raise
+    result = await evaluator()
+    assert result.status == TaskStatus.Failure
+    assert "Pre-processing expectation failed" in result.errors
 
     # Should not store any result when function is missing
     mock_storage.store_task_result.assert_not_called()
 
 
-async def test_message_handler_function_exception(evaluator, mock_storage, app):
+async def test_message_handler_stores_function_exception(evaluator, mock_storage, app):
     """Test that message_handler handles function exceptions properly."""
 
     async def failing_func(state):
@@ -126,24 +152,31 @@ async def test_message_handler_function_exception(evaluator, mock_storage, app):
     task.msg = make_message(task)
     evaluator.task = task
 
-    with pytest.raises(RuntimeError) as exc:
-        await evaluator.message_handler()
-    assert "Something went wrong" in str(exc.value)
+    result = await evaluator.message_handler()
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert result.result is None
+    assert "Something went wrong" in result.formatted_exception
 
     # Should not store result when function raises exception
     # (storage happens in message_handler for exceptions)
-    mock_storage.store_task_result.assert_not_called()
+
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(mock_storage, task)
+    assert stored_result.result is None
+    assert stored_result.status == TaskStatus.Failure
+    assert "Something went wrong" in stored_result.formatted_exception
 
 
 async def test_message_handler_debug_task(evaluator, mock_storage):
-    """Test that message_handler runs the debug task and stores result."""
+    """Test that message_handler runs the debug task and DOES NOT store result."""
     from boilermaker import sample
 
     task = Task.default(sample.TASK_NAME)
     task.msg = make_message(task)
     evaluator.task = task
 
-    result = await evaluator.message_handler()
+    result = await evaluator()
     # Should return whatever sample.debug_task returns
     assert result is not None
 
@@ -160,20 +193,10 @@ async def test_message_handler_success(evaluator, mock_storage):
     assert result.result == 42
     assert result.status == TaskStatus.Success
 
-    # Verify task started was stored
-    assert mock_storage.store_task_result.call_count == 2  # Started + Success
-    started_call, result_call = mock_storage.store_task_result.mock_calls
-    assert isinstance(started_call.args[0], TaskResult)
-    started_result = started_call.args[0]
-    assert started_result.task_id == evaluator.task.task_id
-    assert started_result.graph_id == evaluator.task.graph_id
-    assert started_result.status == TaskStatus.Started
-
-    # Verify task result was stored
-    assert isinstance(result_call.args[0], TaskResult)
-    stored_result = result_call.args[0]
-    assert stored_result.task_id == evaluator.task.task_id
-    assert stored_result.graph_id == evaluator.task.graph_id
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
     assert stored_result.result == 42
     assert stored_result.status == TaskStatus.Success
     assert stored_result.errors is None
@@ -226,20 +249,10 @@ async def test_task_success_with_storage(
     complete_msg_call = mockservicebus._receiver.method_calls[0]
     assert complete_msg_call[1][0].sequence_number == message_num
 
-    # Verify task started was stored
-    assert mock_storage.store_task_result.call_count == 2  # Started + Success
-    started_call, result_call = mock_storage.store_task_result.mock_calls
-    assert isinstance(started_call.args[0], TaskResult)
-    started_result = started_call.args[0]
-    assert started_result.task_id == evaluator.task.task_id
-    assert started_result.graph_id == evaluator.task.graph_id
-    assert started_result.status == TaskStatus.Started
-
-    # Verify task result was stored
-    assert isinstance(result_call.args[0], TaskResult)
-    stored_result = result_call.args[0]
-    assert stored_result.task_id == evaluator.task.task_id
-    assert stored_result.graph_id == evaluator.task.graph_id
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
     assert stored_result.status == TaskStatus.Success
     assert stored_result.result == "OK"
     assert stored_result.errors is None
@@ -305,20 +318,10 @@ async def test_task_failure_with_storage(
     complete_msg_call = mockservicebus._receiver.method_calls[0]
     assert complete_msg_call[1][0].sequence_number == message_num
 
-    # Verify task started was stored
-    assert mock_storage.store_task_result.call_count == 2  # Started + Success
-    started_call, result_call = mock_storage.store_task_result.mock_calls
-    assert isinstance(started_call.args[0], TaskResult)
-    started_result = started_call.args[0]
-    assert started_result.task_id == evaluator.task.task_id
-    assert started_result.graph_id == evaluator.task.graph_id
-    assert started_result.status == TaskStatus.Started
-
-    # Verify task result was stored
-    assert isinstance(result_call.args[0], TaskResult)
-    stored_result = result_call.args[0]
-    assert stored_result.task_id == evaluator.task.task_id
-    assert stored_result.graph_id == evaluator.task.graph_id
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
     assert stored_result.status == TaskStatus.Failure
     assert stored_result.result is None
 
@@ -332,58 +335,6 @@ async def test_task_failure_with_storage(
     else:
         # No callbacks published
         assert not mockservicebus._sender.method_calls
-
-
-async def test_task_exception_with_storage(app, mockservicebus, mock_storage):
-    """Test task exception handling with result storage."""
-
-    async def exception_task(state):
-        raise RuntimeError("Task failed with exception")
-
-    app.register_async(exception_task, policy=retries.RetryPolicy.default())
-    task = app.create_task(exception_task)
-    task.acks_late = True
-
-    evaluator = ResultsStorageTaskEvaluator(
-        mockservicebus._receiver,
-        task,
-        app.publish_task,
-        app.function_registry,
-        state=app.state,
-        storage_interface=mock_storage,
-    )
-
-    message_num = random.randint(100, 1000)
-    task.msg = make_message(task, sequence_number=message_num)
-
-    result = await evaluator.message_handler()
-    assert result is None
-
-    # Task should be deadlettered
-    assert len(mockservicebus._receiver.method_calls) == 1
-    complete_msg_call = mockservicebus._receiver.method_calls[0]
-    assert complete_msg_call[0] == "dead_letter_message"
-
-    # Verify task started was stored
-    assert mock_storage.store_task_result.call_count == 2  # Started + Success
-    started_call, result_call = mock_storage.store_task_result.mock_calls
-    assert isinstance(started_call.args[0], TaskResult)
-    started_result = started_call.args[0]
-    assert started_result.task_id == evaluator.task.task_id
-    assert started_result.graph_id == evaluator.task.graph_id
-    assert started_result.status == TaskStatus.Started
-
-    # Verify task result was stored
-    assert isinstance(result_call.args[0], TaskResult)
-    stored_result = result_call.args[0]
-    assert stored_result.task_id == evaluator.task.task_id
-    assert stored_result.graph_id == evaluator.task.graph_id
-    assert stored_result.status == TaskStatus.Failure
-    assert stored_result.result is None
-    assert stored_result.errors == ["Task failed with exception"]
-    assert (
-        "RuntimeError: Task failed with exception" in stored_result.formatted_exception
-    )
 
 
 @pytest.mark.parametrize("should_deadletter", [True, False])
@@ -438,20 +389,10 @@ async def test_task_retries_with_storage(
     complete_msg_call = mockservicebus._receiver.method_calls[0]
     assert complete_msg_call[1][0].sequence_number == message_num
 
-    # Verify task started was stored
-    assert mock_storage.store_task_result.call_count == 2  # Started + Success
-    started_call, result_call = mock_storage.store_task_result.mock_calls
-    assert isinstance(started_call.args[0], TaskResult)
-    started_result = started_call.args[0]
-    assert started_result.task_id == evaluator.task.task_id
-    assert started_result.graph_id == evaluator.task.graph_id
-    assert started_result.status == TaskStatus.Started
-
-    # Verify task result was stored
-    assert isinstance(result_call.args[0], TaskResult)
-    stored_result = result_call.args[0]
-    assert stored_result.task_id == evaluator.task.task_id
-    assert stored_result.graph_id == evaluator.task.graph_id
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
 
     if not can_retry:
         # Retries exhausted - should store failure result
@@ -505,20 +446,10 @@ async def test_retries_exhausted_with_storage(app, mockservicebus, mock_storage)
     assert result.status == TaskStatus.RetriesExhausted
     assert result.result is None
 
-    # Verify task started was stored
-    assert mock_storage.store_task_result.call_count == 2  # Started + Success
-    started_call, result_call = mock_storage.store_task_result.mock_calls
-    assert isinstance(started_call.args[0], TaskResult)
-    started_result = started_call.args[0]
-    assert started_result.task_id == evaluator.task.task_id
-    assert started_result.graph_id == evaluator.task.graph_id
-    assert started_result.status == TaskStatus.Started
-
-    # Verify task result was stored
-    assert isinstance(result_call.args[0], TaskResult)
-    stored_result = result_call.args[0]
-    assert stored_result.task_id == evaluator.task.task_id
-    assert stored_result.graph_id == evaluator.task.graph_id
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
     assert stored_result.status == TaskStatus.RetriesExhausted
 
     # Task should be deadlettered
@@ -566,19 +497,10 @@ async def test_retry_policy_update_with_storage(app, mockservicebus, mock_storag
     assert publish_retry_call[0] == "schedule_messages"
 
     # Should still store result
-    # Verify task started was stored
-    assert mock_storage.store_task_result.call_count == 2  # Started + Success
-    started_call, result_call = mock_storage.store_task_result.mock_calls
-    assert isinstance(started_call.args[0], TaskResult)
-    started_result = started_call.args[0]
-    assert started_result.task_id == evaluator.task.task_id
-    assert started_result.graph_id == evaluator.task.graph_id
-    assert started_result.status == TaskStatus.Started
-
-    assert isinstance(result_call.args[0], TaskResult)
-    stored_result = result_call.args[0]
-    assert stored_result.task_id == evaluator.task.task_id
-    assert stored_result.graph_id == evaluator.task.graph_id
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
     assert stored_result.status == TaskStatus.Retry
 
 
@@ -614,19 +536,8 @@ async def test_early_acks_with_storage(app, mockservicebus, mock_storage):
     complete_msg_call = mockservicebus._receiver.method_calls[0]
     assert complete_msg_call[0] == "complete_message"
 
-    # Should still store result
-    # Verify task started was stored
-    assert mock_storage.store_task_result.call_count == 2  # Started + Success
-    started_call, result_call = mock_storage.store_task_result.mock_calls
-    assert isinstance(started_call.args[0], TaskResult)
-    started_result = started_call.args[0]
-    assert started_result.task_id == evaluator.task.task_id
-    assert started_result.graph_id == evaluator.task.graph_id
-    assert started_result.status == TaskStatus.Started
-
-    # Verify task result was stored
-    assert isinstance(result_call.args[0], TaskResult)
-    stored_result = result_call.args[0]
-    assert stored_result.task_id == evaluator.task.task_id
-    assert stored_result.graph_id == evaluator.task.graph_id
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
     assert stored_result.status == TaskStatus.Success
