@@ -316,26 +316,6 @@ class Boilermaker:
 
         return task1
 
-    def create_graph(self) -> TaskGraph:
-        """Create a new TaskGraph for building complex workflows.
-
-        Returns:
-            TaskGraph: New empty task graph ready for adding tasks and dependencies
-
-        Example:
-            >>> graph = app.create_graph()
-            >>> task1 = app.create_task(fetch_data, url="...")
-            >>> task2 = app.create_task(process_data)
-            >>> task3 = app.create_task(save_results)
-            >>>
-            >>> graph.add_task(task1)  # Root task with no dependencies
-            >>> graph.add_task(task2, parent_id=task1.task_id)  # Depends on task1
-            >>> graph.add_task(task3, parent_id=task2.task_id)  # Depends on task2
-            >>>
-            >>> await app.publish_graph(graph)
-        """
-        return TaskGraph()
-
     @tracer.start_as_current_span("boilermaker.publish-task")
     async def publish_task(
         self,

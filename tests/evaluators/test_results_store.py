@@ -1,61 +1,16 @@
 import random
-from unittest.mock import AsyncMock, Mock
 
 import pytest
-from azure.servicebus import ServiceBusReceivedMessage
-from azure.servicebus._common.constants import SEQUENCENUBMERNAME
-from azure.servicebus._pyamqp.message import Message
 from boilermaker import failure, retries
-from boilermaker.app import Boilermaker
 from boilermaker.evaluators import ResultsStorageTaskEvaluator
-from boilermaker.storage import StorageInterface
 from boilermaker.task import Task, TaskResult, TaskStatus
 
 # Requires running pytest with `--import-mode importlib`
 from .helpers import verify_storage_started_and_get_result_calls
 
 
-class State:
-    def __init__(self, inner):
-        self.inner = inner
-
-    def __getitem__(self, key):
-        return self.inner[key]
-
-
-DEFAULT_STATE = State({"somekey": "somevalue"})
-
-
-def make_message(task, sequence_number: int = 123):
-    # Example taken from:
-    # azure-sdk-for-python/blob/main/sdk/servicebus/azure-servicebus/tests/test_message.py#L233
-    my_frame = [0, 0, 0]
-    amqp_received_message = Message(
-        data=[task.model_dump_json().encode("utf-8")],
-        message_annotations={SEQUENCENUBMERNAME: sequence_number},
-    )
-    return ServiceBusReceivedMessage(
-        amqp_received_message, receiver=None, frame=my_frame
-    )
-
-
 @pytest.fixture
-def mock_storage():
-    """Mock storage interface for testing."""
-    storage = Mock(spec=StorageInterface)
-    storage.store_task_result = AsyncMock()
-    storage.load_graph = AsyncMock(return_value=None)
-    storage.store_graph = AsyncMock()
-    return storage
-
-
-@pytest.fixture
-def app(sbus):
-    return Boilermaker(DEFAULT_STATE, sbus)
-
-
-@pytest.fixture
-def evaluator(app, mockservicebus, mock_storage):
+def evaluator(app, mockservicebus, mock_storage, make_message):
     async def somefunc(state, x):
         return x * 2
 
@@ -119,7 +74,9 @@ async def test_message_handler_missing_function(evaluator, mock_storage):
     mock_storage.store_task_result.assert_not_called()
 
 
-async def test_message_handler_stores_function_exception(evaluator, mock_storage, app):
+async def test_message_handler_stores_function_exception(
+    evaluator, mock_storage, app, make_message
+):
     """Test that message_handler handles function exceptions properly."""
 
     async def failing_func(state):
@@ -146,7 +103,7 @@ async def test_message_handler_stores_function_exception(evaluator, mock_storage
     assert "Something went wrong" in stored_result.formatted_exception
 
 
-async def test_message_handler_debug_task(evaluator, mock_storage):
+async def test_message_handler_debug_task(evaluator, mock_storage, make_message):
     """Test that message_handler runs the debug task and DOES NOT store result."""
     from boilermaker import sample
 
@@ -184,7 +141,7 @@ async def test_message_handler_success(evaluator, mock_storage):
 @pytest.mark.parametrize("acks_late", [True, False])
 @pytest.mark.parametrize("has_on_success", [True, False])
 async def test_task_success_with_storage(
-    has_on_success, acks_late, app, mockservicebus, mock_storage
+    has_on_success, acks_late, app, mockservicebus, mock_storage, make_message
 ):
     """Test successful task execution with result storage and optional on_success callback."""
 
@@ -252,7 +209,13 @@ async def test_task_success_with_storage(
 @pytest.mark.parametrize("should_deadletter", [True, False])
 @pytest.mark.parametrize("has_on_failure", [True, False])
 async def test_task_failure_with_storage(
-    has_on_failure, should_deadletter, acks_late, app, mockservicebus, mock_storage
+    has_on_failure,
+    should_deadletter,
+    acks_late,
+    app,
+    mockservicebus,
+    mock_storage,
+    make_message,
 ):
     """Test task failure handling with result storage, deadlettering, and on_failure callback."""
 
@@ -319,7 +282,13 @@ async def test_task_failure_with_storage(
 @pytest.mark.parametrize("has_on_failure", [True, False])
 @pytest.mark.parametrize("can_retry", [True, False])
 async def test_task_retries_with_storage(
-    can_retry, has_on_failure, should_deadletter, app, mockservicebus, mock_storage
+    can_retry,
+    has_on_failure,
+    should_deadletter,
+    app,
+    mockservicebus,
+    mock_storage,
+    make_message,
 ):
     """Test retry logic with result storage and on_failure callback."""
 
@@ -396,7 +365,9 @@ async def test_task_retries_with_storage(
         assert published_task.function_name == "retrytask"
 
 
-async def test_retries_exhausted_with_storage(app, mockservicebus, mock_storage):
+async def test_retries_exhausted_with_storage(
+    app, mockservicebus, mock_storage, make_message
+):
     """Test that retries exhausted scenario stores failure result."""
 
     async def oktask(state):
@@ -436,7 +407,9 @@ async def test_retries_exhausted_with_storage(app, mockservicebus, mock_storage)
     assert complete_msg_call[0] == "dead_letter_message"
 
 
-async def test_retry_policy_update_with_storage(app, mockservicebus, mock_storage):
+async def test_retry_policy_update_with_storage(
+    app, mockservicebus, mock_storage, make_message
+):
     """Test that retry policy can be updated during retry exception handling."""
 
     async def retrytask(state):
@@ -482,7 +455,7 @@ async def test_retry_policy_update_with_storage(app, mockservicebus, mock_storag
     assert stored_result.status == TaskStatus.Retry
 
 
-async def test_early_acks_with_storage(app, mockservicebus, mock_storage):
+async def test_early_acks_with_storage(app, mockservicebus, mock_storage, make_message):
     """Test that early acknowledgment works correctly with storage."""
 
     async def oktask(state):

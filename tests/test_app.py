@@ -15,7 +15,8 @@ from azure.servicebus.exceptions import ServiceBusError
 from boilermaker import retries
 from boilermaker.app import Boilermaker, BoilermakerAppException
 from boilermaker.evaluators import NoStorageEvaluator
-from boilermaker.task import Task
+from boilermaker.exc import BoilermakerStorageError
+from boilermaker.task import Task, TaskGraph
 
 
 class State:
@@ -26,17 +27,6 @@ class State:
         return self.inner[key]
 
 DEFAULT_STATE = State({"somekey": "somevalue"})
-
-
-def make_message(task, sequence_number: int = 123):
-    # Example taken from:
-    # azure-sdk-for-python/blob/main/sdk/servicebus/azure-servicebus/tests/test_message.py#L233
-    my_frame = [0, 0, 0]
-    amqp_received_message = Message(
-        data=[task.model_dump_json().encode("utf-8")],
-        message_annotations={SEQUENCENUBMERNAME: sequence_number},
-    )
-    return ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
 
 
 @pytest.fixture
@@ -97,7 +87,7 @@ async def test_app_register_async(app):
     assert await somefunc(DEFAULT_STATE) == "somevalue"
 
 
-async def test_app_register_many_async(app, mockservicebus, evaluator):
+async def test_app_register_many_async(app, mockservicebus, evaluator, make_message):
     """Test registering multiple async functions as tasks and message handling."""
     async def somefunc1(state):
         return state["somekey1"]
@@ -369,7 +359,7 @@ async def test_chain_publish(app, mockservicebus):
     assert published_task.on_success.on_success.payload["kwargs"] == {"number2": 6}
 
 
-async def test_chain_publish_and_evaluate(app, mockservicebus):
+async def test_chain_publish_and_evaluate(app, mockservicebus, make_message):
     app.register_async(failing_task)
     app.register_async(sample_task)
     fail = Task.si(failing_task)
@@ -424,6 +414,69 @@ async def test_chain_publish_and_evaluate(app, mockservicebus):
     assert app.state.inner["sample_task_called"] == 2
     assert app.state.inner["sample_task_payload"] == [(1, 2), (5, 6)]
     assert "fail_count" in app.state.inner and app.state.inner["fail_count"] == 1
+
+
+async def test_publish_graph_failures(app, mockservicebus, mock_storage):
+    """Test that publishing a task graph with no storage raises an error."""
+    with pytest.raises(BoilermakerAppException) as exc:
+        await app.publish_graph(None)
+        assert "TaskGraph workflows require a storage interface" in str(exc)
+
+    # No tasks published
+    mockservicebus._sender.assert_not_called()
+    # Add a storage interface
+    app.results_storage = mock_storage
+    # This should fail because the graph is invalid
+    graph = TaskGraph()
+    graph.add_task(Task.si(sample_task, 1, 2))
+    # Fails because this task does not include the graph_id!
+    graph.children["non_existent_task"] = Task.si(sample_task, 3, 4)
+    with pytest.raises(BoilermakerAppException) as exc:
+        await app.publish_graph(graph)
+        assert "All tasks must have graph_id matching graph" in str(exc)
+    # No tasks published
+    mockservicebus._sender.assert_not_called()
+
+    # handle storage failures!
+    graph = TaskGraph()
+    t1 = Task.si(sample_task, 1, 2)
+    t2 = Task.si(sample_task, 3, 4)
+    graph.add_task(t1)
+    graph.add_task(t2, parent_id=t1.task_id)
+    mock_storage.store_graph.side_effect = BoilermakerStorageError("Storage failure!")
+    with pytest.raises(BoilermakerAppException) as exc:
+        await app.publish_graph(graph)
+        assert "Failed to store TaskGraph" in str(exc)
+    # No tasks published
+    mockservicebus._sender.assert_not_called()
+
+
+async def test_publish_graph_happy_path(app, mockservicebus, mock_storage):
+    """Test that publishing a valid task graph works as expected."""
+    app.results_storage = mock_storage
+    graph = TaskGraph()
+    t1 = Task.si(sample_task, 1, 2)
+    t2 = Task.si(sample_task, 3, 4)
+    graph.add_task(t1)
+    graph.add_task(t2, parent_id=t1.task_id)
+
+    result = await app.publish_graph(graph)
+    # We get the graph back
+    assert result is graph
+
+    # One task published
+    assert len(mockservicebus._sender.method_calls) == 1
+    publish_success_call = mockservicebus._sender.method_calls[0]
+    assert publish_success_call[0] == "schedule_messages"
+    # Graph stored
+    mock_storage.store_graph.assert_called_with(graph)
+
+    # We should always be able to deserialize the task
+    published_task = Task.model_validate_json(str(publish_success_call[1][0]))
+    assert published_task.payload["args"] == [1, 2]
+    assert published_task.payload["kwargs"] == {}
+    assert published_task.function_name == "sample_task"
+    assert published_task.on_success is None
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
