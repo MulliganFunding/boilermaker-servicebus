@@ -345,17 +345,13 @@ class TaskResultSlim(BaseModel):
     status: TaskStatus
 
     @classmethod
-    def default(
-        cls, task_id: TaskId, graph_id: GraphId | None = None
-    ) -> "TaskResultSlim":
+    def default(cls, task_id: TaskId, graph_id: GraphId | None = None) -> "TaskResultSlim":
         """Create a default TaskResultSlim with Pending status.
 
         Returns:
             TaskResultSlim: New instance with status set to Pending
         """
-        return TaskResultSlim(
-            task_id=task_id, graph_id=graph_id, status=TaskStatus.default()
-        )
+        return TaskResultSlim(task_id=task_id, graph_id=graph_id, status=TaskStatus.default())
 
     def directory_path(self) -> Path:
         """Returns the directory path for storing this task result.
@@ -472,9 +468,7 @@ class TaskGraph(BaseModel):
         """Returns the storage path for this task graph."""
         return self.graph_path(self.graph_id)
 
-    def _has_cycle_dfs(
-        self, start_node: TaskId, visited: set[TaskId], rec_stack: set[TaskId]
-    ) -> bool:
+    def _has_cycle_dfs(self, start_node: TaskId, visited: set[TaskId], rec_stack: set[TaskId]) -> bool:
         """Check for cycles using DFS traversal.
 
         Args:
@@ -551,9 +545,7 @@ class TaskGraph(BaseModel):
 
     def start_task(self, task_id: TaskId) -> TaskResultSlim:
         """Mark a task as started to prevent double-scheduling."""
-        result = TaskResultSlim(
-            task_id=task_id, graph_id=self.graph_id, status=TaskStatus.Started
-        )
+        result = TaskResultSlim(task_id=task_id, graph_id=self.graph_id, status=TaskStatus.Started)
         self.results[task_id] = result
         return result
 
@@ -587,9 +579,7 @@ class TaskGraph(BaseModel):
             # 1. It has no result yet (never started) OR it has Pending status
             # 2. All its antecedents have succeeded
             task_result = self.results.get(task_id)
-            is_not_started = (
-                task_result is None or task_result.status == TaskStatus.Pending
-            )
+            is_not_started = task_result is None or task_result.status == TaskStatus.Pending
             if is_not_started and self.task_is_ready(task_id):
                 yield self.children[task_id]
 

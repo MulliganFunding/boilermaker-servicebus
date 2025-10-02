@@ -75,9 +75,7 @@ class TaskGraphEvaluator(MessageHandler):
             logger.error(f"Retries exhausted for event {self.task.function_name}")
             if not message_settled:
                 try:
-                    await self.deadletter_or_complete_task(
-                        "ProcessingError", detail="Retries exhausted"
-                    )
+                    await self.deadletter_or_complete_task("ProcessingError", detail="Retries exhausted")
                     message_settled = True
                 except exc.BoilermakerTaskLeaseLost:
                     logger.error(
@@ -169,9 +167,7 @@ class TaskGraphEvaluator(MessageHandler):
             # Reload graph with latest results
             graph = await self.storage_interface.load_graph(graph_id)
         except Exception:
-            logger.error(
-                f"Exception in continue_graph for graph {graph_id}", exc_info=True
-            )
+            logger.error(f"Exception in continue_graph for graph {graph_id}", exc_info=True)
             return None
 
         if not graph:
@@ -194,12 +190,8 @@ class TaskGraphEvaluator(MessageHandler):
             # Publish the task
             await self.publish_task(ready_task)
             ready_count += 1
-            logger.info(
-                f"Publishing ready task {ready_task.task_id} in graph {graph_id} total={ready_count}"
-            )
+            logger.info(f"Publishing ready task {ready_task.task_id} in graph {graph_id} total={ready_count}")
         else:
-            logger.info(
-                f"No new tasks ready in graph {graph_id} after task {completed_task_result.task_id}"
-            )
+            logger.info(f"No new tasks ready in graph {graph_id} after task {completed_task_result.task_id}")
 
         return ready_count

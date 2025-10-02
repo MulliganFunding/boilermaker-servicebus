@@ -1,8 +1,8 @@
 """
-    service_bus.py
+service_bus.py
 
-    Wrapper class around a `aio_azure_clients_toolbox.ManagedAzureServiceBusSender` which
-    allows sending messages or subscribing to a queue.
+Wrapper class around a `aio_azure_clients_toolbox.ManagedAzureServiceBusSender` which
+allows sending messages or subscribing to a queue.
 """
 
 from aio_azure_clients_toolbox import ManagedAzureServiceBusSender  # type: ignore
@@ -38,6 +38,7 @@ class AzureServiceBus:
         ...     credential
         ... )
     """
+
     def __init__(
         self,
         service_bus_namespace_url: str,
@@ -74,5 +75,5 @@ class AzureServiceBus:
         return cls(
             settings.service_bus_namespace_url,
             settings.service_bus_queue_name,
-            settings.service_bus_credential or settings.az_credential()
+            settings.service_bus_credential or settings.az_credential(),
         )

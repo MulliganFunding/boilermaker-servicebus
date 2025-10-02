@@ -26,6 +26,7 @@ class State:
     def __getitem__(self, key):
         return self.inner[key]
 
+
 DEFAULT_STATE = State({"somekey": "somevalue"})
 
 
@@ -33,18 +34,16 @@ DEFAULT_STATE = State({"somekey": "somevalue"})
 def app(sbus):
     return Boilermaker(DEFAULT_STATE, sbus)
 
+
 @pytest.fixture
 def evaluator(app, mockservicebus):
-
     async def somefunc(state, x):
         return x * 2
 
     app.register_async(somefunc, policy=retries.RetryPolicy.default())
     task = app.create_task(somefunc, 21)
 
-    return NoStorageEvaluator(
-        mockservicebus._receiver, task, app.publish_task, app.function_registry
-    )
+    return NoStorageEvaluator(mockservicebus._receiver, task, app.publish_task, app.function_registry)
 
 
 def test_app_state(app):
@@ -54,6 +53,7 @@ def test_app_state(app):
 
 async def test_task_decorator(app):
     """Test that the task decorator registers and calls a function."""
+
     @app.task()
     async def somefunc(state):
         return state["somekey"]
@@ -66,6 +66,7 @@ async def test_task_decorator(app):
 
 async def test_task_decorator_with_policy(app):
     """Test that the task decorator registers a function with a custom retry policy."""
+
     @app.task(policy=retries.RetryPolicy.default())
     async def somefunc(state):
         return state["somekey"]
@@ -78,6 +79,7 @@ async def test_task_decorator_with_policy(app):
 
 async def test_app_register_async(app):
     """Test registering a single async function as a task."""
+
     async def somefunc(state):
         return state["somekey"]
 
@@ -89,10 +91,13 @@ async def test_app_register_async(app):
 
 async def test_app_register_many_async(app, mockservicebus, evaluator, make_message):
     """Test registering multiple async functions as tasks and message handling."""
+
     async def somefunc1(state):
         return state["somekey1"]
+
     async def somefunc2(state, one_arg):
         return state["somekey2"]
+
     async def somefunc3(state, one_arg, two_args, one_kwarg=True):
         return state["somekey2"]
 
@@ -124,6 +129,7 @@ async def test_app_register_many_async(app, mockservicebus, evaluator, make_mess
 
 async def test_create_task(app):
     """Test creating a task from a registered function."""
+
     async def somefunc(state, **kwargs):
         state.inner.update(kwargs)
         return state["somekey"]
@@ -145,6 +151,7 @@ async def test_create_task(app):
 
 async def test_create_task_with_policy(app):
     """Test creating a task with a custom retry policy."""
+
     async def somefunc(state, **kwargs):
         state.inner.update(kwargs)
         return state["somekey"]
@@ -176,6 +183,7 @@ async def test_create_task_with_policy(app):
 
 async def test_create_task_failures(app):
     """Test error handling for unregistered functions and tasks."""
+
     async def one(state):
         pass
 
@@ -193,6 +201,7 @@ async def test_create_task_failures(app):
 
 async def test_apply_async_with_policy(app, mockservicebus):
     """Test applying a task asynchronously with a custom retry policy."""
+
     async def somefunc(state, **kwargs):
         state.inner.update(kwargs)
         return state["somekey"]
@@ -200,9 +209,7 @@ async def test_apply_async_with_policy(app, mockservicebus):
     # Function must be registered  first
     app.register_async(somefunc, policy=retries.RetryPolicy.default())
 
-    policy = retries.RetryPolicy(
-        max_tries=2, delay=30, delay_max=600, retry_mode=retries.RetryMode.Linear
-    )
+    policy = retries.RetryPolicy(max_tries=2, delay=30, delay_max=600, retry_mode=retries.RetryMode.Linear)
     # Now we can try to publish
     await app.apply_async(somefunc, bla="heynow", policy=policy)
     assert len(mockservicebus._sender.method_calls) == 1
@@ -221,6 +228,7 @@ async def test_apply_async_with_policy(app, mockservicebus):
 
 async def test_apply_async_no_policy(app, mockservicebus):
     """Test applying a task asynchronously with the default retry policy."""
+
     async def somefunc(state, **kwargs):
         state.inner.update(kwargs)
         return state["somekey"]
@@ -237,7 +245,7 @@ async def test_apply_async_no_policy(app, mockservicebus):
     assert published_task.policy.retry_mode == retries.RetryMode.Fixed
     assert published_task.payload["args"] == []
     assert published_task.payload["kwargs"] == {"bla": "heynow"}
-    assert published_task.function_name== "somefunc"
+    assert published_task.function_name == "somefunc"
     assert published_task.on_success is None
     assert published_task.on_failure is None
 
@@ -270,9 +278,7 @@ async def failing_task(state) -> int:
 def test_chain_fail(app):
     # on_failure must be a Task or None
     with pytest.raises(ValueError):
-        app.chain(
-            Task.si(sample_task, 1), Task.si(sample_task, 2), on_failure="not_a_task"
-        )
+        app.chain(Task.si(sample_task, 1), Task.si(sample_task, 2), on_failure="not_a_task")
     # must have enough tasks
     with pytest.raises(ValueError):
         app.chain(
@@ -482,6 +488,7 @@ async def test_publish_graph_happy_path(app, mockservicebus, mock_storage):
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 async def test_publish_task_sets_sequence_number(app, mockservicebus):
     """Test that publish_task sets the sequence number after publishing."""
+
     async def somefunc(state):
         return state["somekey"]
 
@@ -497,6 +504,7 @@ async def test_publish_task_sets_sequence_number(app, mockservicebus):
 
 async def test_publish_task_error_handling(app, mockservicebus):
     """Test that publish_task raises an error when publishing fails."""
+
     async def somefunc(state):
         return state["somekey"]
 
@@ -530,9 +538,7 @@ async def test_signal_handler_abandons_message(app, mockservicebus, evaluator):
     receiver.abandon_message.assert_awaited_with(dummy_msg)
 
 
-async def test_signal_handler_abandons_message_with_error(
-    app, mockservicebus, evaluator
-):
+async def test_signal_handler_abandons_message_with_error(app, mockservicebus, evaluator):
     """Test that signal_handler handles errors when abandoning a message."""
     dummy_msg = MagicMock()
     dummy_msg.sequence_number = 123
@@ -642,9 +648,7 @@ async def test_handler_garbage_message(app, mockservicebus):
         data=[b"{{\\]]))"],  # Invalid JSON
         message_annotations={SEQUENCENUBMERNAME: message_num},
     )
-    msg = ServiceBusReceivedMessage(
-        amqp_received_message, receiver=None, frame=my_frame
-    )
+    msg = ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
     with patch("boilermaker.app.evaluator_factory") as mock_eval:
         # *EVALUATE*: We can handle the failure task now
         result = await app.message_handler(msg, mockservicebus._receiver)

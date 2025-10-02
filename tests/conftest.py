@@ -13,6 +13,7 @@ pytest_plugins = [
     "aio_azure_clients_toolbox.testing_utils.fixtures",
 ]
 
+
 @pytest.fixture()
 @mock.patch.object(config, "DefaultAzureCredential", return_value=mock.AsyncMock(DefaultAzureCredential))
 def settings(mock_az_cred):
@@ -33,9 +34,7 @@ def make_message():
             data=[task.model_dump_json().encode("utf-8")],
             message_annotations={SEQUENCENUBMERNAME: sequence_number},
         )
-        return ServiceBusReceivedMessage(
-            amqp_received_message, receiver=None, frame=my_frame
-        )
+        return ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
 
     return inner
 

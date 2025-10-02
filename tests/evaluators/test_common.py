@@ -36,9 +36,7 @@ def make_message(task, sequence_number: int = 123):
         data=[task.model_dump_json().encode("utf-8")],
         message_annotations={SEQUENCENUBMERNAME: sequence_number},
     )
-    return ServiceBusReceivedMessage(
-        amqp_received_message, receiver=None, frame=my_frame
-    )
+    return ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
 
 
 def make_garbage_message(sequence_number: int = 456):
@@ -48,9 +46,7 @@ def make_garbage_message(sequence_number: int = 456):
         data=[b"{{\\])))"],  # Invalid JSON
         message_annotations={SEQUENCENUBMERNAME: sequence_number},
     )
-    return ServiceBusReceivedMessage(
-        amqp_received_message, receiver=None, frame=my_frame
-    )
+    return ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
 
 
 @pytest.fixture
@@ -160,9 +156,7 @@ async def test_message_handler_complete_message_with_error_integration(
     mockservicebus._receiver.complete_message.assert_called_once_with(dummy_task.msg)
 
 
-async def test_message_handler_renew_message_lock_integration(
-    mockservicebus, dummy_task
-):
+async def test_message_handler_renew_message_lock_integration(mockservicebus, dummy_task):
     """Test that MessageHandler renew_message_lock works through NoStorageEvaluator interface."""
 
     mock_task_publisher = AsyncMock()
@@ -221,9 +215,7 @@ async def test_message_handler_renew_message_lock_errors_integration(
     mockservicebus._receiver.renew_message_lock.assert_called_once_with(dummy_task.msg)
 
 
-async def test_message_handler_renew_message_lock_missing_integration(
-    mockservicebus, dummy_task
-):
+async def test_message_handler_renew_message_lock_missing_integration(mockservicebus, dummy_task):
     """
     Test that MessageHandler renew_message_lock handles
     missing receiver/message through NoStorageEvaluator.
@@ -274,9 +266,7 @@ async def test_abandon_message_success(mockservicebus, dummy_msg):
         (ValueError("other"), None),
     ],
 )
-async def test_abandon_message_with_error(
-    side_effect, wrapped_exc, mockservicebus, dummy_msg
-):
+async def test_abandon_message_with_error(side_effect, wrapped_exc, mockservicebus, dummy_msg):
     """Test that abandon_message handles errors gracefully."""
     mockservicebus._receiver.abandon_message.side_effect = side_effect
 
@@ -313,9 +303,7 @@ async def test_complete_message_success(mockservicebus, dummy_msg):
         (ValueError("other"), None),
     ],
 )
-async def test_complete_message_with_error(
-    side_effect, wrapped_exc, mockservicebus, dummy_msg
-):
+async def test_complete_message_with_error(side_effect, wrapped_exc, mockservicebus, dummy_msg):
     """Test that complete_message handles errors gracefully."""
     mockservicebus._receiver.complete_message.side_effect = side_effect
 
@@ -334,9 +322,7 @@ async def test_renew_message_lock_success(mockservicebus, dummy_msg):
     expected_time = Mock()  # Mock datetime
     mockservicebus._receiver.renew_message_lock.return_value = expected_time
 
-    result = await MessageActions.renew_message_lock(
-        dummy_msg, mockservicebus._receiver
-    )
+    result = await MessageActions.renew_message_lock(dummy_msg, mockservicebus._receiver)
 
     mockservicebus._receiver.renew_message_lock.assert_called_once_with(dummy_msg)
     assert result is expected_time
@@ -350,9 +336,7 @@ async def test_renew_message_lock_success(mockservicebus, dummy_msg):
         (ValueError("other"), None),
     ],
 )
-async def test_renew_message_lock_with_error(
-    side_effect, wrapped_exc, mockservicebus, dummy_msg
-):
+async def test_renew_message_lock_with_error(side_effect, wrapped_exc, mockservicebus, dummy_msg):
     """Test that renew_message_lock handles errors gracefully."""
 
     mockservicebus._receiver.renew_message_lock.side_effect = side_effect
@@ -395,13 +379,9 @@ async def test_dead_letter_message_success(mockservicebus, dummy_msg):
     )
 
 
-async def test_dead_letter_message_success_default_description(
-    mockservicebus, dummy_msg
-):
+async def test_dead_letter_message_success_default_description(mockservicebus, dummy_msg):
     """Test that dead_letter_message uses default error description when not provided."""
-    await MessageActions.dead_letter_message(
-        dummy_msg, mockservicebus._receiver, "TestReason"
-    )
+    await MessageActions.dead_letter_message(dummy_msg, mockservicebus._receiver, "TestReason")
 
     mockservicebus._receiver.dead_letter_message.assert_called_once_with(
         dummy_msg,
@@ -420,22 +400,16 @@ async def test_dead_letter_message_success_default_description(
         (ValueError("other"), None),
     ],
 )
-async def test_dead_letter_message_with_error(
-    side_effect, wrapped_exc, mockservicebus, dummy_msg
-):
+async def test_dead_letter_message_with_error(side_effect, wrapped_exc, mockservicebus, dummy_msg):
     """Test that dead_letter_message handles errors gracefully."""
     mockservicebus._receiver.dead_letter_message.side_effect = side_effect
 
     if wrapped_exc is not None:
         with pytest.raises(wrapped_exc):
-            await MessageActions.dead_letter_message(
-                dummy_msg, mockservicebus._receiver, "TestReason"
-            )
+            await MessageActions.dead_letter_message(dummy_msg, mockservicebus._receiver, "TestReason")
     else:
         with pytest.raises(side_effect.__class__):
-            await MessageActions.dead_letter_message(
-                dummy_msg, mockservicebus._receiver, "TestReason"
-            )
+            await MessageActions.dead_letter_message(dummy_msg, mockservicebus._receiver, "TestReason")
 
     mockservicebus._receiver.dead_letter_message.assert_called_once_with(
         dummy_msg,
@@ -467,9 +441,7 @@ async def test_deadletter_or_complete_task_complete(mockservicebus, dummy_task):
     """Test deadletter_or_complete_task when task should_dead_letter is False."""
     dummy_task.should_dead_letter = False
 
-    await MessageActions.deadletter_or_complete_task(
-        dummy_task, mockservicebus._receiver, "TestReason"
-    )
+    await MessageActions.deadletter_or_complete_task(dummy_task, mockservicebus._receiver, "TestReason")
 
     mockservicebus._receiver.dead_letter_message.assert_not_called()
     mockservicebus._receiver.complete_message.assert_called_once_with(dummy_task.msg)
@@ -520,9 +492,7 @@ async def test_message_handler_call(message_handler):
     assert result == "message_handler_result"
 
 
-async def test_message_handler_call_with_pre_process_exception(
-    message_handler, mockservicebus
-):
+async def test_message_handler_call_with_pre_process_exception(message_handler, mockservicebus):
     """Test MessageHandler __call__ method handles Exception in pre_process."""
     # Mock pre_process to raise a general exception
     message_handler.pre_process = AsyncMock(side_effect=RuntimeError("Test exception"))
@@ -579,14 +549,10 @@ async def test_message_handler_publish_task(message_handler):
     result = await message_handler.publish_task(new_task, delay=10, publish_attempts=2)
 
     assert result is new_task
-    message_handler.task_publisher.assert_called_once_with(
-        new_task, delay=10, publish_attempts=2
-    )
+    message_handler.task_publisher.assert_called_once_with(new_task, delay=10, publish_attempts=2)
 
 
-async def test_message_handler_abandon_current_message(
-    message_handler, mockservicebus, dummy_msg
-):
+async def test_message_handler_abandon_current_message(message_handler, mockservicebus, dummy_msg):
     """Test MessageHandler abandon_current_message delegates to MessageActions."""
     message_handler.task.msg = dummy_msg
 
@@ -595,9 +561,7 @@ async def test_message_handler_abandon_current_message(
     mockservicebus._receiver.abandon_message.assert_called_once_with(dummy_msg)
 
 
-async def test_message_handler_complete_message(
-    message_handler, mockservicebus, dummy_msg
-):
+async def test_message_handler_complete_message(message_handler, mockservicebus, dummy_msg):
     """Test MessageHandler complete_message delegates to MessageActions."""
     message_handler.task.msg = dummy_msg
 
@@ -606,9 +570,7 @@ async def test_message_handler_complete_message(
     mockservicebus._receiver.complete_message.assert_called_once_with(dummy_msg)
 
 
-async def test_message_handler_renew_message_lock(
-    message_handler, mockservicebus, dummy_msg
-):
+async def test_message_handler_renew_message_lock(message_handler, mockservicebus, dummy_msg):
     """Test MessageHandler renew_message_lock delegates to MessageActions."""
     message_handler.task.msg = dummy_msg
     expected_time = Mock()
@@ -620,9 +582,7 @@ async def test_message_handler_renew_message_lock(
     assert result is expected_time
 
 
-async def test_message_handler_deadletter_or_complete_task(
-    message_handler, mockservicebus, dummy_msg
-):
+async def test_message_handler_deadletter_or_complete_task(message_handler, mockservicebus, dummy_msg):
     """Test MessageHandler deadletter_or_complete_task delegates to MessageActions."""
     message_handler.task.msg = dummy_msg
     message_handler.task.should_dead_letter = True
@@ -634,9 +594,7 @@ async def test_message_handler_deadletter_or_complete_task(
     )
 
 
-async def test_message_handler_pre_process_debug_task_success(
-    message_handler, mockservicebus
-):
+async def test_message_handler_pre_process_debug_task_success(message_handler, mockservicebus):
     """Test MessageHandler pre_process handles debug task successfully."""
     from boilermaker import sample
 
@@ -660,17 +618,13 @@ async def test_message_handler_pre_process_debug_task_success(
 
         # Should have called debug_task and complete_message
         sample.debug_task.assert_called_once_with(message_handler.state)
-        mockservicebus._receiver.complete_message.assert_called_once_with(
-            message_handler.task.msg
-        )
+        mockservicebus._receiver.complete_message.assert_called_once_with(message_handler.task.msg)
     finally:
         # Restore original function
         sample.debug_task = original_debug_task
 
 
-async def test_message_handler_pre_process_debug_task_lease_lost(
-    message_handler, mockservicebus
-):
+async def test_message_handler_pre_process_debug_task_lease_lost(message_handler, mockservicebus):
     """Test MessageHandler pre_process handles debug task with message lease lost."""
     from boilermaker import exc, sample
 
@@ -682,9 +636,7 @@ async def test_message_handler_pre_process_debug_task_lease_lost(
     sample.debug_task = AsyncMock()
 
     # Mock complete_message to raise lease lost error
-    mockservicebus._receiver.complete_message.side_effect = (
-        exc.BoilermakerTaskLeaseLost("lease lost")
-    )
+    mockservicebus._receiver.complete_message.side_effect = exc.BoilermakerTaskLeaseLost("lease lost")
 
     try:
         result = await message_handler.pre_process()
@@ -700,17 +652,13 @@ async def test_message_handler_pre_process_debug_task_lease_lost(
 
         # Should have called debug_task and complete_message
         sample.debug_task.assert_called_once_with(message_handler.state)
-        mockservicebus._receiver.complete_message.assert_called_once_with(
-            message_handler.task.msg
-        )
+        mockservicebus._receiver.complete_message.assert_called_once_with(message_handler.task.msg)
     finally:
         # Restore original function
         sample.debug_task = original_debug_task
 
 
-async def test_message_handler_pre_process_debug_task_service_bus_error(
-    message_handler, mockservicebus
-):
+async def test_message_handler_pre_process_debug_task_service_bus_error(message_handler, mockservicebus):
     """Test MessageHandler pre_process handles debug task with service bus error."""
     from boilermaker import exc, sample
 
@@ -722,8 +670,8 @@ async def test_message_handler_pre_process_debug_task_service_bus_error(
     sample.debug_task = AsyncMock()
 
     # Mock complete_message to raise service bus error
-    mockservicebus._receiver.complete_message.side_effect = (
-        exc.BoilermakerServiceBusError("service bus error")
+    mockservicebus._receiver.complete_message.side_effect = exc.BoilermakerServiceBusError(
+        "service bus error"
     )
 
     try:
@@ -740,9 +688,7 @@ async def test_message_handler_pre_process_debug_task_service_bus_error(
 
         # Should have called debug_task and complete_message
         sample.debug_task.assert_called_once_with(message_handler.state)
-        mockservicebus._receiver.complete_message.assert_called_once_with(
-            message_handler.task.msg
-        )
+        mockservicebus._receiver.complete_message.assert_called_once_with(message_handler.task.msg)
     finally:
         # Restore original function
         sample.debug_task = original_debug_task

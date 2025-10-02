@@ -33,6 +33,7 @@ class Config(BaseSettings):
         ...     azure_credential_include_msi=True
         ... )
     """
+
     azure_credential_include_msi: bool = False
     # Service Bus ENV vars
     service_bus_namespace_url: str

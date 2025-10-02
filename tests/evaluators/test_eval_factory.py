@@ -22,9 +22,7 @@ def make_message(task, sequence_number: int = 123):
         data=[task.model_dump_json().encode("utf-8")],
         message_annotations={SEQUENCENUBMERNAME: sequence_number},
     )
-    return ServiceBusReceivedMessage(
-        amqp_received_message, receiver=None, frame=my_frame
-    )
+    return ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
 
 
 class State:
@@ -34,10 +32,12 @@ class State:
     def __getitem__(self, key):
         return self.inner[key]
 
+
 @pytest.fixture
 def app(sbus):
     async def somefunc(state, x):
         return x * 2
+
     app = Boilermaker(State({}), sbus)
     app.register_async(somefunc)
     return app
@@ -58,8 +58,12 @@ def app(sbus):
 @pytest.mark.parametrize("has_storage", [True, False])
 def test_evaluator_factory(task, has_storage, app, mockservicebus):
     evaluator = evaluator_factory(
-        mockservicebus._receiver, task, app.publish_task,
-        app.function_registry, state={}, storage_interface=AsyncMock() if has_storage else None
+        mockservicebus._receiver,
+        task,
+        app.publish_task,
+        app.function_registry,
+        state={},
+        storage_interface=AsyncMock() if has_storage else None,
     )
     if task.graph_id:
         if has_storage:
@@ -70,4 +74,3 @@ def test_evaluator_factory(task, has_storage, app, mockservicebus):
         assert isinstance(evaluator, ResultsStorageTaskEvaluator)
     else:
         assert isinstance(evaluator, NoStorageEvaluator)
-

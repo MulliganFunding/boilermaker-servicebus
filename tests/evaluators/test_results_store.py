@@ -50,9 +50,7 @@ async def test_constructor_requires_storage_interface(app, mockservicebus):
             state=app.state,
             storage_interface=None,
         )
-    assert "Storage interface is required for ResultsStorageTaskEvaluator" in str(
-        exc.value
-    )
+    assert "Storage interface is required for ResultsStorageTaskEvaluator" in str(exc.value)
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -74,9 +72,7 @@ async def test_message_handler_missing_function(evaluator, mock_storage):
     mock_storage.store_task_result.assert_not_called()
 
 
-async def test_message_handler_stores_function_exception(
-    evaluator, mock_storage, app, make_message
-):
+async def test_message_handler_stores_function_exception(evaluator, mock_storage, app, make_message):
     """Test that message_handler handles function exceptions properly."""
 
     async def failing_func(state):
@@ -129,9 +125,7 @@ async def test_message_handler_success(evaluator, mock_storage):
     assert result.status == TaskStatus.Success
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(
-        mock_storage, evaluator.task
-    )
+    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.result == 42
     assert stored_result.status == TaskStatus.Success
     assert stored_result.errors is None
@@ -185,9 +179,7 @@ async def test_task_success_with_storage(
     assert complete_msg_call[1][0].sequence_number == message_num
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(
-        mock_storage, evaluator.task
-    )
+    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.status == TaskStatus.Success
     assert stored_result.result == "OK"
     assert stored_result.errors is None
@@ -260,9 +252,7 @@ async def test_task_failure_with_storage(
     assert complete_msg_call[1][0].sequence_number == message_num
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(
-        mock_storage, evaluator.task
-    )
+    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.status == TaskStatus.Failure
     assert stored_result.result is None
 
@@ -326,9 +316,7 @@ async def test_task_retries_with_storage(
 
     result = await evaluator.message_handler()
     assert isinstance(result, TaskResult)
-    assert (
-        result.status == TaskStatus.Retry if can_retry else TaskStatus.RetriesExhausted
-    )
+    assert result.status == TaskStatus.Retry if can_retry else TaskStatus.RetriesExhausted
     assert result.result is None
 
     # Task should be settled
@@ -337,9 +325,7 @@ async def test_task_retries_with_storage(
     assert complete_msg_call[1][0].sequence_number == message_num
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(
-        mock_storage, evaluator.task
-    )
+    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
 
     if not can_retry:
         # Retries exhausted - should store failure result
@@ -365,9 +351,7 @@ async def test_task_retries_with_storage(
         assert published_task.function_name == "retrytask"
 
 
-async def test_retries_exhausted_with_storage(
-    app, mockservicebus, mock_storage, make_message
-):
+async def test_retries_exhausted_with_storage(app, mockservicebus, mock_storage, make_message):
     """Test that retries exhausted scenario stores failure result."""
 
     async def oktask(state):
@@ -396,9 +380,7 @@ async def test_retries_exhausted_with_storage(
     assert result.result is None
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(
-        mock_storage, evaluator.task
-    )
+    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.status == TaskStatus.RetriesExhausted
 
     # Task should be deadlettered
@@ -407,15 +389,11 @@ async def test_retries_exhausted_with_storage(
     assert complete_msg_call[0] == "dead_letter_message"
 
 
-async def test_retry_policy_update_with_storage(
-    app, mockservicebus, mock_storage, make_message
-):
+async def test_retry_policy_update_with_storage(app, mockservicebus, mock_storage, make_message):
     """Test that retry policy can be updated during retry exception handling."""
 
     async def retrytask(state):
-        new_policy = retries.RetryPolicy(
-            max_tries=10, retry_mode=retries.RetryMode.Exponential
-        )
+        new_policy = retries.RetryPolicy(max_tries=10, retry_mode=retries.RetryMode.Exponential)
         raise retries.RetryException("Retry with new policy", policy=new_policy)
 
     app.register_async(retrytask, policy=retries.RetryPolicy.default())
@@ -449,9 +427,7 @@ async def test_retry_policy_update_with_storage(
 
     # Should still store result
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(
-        mock_storage, evaluator.task
-    )
+    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.status == TaskStatus.Retry
 
 
@@ -488,7 +464,293 @@ async def test_early_acks_with_storage(app, mockservicebus, mock_storage, make_m
     assert complete_msg_call[0] == "complete_message"
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(
-        mock_storage, evaluator.task
-    )
+    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.status == TaskStatus.Success
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# Exception Handling Coverage Tests
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+async def test_early_ack_lease_lost_exception(app, mockservicebus, mock_storage, make_message):
+    """Test exception handling when early ack fails with lease lost."""
+    from boilermaker import exc
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = False  # Early ack
+
+    evaluator = ResultsStorageTaskEvaluator(
+        mockservicebus._receiver,
+        task,
+        app.publish_task,
+        app.function_registry,
+        state=app.state,
+        storage_interface=mock_storage,
+    )
+
+    message_num = random.randint(100, 1000)
+    task.msg = make_message(task, sequence_number=message_num)
+
+    # Mock complete_message to raise lease lost error
+    mockservicebus._receiver.complete_message.side_effect = exc.BoilermakerTaskLeaseLost("lease lost")
+
+    result = await evaluator.message_handler()
+
+    # Should return None when lease is lost during early ack
+    assert result is None
+
+    # Should still store the started result
+    assert mock_storage.store_task_result.call_count == 1
+    start_call = mock_storage.store_task_result.call_args_list[0]
+    start_result = start_call[0][0]
+    assert start_result.status == TaskStatus.Started
+
+
+async def test_early_ack_service_bus_error_exception(app, mockservicebus, mock_storage, make_message):
+    """Test exception handling when early ack fails with service bus error."""
+    from boilermaker import exc
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = False  # Early ack
+
+    evaluator = ResultsStorageTaskEvaluator(
+        mockservicebus._receiver,
+        task,
+        app.publish_task,
+        app.function_registry,
+        state=app.state,
+        storage_interface=mock_storage,
+    )
+
+    message_num = random.randint(100, 1000)
+    task.msg = make_message(task, sequence_number=message_num)
+
+    # Mock complete_message to raise service bus error
+    mockservicebus._receiver.complete_message.side_effect = exc.BoilermakerServiceBusError(
+        "service bus error"
+    )
+
+    result = await evaluator.message_handler()
+
+    # Should return None when service bus error occurs during early ack
+    assert result is None
+
+    # Should still store the started result
+    assert mock_storage.store_task_result.call_count == 1
+    start_call = mock_storage.store_task_result.call_args_list[0]
+    start_result = start_call[0][0]
+    assert start_result.status == TaskStatus.Started
+
+
+async def test_retries_exhausted_settle_lease_lost_exception(app, mockservicebus, mock_storage, make_message):
+    """Test exception handling when settling message fails during retries exhausted."""
+    from unittest.mock import AsyncMock
+
+    from boilermaker import exc
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    # Set attempts to exceed max tries
+    task.attempts.attempts = task.policy.max_tries + 1
+    task.acks_late = True  # Late ack so message isn't settled early
+
+    evaluator = ResultsStorageTaskEvaluator(
+        mockservicebus._receiver,
+        task,
+        app.publish_task,
+        app.function_registry,
+        state=app.state,
+        storage_interface=mock_storage,
+    )
+
+    message_num = random.randint(100, 1000)
+    task.msg = make_message(task, sequence_number=message_num)
+
+    # Mock deadletter_or_complete_task to raise lease lost error
+    evaluator.deadletter_or_complete_task = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("lease lost"))
+
+    result = await evaluator.message_handler()
+
+    # Should return None when lease is lost during retries exhausted settlement
+    assert result is None
+
+    # Should store started result
+    assert mock_storage.store_task_result.call_count == 1
+    start_call = mock_storage.store_task_result.call_args_list[0]
+    start_result = start_call[0][0]
+    assert start_result.status == TaskStatus.Started
+
+
+async def test_retries_exhausted_settle_service_bus_error_exception(
+    app, mockservicebus, mock_storage, make_message
+):
+    """Test exception handling when settling message fails during retries exhausted with service bus error."""
+    from unittest.mock import AsyncMock
+
+    from boilermaker import exc
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    # Set attempts to exceed max tries
+    task.attempts.attempts = task.policy.max_tries + 1
+    task.acks_late = True  # Late ack so message isn't settled early
+
+    evaluator = ResultsStorageTaskEvaluator(
+        mockservicebus._receiver,
+        task,
+        app.publish_task,
+        app.function_registry,
+        state=app.state,
+        storage_interface=mock_storage,
+    )
+
+    message_num = random.randint(100, 1000)
+    task.msg = make_message(task, sequence_number=message_num)
+
+    # Mock deadletter_or_complete_task to raise service bus error
+    evaluator.deadletter_or_complete_task = AsyncMock(
+        side_effect=exc.BoilermakerServiceBusError("service bus error")
+    )
+
+    result = await evaluator.message_handler()
+
+    # Should return None when service bus error occurs during retries exhausted settlement
+    assert result is None
+
+    # Should store started result
+    assert mock_storage.store_task_result.call_count == 1
+    start_call = mock_storage.store_task_result.call_args_list[0]
+    start_result = start_call[0][0]
+    assert start_result.status == TaskStatus.Started
+
+
+async def test_final_settle_lease_lost_exception(app, mockservicebus, mock_storage, make_message):
+    """Test exception handling when final message settlement fails with lease lost."""
+    from boilermaker import exc
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = True  # Late ack so message settlement happens at the end
+
+    evaluator = ResultsStorageTaskEvaluator(
+        mockservicebus._receiver,
+        task,
+        app.publish_task,
+        app.function_registry,
+        state=app.state,
+        storage_interface=mock_storage,
+    )
+
+    message_num = random.randint(100, 1000)
+    task.msg = make_message(task, sequence_number=message_num)
+
+    # Mock complete_message to raise lease lost error at the end
+    mockservicebus._receiver.complete_message.side_effect = exc.BoilermakerTaskLeaseLost("lease lost")
+
+    result = await evaluator.message_handler()
+
+    # Should return the result even when final settlement fails
+    assert result is not None
+    assert result.status == TaskStatus.Success
+    assert result.result == "OK"
+
+    # Should store both started and success results
+    assert mock_storage.store_task_result.call_count == 2
+
+
+async def test_final_settle_service_bus_error_exception(app, mockservicebus, mock_storage, make_message):
+    """Test exception handling when final message settlement fails with service bus error."""
+    from boilermaker import exc
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = True  # Late ack so message settlement happens at the end
+
+    evaluator = ResultsStorageTaskEvaluator(
+        mockservicebus._receiver,
+        task,
+        app.publish_task,
+        app.function_registry,
+        state=app.state,
+        storage_interface=mock_storage,
+    )
+
+    message_num = random.randint(100, 1000)
+    task.msg = make_message(task, sequence_number=message_num)
+
+    # Mock complete_message to raise service bus error at the end
+    mockservicebus._receiver.complete_message.side_effect = exc.BoilermakerServiceBusError(
+        "service bus error"
+    )
+
+    result = await evaluator.message_handler()
+
+    # Should return the result even when final settlement fails
+    assert result is not None
+    assert result.status == TaskStatus.Success
+    assert result.result == "OK"
+
+    # Should store both started and success results
+    assert mock_storage.store_task_result.call_count == 2
+
+
+async def test_final_settle_failure_deadletter_lease_lost_exception(
+    app, mockservicebus, mock_storage, make_message
+):
+    """Test exception handling when final deadletter settlement fails with lease lost."""
+    from unittest.mock import AsyncMock
+
+    from boilermaker import exc, failure
+
+    async def failtask(state):
+        return failure.TaskFailureResult
+
+    app.register_async(failtask, policy=retries.RetryPolicy.default())
+    task = app.create_task(failtask)
+    task.acks_late = True  # Late ack so message settlement happens at the end
+
+    evaluator = ResultsStorageTaskEvaluator(
+        mockservicebus._receiver,
+        task,
+        app.publish_task,
+        app.function_registry,
+        state=app.state,
+        storage_interface=mock_storage,
+    )
+
+    message_num = random.randint(100, 1000)
+    task.msg = make_message(task, sequence_number=message_num)
+
+    # Mock deadletter_or_complete_task to raise lease lost error at the end
+    evaluator.deadletter_or_complete_task = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("lease lost"))
+
+    result = await evaluator.message_handler()
+
+    # Should return the result even when final settlement fails
+    assert result is not None
+    assert result.status == TaskStatus.Failure
+    assert result.result is None
+
+    # Should store both started and failure results
+    assert mock_storage.store_task_result.call_count == 2

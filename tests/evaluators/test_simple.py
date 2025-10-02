@@ -1,10 +1,11 @@
 import random
+from unittest.mock import AsyncMock
 
 import pytest
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus._common.constants import SEQUENCENUBMERNAME
 from azure.servicebus._pyamqp.message import Message
-from boilermaker import failure, retries
+from boilermaker import exc, failure, retries
 from boilermaker.app import Boilermaker
 from boilermaker.evaluators import NoStorageEvaluator
 from boilermaker.task import Task, TaskResult, TaskStatus
@@ -29,9 +30,7 @@ def make_message(task, sequence_number: int = 123):
         data=[task.model_dump_json().encode("utf-8")],
         message_annotations={SEQUENCENUBMERNAME: sequence_number},
     )
-    return ServiceBusReceivedMessage(
-        amqp_received_message, receiver=None, frame=my_frame
-    )
+    return ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
 
 
 @pytest.fixture
@@ -154,9 +153,7 @@ async def test_task_success(has_on_success, acks_late, app, mockservicebus, eval
 @pytest.mark.parametrize("acks_late", [True, False])
 @pytest.mark.parametrize("should_deadletter", [True, False])
 @pytest.mark.parametrize("has_on_failure", [True, False])
-async def test_task_failure(
-    has_on_failure, should_deadletter, acks_late, app, mockservicebus, evaluator
-):
+async def test_task_failure(has_on_failure, should_deadletter, acks_late, app, mockservicebus, evaluator):
     """Test task failure handling, deadlettering, and on_failure callback."""
 
     async def failtask(state, **kwargs):
@@ -310,9 +307,7 @@ async def test_task_retries_with_new_policy(app, mockservicebus, evaluator):
 
     async def retrytask(state):
         # NEW POLICY!
-        raise retries.RetryExceptionDefaultExponential(
-            "Retry me", delay=800, max_delay=2000, max_tries=99
-        )
+        raise retries.RetryExceptionDefaultExponential("Retry me", delay=800, max_delay=2000, max_tries=99)
 
     # Function must be registered first
     app.register_async(retrytask, policy=retries.RetryPolicy.default())
@@ -472,3 +467,200 @@ async def test_task_handle_exception(
         assert published_task.function_name == "onfail"
         assert published_task.on_success is None
         assert published_task.on_failure is None
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# Exception handling tests for uncovered lines
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_early_ack_task_lease_lost_exception(app, mockservicebus, evaluator):
+    """Test BoilermakerTaskLeaseLost exception during early message acknowledgment."""
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = False  # Enable early acks
+    task.msg = make_message(task)
+    evaluator.task = task
+
+    # Mock complete_message to raise BoilermakerTaskLeaseLost
+    evaluator.complete_message = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("Lease lost"))
+
+    result = await evaluator.message_handler()
+
+    # Should return None when lease is lost during early ack
+    assert result is None
+    evaluator.complete_message.assert_called_once()
+
+
+async def test_early_ack_service_bus_error_exception(app, mockservicebus, evaluator):
+    """Test BoilermakerServiceBusError exception during early message acknowledgment."""
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = False  # Enable early acks
+    task.msg = make_message(task)
+    evaluator.task = task
+
+    # Mock complete_message to raise BoilermakerServiceBusError
+    evaluator.complete_message = AsyncMock(side_effect=exc.BoilermakerServiceBusError("Service bus error"))
+
+    result = await evaluator.message_handler()
+
+    # Should return None when service bus error occurs during early ack
+    assert result is None
+    evaluator.complete_message.assert_called_once()
+
+
+async def test_retries_exhausted_task_lease_lost_exception(app, mockservicebus, evaluator):
+    """Test BoilermakerTaskLeaseLost exception when settling message for exhausted retries."""
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = True  # Don't settle early
+    # Make retries exhausted
+    task.attempts.attempts = task.policy.max_tries + 1
+    task.msg = make_message(task)
+    evaluator.task = task
+
+    # Mock deadletter_or_complete_task to raise BoilermakerTaskLeaseLost
+    evaluator.deadletter_or_complete_task = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("Lease lost"))
+
+    result = await evaluator.message_handler()
+
+    # Should return None when lease is lost during exhausted retries settlement
+    assert result is None
+    evaluator.deadletter_or_complete_task.assert_called_once_with(
+        "ProcessingError", detail="Retries exhausted"
+    )
+
+
+async def test_retries_exhausted_service_bus_error_exception(app, mockservicebus, evaluator):
+    """Test BoilermakerServiceBusError exception when settling message for exhausted retries."""
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = True  # Don't settle early
+    # Make retries exhausted
+    task.attempts.attempts = task.policy.max_tries + 1
+    task.msg = make_message(task)
+    evaluator.task = task
+
+    # Mock deadletter_or_complete_task to raise BoilermakerServiceBusError
+    evaluator.deadletter_or_complete_task = AsyncMock(
+        side_effect=exc.BoilermakerServiceBusError("Service bus error")
+    )
+
+    result = await evaluator.message_handler()
+
+    # Should return None when service bus error occurs during exhausted retries settlement
+    assert result is None
+    evaluator.deadletter_or_complete_task.assert_called_once_with(
+        "ProcessingError", detail="Retries exhausted"
+    )
+
+
+async def test_late_settlement_task_lease_lost_exception_success(app, mockservicebus, evaluator):
+    """Test BoilermakerTaskLeaseLost exception during late message settlement for successful task."""
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = True  # Enable late settlement
+    task.msg = make_message(task)
+    evaluator.task = task
+
+    # Mock complete_message to raise BoilermakerTaskLeaseLost
+    evaluator.complete_message = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("Lease lost"))
+
+    result = await evaluator.message_handler()
+
+    # Should return the task result even when lease is lost during late settlement
+    assert result is not None
+    assert result.status == TaskStatus.Success
+    assert result.result == "OK"
+    evaluator.complete_message.assert_called_once()
+
+
+async def test_late_settlement_task_lease_lost_exception_failure(app, mockservicebus, evaluator):
+    """Test BoilermakerTaskLeaseLost exception during late message settlement for failed task."""
+
+    async def failtask(state):
+        return failure.TaskFailureResult
+
+    app.register_async(failtask, policy=retries.RetryPolicy.default())
+    task = app.create_task(failtask)
+    task.acks_late = True  # Enable late settlement
+    task.msg = make_message(task)
+    evaluator.task = task
+
+    # Mock deadletter_or_complete_task to raise BoilermakerTaskLeaseLost
+    evaluator.deadletter_or_complete_task = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("Lease lost"))
+
+    result = await evaluator.message_handler()
+
+    # Should return the task result even when lease is lost during late settlement
+    assert result is not None
+    assert result.status == TaskStatus.Failure
+    evaluator.deadletter_or_complete_task.assert_called_once_with("TaskFailed")
+
+
+async def test_late_settlement_service_bus_error_exception_success(app, mockservicebus, evaluator):
+    """Test BoilermakerServiceBusError exception during late message settlement for successful task."""
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = True  # Enable late settlement
+    task.msg = make_message(task)
+    evaluator.task = task
+
+    # Mock complete_message to raise BoilermakerServiceBusError
+    evaluator.complete_message = AsyncMock(side_effect=exc.BoilermakerServiceBusError("Service bus error"))
+
+    result = await evaluator.message_handler()
+
+    # Should return the task result even when service bus error occurs during late settlement
+    assert result is not None
+    assert result.status == TaskStatus.Success
+    assert result.result == "OK"
+    evaluator.complete_message.assert_called_once()
+
+
+async def test_late_settlement_service_bus_error_exception_failure(app, mockservicebus, evaluator):
+    """Test BoilermakerServiceBusError exception during late message settlement for failed task."""
+
+    async def failtask(state):
+        return failure.TaskFailureResult
+
+    app.register_async(failtask, policy=retries.RetryPolicy.default())
+    task = app.create_task(failtask)
+    task.acks_late = True  # Enable late settlement
+    task.msg = make_message(task)
+    evaluator.task = task
+
+    # Mock deadletter_or_complete_task to raise BoilermakerServiceBusError
+    evaluator.deadletter_or_complete_task = AsyncMock(
+        side_effect=exc.BoilermakerServiceBusError("Service bus error")
+    )
+
+    result = await evaluator.message_handler()
+
+    # Should return the task result even when service bus error occurs during late settlement
+    assert result is not None
+    assert result.status == TaskStatus.Failure
+    evaluator.deadletter_or_complete_task.assert_called_once_with("TaskFailed")

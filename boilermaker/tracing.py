@@ -1,13 +1,14 @@
-""" tracing.py
-    Provides opentelemetry tracing functionality such as context propagation
+"""tracing.py
+Provides opentelemetry tracing functionality such as context propagation
 
-    ServiceBusReceivedMessage will have an `application_properties attribute like this:
-    (Pdb) msg.application_properties
-    {b'Diagnostic-Id': b'00-c2d9e6c2aef4196e5ec11fa3fb432873-0d65dd60358dfb94-01',
-    b'traceparent': b'00-c2d9e6c2aef4196e5ec11fa3fb432873-0d65dd60358dfb94-01'}
+ServiceBusReceivedMessage will have an `application_properties attribute like this:
+(Pdb) msg.application_properties
+{b'Diagnostic-Id': b'00-c2d9e6c2aef4196e5ec11fa3fb432873-0d65dd60358dfb94-01',
+b'traceparent': b'00-c2d9e6c2aef4196e5ec11fa3fb432873-0d65dd60358dfb94-01'}
 
-    We need to pull out one of these and cast to a string to propagate context.
+We need to pull out one of these and cast to a string to propagate context.
 """
+
 from contextlib import asynccontextmanager
 
 from azure.servicebus import ServiceBusReceivedMessage

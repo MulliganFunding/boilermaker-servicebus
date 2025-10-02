@@ -178,9 +178,7 @@ class Boilermaker:
             self.register_async(fn, **options)
         return self
 
-    def create_task(
-        self, fn: TaskHandler, *args, policy: RetryPolicy | None = None, **kwargs
-    ) -> Task:
+    def create_task(self, fn: TaskHandler, *args, policy: RetryPolicy | None = None, **kwargs) -> Task:
         """Create a Task instance without publishing it to the queue.
 
         This allows you to set up callbacks, modify task properties, or
@@ -266,9 +264,7 @@ class Boilermaker:
             >>> await app.apply_async(cleanup_temp_files, delay=300)
         """
         task = self.create_task(fn, *args, policy=policy, **kwargs)
-        return await self.publish_task(
-            task, delay=delay, publish_attempts=publish_attempts
-        )
+        return await self.publish_task(task, delay=delay, publish_attempts=publish_attempts)
 
     def chain(self, *tasks: Task, on_failure: Task | None = None) -> Task:
         """Chain multiple tasks to run sequentially on success.
@@ -380,9 +376,7 @@ class Boilermaker:
             BoilermakerAppException: If storage or task publishing fails
         """
         if not self.results_storage:
-            raise BoilermakerAppException(
-                "Results storage is required for TaskGraph workflows", []
-            )
+            raise BoilermakerAppException("Results storage is required for TaskGraph workflows", [])
 
         # Set graph_id for all tasks in the graph
         for task in graph.children.values():
@@ -396,9 +390,7 @@ class Boilermaker:
         try:
             await self.results_storage.store_graph(graph)
         except BoilermakerStorageError as exc:
-            raise BoilermakerAppException(
-                "Error storing TaskGraph to storage", [str(exc)]
-            ) from exc
+            raise BoilermakerAppException("Error storing TaskGraph to storage", [str(exc)]) from exc
 
         # Publish all ready tasks (should be root nodes with no dependencies)
         for task in graph.ready_tasks():
@@ -421,9 +413,7 @@ class Boilermaker:
                             sequence_number,
                             evaluator,
                         ) in self._message_evaluators.items():
-                            logger.info(
-                                f"Pushing message back to queue {sequence_number=}"
-                            )
+                            logger.info(f"Pushing message back to queue {sequence_number=}")
                             abandon_group.start_soon(evaluator.abandon_current_message)
                 except* Exception as excgroup:
                     for exc in excgroup.exceptions:
@@ -478,9 +468,7 @@ class Boilermaker:
                         # We catch everything here to avoid bringing down the worker
                         logger.error(f"Error in message handler: {exc}", exc_info=True)
 
-    async def message_handler(
-        self, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
-    ):
+    async def message_handler(self, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver):
         """Process a single Service Bus message containing a Task.
 
         This method is called by the worker loop for each received message.

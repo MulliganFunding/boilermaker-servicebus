@@ -39,14 +39,17 @@ class BoilermakerTaskLeaseLost(ValueError):
     This indicates that the task may be processed again, potentially leading to
     duplicate processing if the original processing eventually completes.
     """
+
     pass
 
 
 class BoilermakerServiceBusConfigurationError(Exception):
     """Custom exception for Service Bus configuration errors."""
+
     pass
 
 
 class BoilermakerServiceBusError(ServiceBusError):
     """Custom exception for Service Bus related errors."""
+
     pass

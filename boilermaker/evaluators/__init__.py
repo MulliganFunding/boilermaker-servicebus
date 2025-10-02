@@ -22,7 +22,6 @@ def evaluator_factory(
     storage_interface: StorageInterface | None = None,
     delete_successful_graphs: bool = False,
 ) -> MessageHandler:
-
     if storage_interface and task.graph_id is not None:
         return TaskGraphEvaluator(
             receiver,

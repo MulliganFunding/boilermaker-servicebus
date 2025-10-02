@@ -27,9 +27,7 @@ class ResultsStorageTaskEvaluator(MessageHandler):
         storage_interface: StorageInterface | None = None,
     ):
         if storage_interface is None:
-            raise ValueError(
-                "Storage interface is required for ResultsStorageTaskEvaluator"
-            )
+            raise ValueError("Storage interface is required for ResultsStorageTaskEvaluator")
 
         super().__init__(
             receiver,
@@ -74,9 +72,7 @@ class ResultsStorageTaskEvaluator(MessageHandler):
             logger.error(f"Retries exhausted for event {self.task.function_name}")
             if not message_settled:
                 try:
-                    await self.deadletter_or_complete_task(
-                        "ProcessingError", detail="Retries exhausted"
-                    )
+                    await self.deadletter_or_complete_task("ProcessingError", detail="Retries exhausted")
                     message_settled = True
                 except exc.BoilermakerTaskLeaseLost:
                     logger.error(

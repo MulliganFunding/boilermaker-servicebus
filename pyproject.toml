@@ -50,7 +50,7 @@ minversion = "8.3"
 pythonpath = "."
 asyncio_mode = "auto"
 xfail_strict = true
-addopts = "--cov-report=term-missing:skip-covered --cov=boilermaker --strict-config --strict-markers --cov-report html"
+addopts = "--import-mode=importlib --cov-report=term-missing:skip-covered --cov=boilermaker --strict-config --strict-markers --cov-report html"
 testpaths = ["tests"]
 filterwarnings = ["error"]
 

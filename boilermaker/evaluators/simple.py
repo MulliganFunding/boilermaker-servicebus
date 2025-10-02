@@ -21,6 +21,7 @@ class NoStorageEvaluator(MessageHandler):
 
     Use this if no storage interface is provided and no TaskGraph is involved.
     """
+
     def __init__(
         self,
         receiver: ServiceBusReceiver,
@@ -57,9 +58,7 @@ class NoStorageEvaluator(MessageHandler):
             logger.error(f"Retries exhausted for event {self.task.function_name}")
             if not message_settled:
                 try:
-                    await self.deadletter_or_complete_task(
-                        "ProcessingError", detail="Retries exhausted"
-                    )
+                    await self.deadletter_or_complete_task("ProcessingError", detail="Retries exhausted")
                     message_settled = True
                 except exc.BoilermakerTaskLeaseLost:
                     logger.error(
