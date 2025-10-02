@@ -577,7 +577,10 @@ class MockReceiver:
 
 async def test_run_calls_message_handler(app, mockservicebus):
     """Test that run calls message_handler for each received message."""
-    dummy_msgs = [MagicMock(sequence_number=321), MagicMock(sequence_number=654)]
+    dummy_msgs = [
+        MagicMock(sequence_number=321),
+        MagicMock(side_effect=ValueError("bad message!")),
+    ]
     # Make a generic receiver thing that can do a bunch of fake stuff
     receiver = MockReceiver(dummy_msgs)
     # Hack this in directly to skip the middle layer of ManagedServiceBusClient
@@ -602,6 +605,32 @@ async def test_run_calls_message_handler(app, mockservicebus):
 
     # Should never publish
     assert len(mockservicebus._sender.method_calls) == 0
+
+
+async def test_run_handles_message_handler_exceptions(app, mockservicebus):
+    """Test that run calls message_handler and doesn't let exceptions bubble up."""
+    dummy_msgs = [MagicMock(sequence_number=321), MagicMock(sequence_number=654)]
+    # Make a generic receiver thing that can do a bunch of fake stuff
+    receiver = MockReceiver(dummy_msgs)
+    # Hack this in directly to skip the middle layer of ManagedServiceBusClient
+    # make sure get_receiver returns an async context manager + receiver
+    app.service_bus_client = MagicMock(**{"get_receiver.return_value": receiver})
+
+    # Patch message_handler to track calls
+    app.message_handler = AsyncMock(side_effect=RuntimeError("Very bad exception"))
+
+    async def stop_loop():
+        await asyncio.sleep(0.05)
+        return to_thread.run_sync(os.kill, os.getpid(), signal.SIGINT)
+
+    async with create_task_group() as tg:
+        tg.start_soon(stop_loop)
+        # It called the thing and didn't bubble up the exception
+        tg.start_soon(app.run)
+        tg.cancel_scope.cancel()
+
+    # It definitely called it twice
+    assert len(app.message_handler.call_args_list) == 2
 
 
 async def test_handler_garbage_message(app, mockservicebus):
