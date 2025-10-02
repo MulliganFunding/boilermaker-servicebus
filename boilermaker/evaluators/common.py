@@ -238,40 +238,6 @@ class MessageHandler:
         self.task_publisher = task_publisher
         self.storage_interface = storage_interface
 
-    async def __call__(self) -> TaskResult | None:
-        """Call pre-processing hook and then `message_handler`."""
-
-        try:
-            result = await self.pre_process()
-            if isinstance(result, TaskResult):
-                return result
-        except exc.BoilermakerExpectionFailed:
-            await self.deadletter_or_complete_task(
-                "ExpectationFailed", detail="Pre-processing expectation failed"
-            )
-            return TaskResult(
-                task_id=self.task.task_id,
-                graph_id=self.task.graph_id,
-                result=None,
-                status=TaskStatus.Failure,
-                errors=["Pre-processing expectation failed"],
-            )
-        except Exception:
-            logger.error("Exception in pre_process", exc_info=True)
-            await self.deadletter_or_complete_task(
-                "ProcessingError", detail="Pre-processing exception"
-            )
-            return TaskResult(
-                task_id=self.task.task_id,
-                graph_id=self.task.graph_id,
-                result=None,
-                status=TaskStatus.Failure,
-                errors=["Pre-processing exception"],
-                formatted_exception=traceback.format_exc(),
-            )
-
-        return await self.message_handler()
-
     # TO BE IMPLEMENTED BY SUBCLASSES
     @abstractmethod
     async def message_handler(self) -> TaskResult:
@@ -316,6 +282,40 @@ class MessageHandler:
             self.task, self._receiver, reason, detail=detail
         )
 
+    async def __call__(self) -> TaskResult | None:
+        """Call pre-processing hook and then `message_handler`."""
+
+        try:
+            result = await self.pre_process()
+            if isinstance(result, TaskResult):
+                return result
+        except exc.BoilermakerExpectionFailed:
+            await self.deadletter_or_complete_task(
+                "ExpectationFailed", detail="Pre-processing expectation failed"
+            )
+            return TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                result=None,
+                status=TaskStatus.Failure,
+                errors=["Pre-processing expectation failed"],
+            )
+        except Exception:
+            logger.error("Exception in pre_process", exc_info=True)
+            await self.deadletter_or_complete_task(
+                "ProcessingError", detail="Pre-processing exception"
+            )
+            return TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                result=None,
+                status=TaskStatus.Failure,
+                errors=["Pre-processing exception"],
+                formatted_exception=traceback.format_exc(),
+            )
+
+        return await self.message_handler()
+
     async def pre_process(self) -> None:
         """Hook for pre-processing before task execution."""
 
@@ -326,15 +326,15 @@ class MessageHandler:
                 await self.complete_message()
                 status = TaskStatus.Success
             except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
-                logger.error(
-                    f"Lost message lease when trying to complete early for task {self.task.function_name}"
-                )
+                msg = f"Lost message lease when trying to complete early for task {self.task.function_name}"
+                logger.error(msg)
                 status = TaskStatus.Failure
             return TaskResult(
                 task_id=self.task.task_id,
                 graph_id=self.task.graph_id,
                 result=0,
                 status=status,
+                errors=[] if status == TaskStatus.Success else [msg],
             )
 
         if not self.function_registry.get(self.task.function_name):
@@ -404,19 +404,11 @@ class MessageHandler:
                 self.task.policy = retry.policy
                 logger.warning(f"Task policy updated to retry policy {retry.policy}")
 
-            delay = self.task.get_next_delay()
-            warn_msg = (
-                f"{retry.msg} "
-                f"[attempt {self.task.attempts.attempts} of {self.task.policy.max_tries}] "
-                f"Publishing retry... {self.sequence_number=} "
-                f"<function={self.task.function_name}> with {delay=}"
-            )
-            logger.warning(warn_msg)
             task_result = TaskResult(
                 task_id=self.task.task_id,
                 graph_id=self.task.graph_id,
                 status=TaskStatus.Retry,
-                errors=[str(retry)],
+                errors=[retry.msg],
                 formatted_exception=traceback.format_exc(),
             )
         except Exception as exc:

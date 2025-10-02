@@ -50,7 +50,6 @@ class TaskGraphEvaluator(MessageHandler):
             task_id=self.task.task_id,
             graph_id=self.task.graph_id,
             status=TaskStatus.Started,
-            result=None,
         )
         # What to do if failure?
         await self.storage_interface.store_task_result(start_result)
@@ -106,24 +105,37 @@ class TaskGraphEvaluator(MessageHandler):
 
         # Actually invoke the task here
         result: TaskResult = await self.task_handler()
+        # We *must* serialize this result before *loading* the graph again
         await self.storage_interface.store_task_result(result)
 
-        if result.status == TaskStatus.Success and self.task.on_success is not None:
-            # Success case: continue evaluating the graph
-            await self.continue_graph(result)
+        if result.status == TaskStatus.Success:
+            if self.task.on_success is not None:
+                # Success case: continue evaluating the graph
+                await self.publish_task(self.task.on_success)
+            if self.task.graph_id is not None:
+                # Success case: continue evaluating the graph
+                await self.continue_graph(result)
         elif result.status == TaskStatus.Failure and self.task.on_failure is not None:
             # Schedule on_failure task
             await self.publish_task(self.task.on_failure)
         elif result.status == TaskStatus.Retry:
+            # Retry requested: republish the same task with delay
+            delay = self.task.get_next_delay()
+            warn_msg = (
+                f"{result.errors} "
+                f"[attempt {self.task.attempts.attempts} of {self.task.policy.max_tries}] "
+                f"Publishing retry... {self.sequence_number=} "
+                f"<function={self.task.function_name}> with {delay=}"
+            )
+            logger.warning(warn_msg)
             await self.publish_task(
                 self.task,
-                delay=self.task.get_next_delay(),
+                delay=delay,
             )
 
-        # At-least once: settle at the end
+        # At-least once: settle at the end.
         # IF we have lost the message lease, we *may* have *multiple* copies of this task running.
-        # This means, we *may have* multiple `on_success` or `on_failure` tasks scheduled.
-        # This, we *DO NOT PUBLISH* callbacks if we have lost the message lease.
+        # This means, we *may have* multiple `graph_continue` or `on_failure` tasks scheduled.
         if not message_settled:
             try:
                 if result.status == TaskStatus.Failure:
@@ -133,7 +145,8 @@ class TaskGraphEvaluator(MessageHandler):
                 message_settled = True
             except exc.BoilermakerTaskLeaseLost:
                 logger.error(
-                    f"Lost message lease when trying to complete late for task {self.task.function_name}"
+                    f"Lost message lease when trying to complete late for task {self.task.function_name} "
+                    "May result in multiple executions of this task and its callbacks!"
                 )
                 return result
             except exc.BoilermakerServiceBusError:
@@ -143,15 +156,36 @@ class TaskGraphEvaluator(MessageHandler):
         return result
 
     async def continue_graph(self, completed_task_result: TaskResult) -> int | None:
-        """Continue evaluating TaskGraph workflow after a task completes successfully."""
-        graph_id = self.task.graph_id
+        """
+        Continue evaluating TaskGraph workflow after a task completes successfully.
+
+        We always reload the graph from storage to get the latest state.
+        """
+        graph_id = completed_task_result.graph_id
         if not graph_id:
             return None
 
-        # Reload graph with latest results
-        graph = await self.storage_interface.load_graph(graph_id)
+        try:
+            # Reload graph with latest results
+            graph = await self.storage_interface.load_graph(graph_id)
+        except Exception:
+            logger.error(
+                f"Exception in continue_graph for graph {graph_id}", exc_info=True
+            )
+            return None
+
         if not graph:
             logger.error(f"Graph {graph_id} not found after task completion")
+            return None
+
+        # Sanity check: did we load the result that was *just* stored?
+        loaded_task_status = graph.get_status(completed_task_result.task_id)
+        if loaded_task_status != completed_task_result.status:
+            logger.error(
+                f"Task status mismatch in continue_graph for graph {graph_id}: "
+                f"expected {completed_task_result.task_id} to be {completed_task_result.status}, "
+                f"but got {loaded_task_status}"
+            )
             return None
 
         # Find and publish newly ready tasks

@@ -1,5 +1,3 @@
-import copy
-import random
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -11,6 +9,9 @@ from boilermaker.app import Boilermaker
 from boilermaker.evaluators import TaskGraphEvaluator
 from boilermaker.storage import StorageInterface
 from boilermaker.task import Task, TaskGraph, TaskResult, TaskStatus
+
+# Requires running pytest with `--import-mode importlib`
+from .helpers import verify_storage_started_and_get_result_calls
 
 
 class State:
@@ -90,32 +91,6 @@ def evaluator(app, mockservicebus, mock_storage):
         state=app.state,
         storage_interface=mock_storage,
     )
-
-
-def verify_storage_started_and_get_result_calls(mock_storage, task: Task) -> TaskResult:
-    """
-    Helper to verify that store_task_result was called for Started
-    and then get the stored result.
-
-    The asserts in here had been duplicated for all of our tests, so
-    pulled them into this helper.
-    """
-    # Verify task started was stored
-    assert mock_storage.store_task_result.call_count == 2  # Started + Success
-    started_call, result_call = mock_storage.store_task_result.mock_calls
-    assert isinstance(started_call.args[0], TaskResult)
-    started_result = started_call.args[0]
-    assert started_result.task_id == task.task_id
-    assert started_result.graph_id == task.graph_id
-    assert started_result.status == TaskStatus.Started
-
-    # Verify task result was stored
-    assert isinstance(result_call.args[0], TaskResult)
-    stored_result = result_call.args[0]
-    assert stored_result.task_id == task.task_id
-    assert stored_result.graph_id == task.graph_id
-    return stored_result
-
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # message_handler generic Tests
@@ -231,8 +206,8 @@ async def test_message_handler_with_on_success_callback(
     """
     Test message_handler with on_success callback.
 
-    Expected behavior: if graph_id is present (but no graph tasks load)
-    `on_success` task is *NOT* published after successful execution.
+    Expected behavior: if `on_success` is not None, then
+    `on_success` task is published after successful execution.
     """
 
     async def on_success_func(state):
@@ -259,7 +234,7 @@ async def test_message_handler_with_on_success_callback(
     mock_storage.load_graph.assert_called()
 
     # Should publish success callback task
-    assert len(mockservicebus._sender.method_calls) == 0
+    assert len(mockservicebus._sender.method_calls) == 1
 
 
 async def test_message_handler_with_retry_exception(
@@ -279,7 +254,15 @@ async def test_message_handler_with_retry_exception(
     evaluator.function_registry["retry_func"] = retry_func
 
     result = await evaluator.message_handler()
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Retry
+    assert "Retry me" == result.errors[0]
+
+    # Should store retry result
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result.status == TaskStatus.Retry
 
     # Should publish retry task
     assert len(mockservicebus._sender.method_calls) == 1
@@ -302,11 +285,14 @@ async def test_message_handler_with_exception(
     evaluator.function_registry["failing_func"] = failing_func
 
     result = await evaluator.message_handler()
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert "Test error" in result.errors[0]
 
-    # Should store failure result for graph processing
-    mock_storage.store_task_result.assert_called()
-    stored_result = mock_storage.store_task_result.call_args[0][0]
+    # Should store failure result
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
     assert stored_result.status == TaskStatus.Failure
     assert "Test error" in stored_result.errors
 
@@ -332,17 +318,24 @@ async def test_message_handler_with_on_failure_callback(
     task.on_failure = app.create_task(on_failure_func)
 
     evaluator.task = task
-    evaluator.function_registry["failing_func"] = failing_func
 
     result = await evaluator.message_handler()
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert "Test error" in result.errors[0]
+
+    # Should store failure result
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result.status == TaskStatus.Failure
 
     # Should publish failure callback task
     assert len(mockservicebus._sender.method_calls) == 1
 
 
 @pytest.mark.parametrize("acks_early", [True, False])
-async def test_message_handler_success(acks_early, evaluator, mock_storage):
+async def test_message_handler_success_no_graph(acks_early, evaluator, mock_storage):
     """Test that message_handler executes a registered function and stores result."""
     result = await evaluator.message_handler()
     assert result.result == 42
@@ -353,6 +346,13 @@ async def test_message_handler_success(acks_early, evaluator, mock_storage):
     )
     assert stored_result_call.status == TaskStatus.Success
     assert stored_result_call.result == 42
+
+    # Should store failure result
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result.status == TaskStatus.Success
+    assert stored_result.result == 42
 
 
 async def test_message_handler_with_graph_workflow(
@@ -369,7 +369,9 @@ async def test_message_handler_with_graph_workflow(
     mock_storage.load_graph.return_value = sample_graph
 
     result = await evaluator.message_handler()
-    assert result == 42
+    assert isinstance(result, TaskResult)
+    assert result.result == 42
+    assert result.status == TaskStatus.Success
 
     # Should store started and successful result
     stored_result_call = verify_storage_started_and_get_result_calls(
@@ -394,14 +396,17 @@ async def test_message_handler_exception_handling(evaluator, mock_storage):
     task.payload = {"args": (1,), "kwargs": {}}
     evaluator.task = task
 
-    await evaluator.message_handler()
+    result = await evaluator.message_handler()
+    assert isinstance(result, TaskResult)
+    assert result.result is None
+    assert result.status == TaskStatus.Failure
+    assert "Test error" in result.errors[0]
 
     # Should store result
     stored_result_call = verify_storage_started_and_get_result_calls(
         mock_storage, evaluator.task
     )
     assert stored_result_call.status == TaskStatus.Failure
-    mock_storage.store_task_result.assert_not_called()
 
     # Should not load graph or continue
     mock_storage.load_graph.assert_not_called()
@@ -417,7 +422,8 @@ async def test_continue_graph_no_graph_id(evaluator):
     )
 
     # Should not raise any errors and should return early
-    await evaluator.continue_graph(result)
+    result = await evaluator.continue_graph(result)
+    assert result is None
 
 
 async def test_continue_graph_graph_not_found(evaluator, mock_storage):
@@ -432,7 +438,8 @@ async def test_continue_graph_graph_not_found(evaluator, mock_storage):
     mock_storage.load_graph.return_value = None
 
     # Should not raise errors, just log and return
-    await evaluator.continue_graph(result)
+    result = await evaluator.continue_graph(result)
+    assert result is None
     mock_storage.load_graph.assert_called_with("missing-graph")
 
 
@@ -536,17 +543,14 @@ async def test_full_graph_workflow_integration(app, mockservicebus, mock_storage
     graph.add_task(task_c_instance, parent_id=task_a_instance.task_id)
 
     # Mock storage to return our graph
-    graph_before_success = graph
-    graph_after_success = copy.deepcopy(graph)
     result = TaskResult(
         task_id=task_a_instance.task_id,
         graph_id=graph.graph_id,
         status=TaskStatus.Success,
         result=42,
     )
-    graph_after_success.add_result(result)
-
-    mock_storage.load_graph.side_effect = [graph_before_success, graph_after_success]
+    graph.add_result(result)
+    mock_storage.load_graph.return_value = graph
 
     # Create evaluator for task_a
     evaluator = TaskGraphEvaluator(
@@ -568,7 +572,18 @@ async def test_full_graph_workflow_integration(app, mockservicebus, mock_storage
 
     # Execute the message handler
     result = await evaluator.message_handler()
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.result == 10
+    assert result.status == TaskStatus.Success
+    assert result.task_id == task_a_instance.task_id
+
+    # Should store started and successful result
+    stored_result_call = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result_call.status == TaskStatus.Success
+    assert stored_result_call.result == 10
+    assert stored_result_call.task_id == task_a_instance.task_id
 
     # Should have stored results and published child tasks
     assert mock_storage.store_task_result.call_count >= 2  # Started + Success
@@ -583,7 +598,9 @@ async def test_task_with_no_graph_id(evaluator, mock_storage):
     evaluator.task.graph_id = None
 
     result = await evaluator.message_handler()
-    assert result == 42
+    assert isinstance(result, TaskResult)
+    assert result.result == 42
+    assert result.status == TaskStatus.Success
 
     # Should still store result (with graph_id=None)
     mock_storage.store_task_result.assert_called()
@@ -605,34 +622,178 @@ async def test_graph_workflow_exception_handling(evaluator, mock_storage):
 
 
 @pytest.mark.parametrize("should_deadletter", [True, False])
-@pytest.mark.parametrize("acks_late", [True, False])
-async def test_retry_policy_update(
-    should_deadletter, acks_late, evaluator, mock_storage, mockservicebus, app
+@pytest.mark.parametrize("has_on_failure", [True, False])
+@pytest.mark.parametrize("can_retry", [True, False])
+async def test_task_retries_with_storage(
+    can_retry,
+    has_on_failure,
+    should_deadletter,
+    evaluator,
+    app,
+    mockservicebus,
+    mock_storage,
 ):
-    """Test retry policy update from RetryException."""
+    """Test retry logic with result storage and on_failure callback."""
 
-    async def retry_func(state, x):
-        raise retries.RetryExceptionDefaultExponential(
-            "Retry with new policy", delay=800, max_delay=2000, max_tries=99
-        )
+    async def retrytask(state):
+        raise retries.RetryException("Retry me")
 
-    app.register_async(retry_func, policy=retries.RetryPolicy.default())
-    task = app.create_task(retry_func)
-    task.payload["args"] = (21,)
-    task.msg = make_message(task)
-    task.graph_id = "test-graph-id"
+    async def onfail(state, **kwargs):
+        return 1
+
+    # Register functions
+    app.register_async(retrytask, policy=retries.RetryPolicy.default())
+    app.register_async(onfail, policy=retries.NoRetry())
+
+    # Create task
+    task = app.create_task(retrytask)
     task.should_dead_letter = should_deadletter
-    task.acks_late = acks_late
+    if has_on_failure:
+        task.on_failure = app.create_task(onfail, somekwarg="akwargval")
 
+    if not can_retry:
+        task.attempts.attempts = task.policy.max_tries + 1
+
+    task.msg = make_message(task, sequence_number=148)
     evaluator.task = task
-    evaluator.function_registry["retry_func"] = retry_func
 
     result = await evaluator.message_handler()
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert (
+        result.status == TaskStatus.Retry if can_retry else TaskStatus.RetriesExhausted
+    )
+    assert result.result is None
 
-    # Should publish retry task with updated policy
+    # Task should be settled
+    assert len(mockservicebus._receiver.method_calls) == 1
+    complete_msg_call = mockservicebus._receiver.method_calls[0]
+    assert complete_msg_call[1][0].sequence_number == 148
+
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+
+    if not can_retry:
+        # Retries exhausted - should store failure result
+        assert isinstance(stored_result, TaskResult)
+        assert stored_result.status == TaskStatus.RetriesExhausted
+
+        if has_on_failure:
+            # Should publish failure callback
+            assert len(mockservicebus._sender.method_calls) == 1
+            publish_fail_call = mockservicebus._sender.method_calls[0]
+            assert publish_fail_call[0] == "schedule_messages"
+            published_task = Task.model_validate_json(str(publish_fail_call[1][0]))
+            assert published_task.function_name == "onfail"
+        else:
+            # No callbacks published
+            assert not mockservicebus._sender.method_calls
+    else:
+        # Can retry - should publish retry task, no storage calls
+        assert len(mockservicebus._sender.method_calls) == 1
+        publish_retry_call = mockservicebus._sender.method_calls[0]
+        assert publish_retry_call[0] == "schedule_messages"
+        published_task = Task.model_validate_json(str(publish_retry_call[1][0]))
+        assert published_task.function_name == "retrytask"
+
+
+async def test_retries_exhausted_with_storage(
+    app, evaluator, mockservicebus, mock_storage
+):
+    """Test that retries exhausted scenario stores failure result."""
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    # Set attempts to exceed max tries
+    task.attempts.attempts = task.policy.max_tries + 1
+
+    task.msg = make_message(task, sequence_number=321)
+    evaluator.task = task
+
+    result = await evaluator.message_handler()
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.RetriesExhausted
+    assert result.result is None
+
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result.status == TaskStatus.RetriesExhausted
+
+    # Task should be deadlettered
+    assert len(mockservicebus._receiver.method_calls) == 1
+    complete_msg_call = mockservicebus._receiver.method_calls[0]
+    assert complete_msg_call[0] == "dead_letter_message"
+
+
+async def test_retry_policy_update_with_storage(
+    app, evaluator, mockservicebus, mock_storage
+):
+    """Test that retry policy can be updated during retry exception handling."""
+
+    async def retrytask(state):
+        new_policy = retries.RetryPolicy(
+            max_tries=10, retry_mode=retries.RetryMode.Exponential
+        )
+        raise retries.RetryException("Retry with new policy", policy=new_policy)
+
+    app.register_async(retrytask, policy=retries.RetryPolicy.default())
+    task = app.create_task(retrytask)
+
+    task.msg = make_message(task, sequence_number=123)
+    evaluator.task = task
+
+    result = await evaluator.message_handler()
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Retry
+    assert result.result is None
+
+    # Task policy should be updated
+    assert task.policy.max_tries == 10
+    assert task.policy.retry_mode == retries.RetryMode.Exponential
+
+    # Should publish retry with new policy
     assert len(mockservicebus._sender.method_calls) == 1
-    publish_call = mockservicebus._sender.method_calls[0]
-    published_task = Task.model_validate_json(str(publish_call[1][0]))
-    assert published_task.policy.retry_mode == retries.RetryMode.Exponential
-    assert published_task.policy.max_tries == 99
+    publish_retry_call = mockservicebus._sender.method_calls[0]
+    assert publish_retry_call[0] == "schedule_messages"
+
+    # Should still store result
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result.status == TaskStatus.Retry
+
+
+async def test_early_acks_with_storage(app, evaluator, mockservicebus, mock_storage):
+    """Test that early acknowledgment works correctly with storage."""
+
+    async def oktask(state):
+        return "OK"
+
+    app.register_async(oktask, policy=retries.RetryPolicy.default())
+    task = app.create_task(oktask)
+    task.acks_late = False  # Early ack
+    task.msg = make_message(task, sequence_number=456)
+    evaluator.task = task
+
+    result = await evaluator.message_handler()
+    assert isinstance(result, TaskResult)
+    assert result.result == "OK"
+    assert result.status == TaskStatus.Success
+
+    # Should complete message (early ack)
+    assert len(mockservicebus._receiver.method_calls) == 1
+    complete_msg_call = mockservicebus._receiver.method_calls[0]
+    assert complete_msg_call[0] == "complete_message"
+
+    # Verify task started was stored and  task_result was stored
+    stored_result = verify_storage_started_and_get_result_calls(
+        mock_storage, evaluator.task
+    )
+    assert stored_result.status == TaskStatus.Success

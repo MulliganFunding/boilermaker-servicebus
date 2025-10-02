@@ -93,17 +93,24 @@ class NoStorageEvaluator(MessageHandler):
         elif result.status == TaskStatus.Failure and self.task.on_failure is not None:
             # Schedule on_failure task
             await self.publish_task(self.task.on_failure)
-        # Success case: publish the next task
         elif result.status == TaskStatus.Retry:
+            # Retry requested: republish the same task with delay
+            delay = self.task.get_next_delay()
+            warn_msg = (
+                f"{result.errors} "
+                f"[attempt {self.task.attempts.attempts} of {self.task.policy.max_tries}] "
+                f"Publishing retry... {self.sequence_number=} "
+                f"<function={self.task.function_name}> with {delay=}"
+            )
+            logger.warning(warn_msg)
             await self.publish_task(
                 self.task,
-                delay=self.task.get_next_delay(),
+                delay=delay,
             )
 
-        # At-least once: settle at the end
+        # At-least once: settle at the end.
         # IF we have lost the message lease, we *may* have *multiple* copies of this task running.
         # This means, we *may have* multiple `on_success` or `on_failure` tasks scheduled.
-        # This, we *DO NOT PUBLISH* callbacks if we have lost the message lease.
         if not message_settled:
             try:
                 if result.status == TaskStatus.Failure:
@@ -113,7 +120,8 @@ class NoStorageEvaluator(MessageHandler):
                 message_settled = True
             except exc.BoilermakerTaskLeaseLost:
                 logger.error(
-                    f"Lost message lease when trying to complete late for task {self.task.function_name}"
+                    f"Lost message lease when trying to complete late for task {self.task.function_name} "
+                    "May result in multiple executions of this task and its callbacks!"
                 )
                 return result
             except exc.BoilermakerServiceBusError:
