@@ -4,7 +4,12 @@ import pytest
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus._common.constants import SEQUENCENUBMERNAME
 from azure.servicebus._pyamqp.message import Message
-from azure.servicebus.exceptions import MessageLockLostError, ServiceBusError
+from azure.servicebus.exceptions import (
+    MessageAlreadySettled,
+    MessageLockLostError,
+    ServiceBusError,
+    SessionLockLostError,
+)
 from boilermaker import exc
 from boilermaker.app import Boilermaker
 from boilermaker.evaluators import NoStorageEvaluator
@@ -377,6 +382,68 @@ async def test_renew_message_lock_none_message(mockservicebus):
     mockservicebus._receiver.renew_message_lock.assert_not_called()
 
 
+async def test_dead_letter_message_success(mockservicebus, dummy_msg):
+    """Test that dead_letter_message successfully deadletters a message."""
+    await MessageActions.dead_letter_message(
+        dummy_msg, mockservicebus._receiver, "TestReason", "Test description"
+    )
+
+    mockservicebus._receiver.dead_letter_message.assert_called_once_with(
+        dummy_msg,
+        reason="TestReason",
+        error_description="Test description",
+    )
+
+
+async def test_dead_letter_message_success_default_description(
+    mockservicebus, dummy_msg
+):
+    """Test that dead_letter_message uses default error description when not provided."""
+    await MessageActions.dead_letter_message(
+        dummy_msg, mockservicebus._receiver, "TestReason"
+    )
+
+    mockservicebus._receiver.dead_letter_message.assert_called_once_with(
+        dummy_msg,
+        reason="TestReason",
+        error_description="Task failed",
+    )
+
+
+@pytest.mark.parametrize(
+    "side_effect,wrapped_exc",
+    [
+        (ServiceBusError("fail"), exc.BoilermakerServiceBusError),
+        (MessageLockLostError(), exc.BoilermakerTaskLeaseLost),
+        (MessageAlreadySettled(), exc.BoilermakerTaskLeaseLost),
+        (SessionLockLostError(), exc.BoilermakerTaskLeaseLost),
+        (ValueError("other"), None),
+    ],
+)
+async def test_dead_letter_message_with_error(
+    side_effect, wrapped_exc, mockservicebus, dummy_msg
+):
+    """Test that dead_letter_message handles errors gracefully."""
+    mockservicebus._receiver.dead_letter_message.side_effect = side_effect
+
+    if wrapped_exc is not None:
+        with pytest.raises(wrapped_exc):
+            await MessageActions.dead_letter_message(
+                dummy_msg, mockservicebus._receiver, "TestReason"
+            )
+    else:
+        with pytest.raises(side_effect.__class__):
+            await MessageActions.dead_letter_message(
+                dummy_msg, mockservicebus._receiver, "TestReason"
+            )
+
+    mockservicebus._receiver.dead_letter_message.assert_called_once_with(
+        dummy_msg,
+        reason="TestReason",
+        error_description="Task failed",
+    )
+
+
 async def test_deadletter_or_complete_task_deadletter(mockservicebus, dummy_task):
     """Test deadletter_or_complete_task when task should_dead_letter is True."""
     dummy_task.should_dead_letter = True
@@ -451,6 +518,32 @@ async def test_message_handler_call(message_handler):
     """Test MessageHandler __call__ method."""
     result = await message_handler()
     assert result == "message_handler_result"
+
+
+async def test_message_handler_call_with_pre_process_exception(
+    message_handler, mockservicebus
+):
+    """Test MessageHandler __call__ method handles Exception in pre_process."""
+    # Mock pre_process to raise a general exception
+    message_handler.pre_process = AsyncMock(side_effect=RuntimeError("Test exception"))
+
+    result = await message_handler()
+
+    # Should return TaskResult with failure status
+    assert result is not None
+    assert result.status.value == "failure"
+    assert result.task_id == message_handler.task.task_id
+    assert result.graph_id == message_handler.task.graph_id
+    assert result.result is None
+    assert result.errors == ["Pre-processing exception"]
+    assert result.formatted_exception is not None
+
+    # Should have called deadletter_or_complete_task (deadletter since should_dead_letter=True)
+    mockservicebus._receiver.dead_letter_message.assert_called_once_with(
+        message_handler.task.msg,
+        reason="ProcessingError",
+        error_description="Pre-processing exception",
+    )
 
 
 async def test_message_handler_current_msg_property(message_handler, dummy_task):
@@ -539,3 +632,139 @@ async def test_message_handler_deadletter_or_complete_task(
     mockservicebus._receiver.dead_letter_message.assert_called_once_with(
         dummy_msg, reason="TestReason", error_description="Task failed"
     )
+
+
+async def test_message_handler_pre_process_debug_task_success(
+    message_handler, mockservicebus
+):
+    """Test MessageHandler pre_process handles debug task successfully."""
+    from boilermaker import sample
+
+    # Set task to debug task
+    message_handler.task.function_name = sample.TASK_NAME
+
+    # Mock sample.debug_task
+    original_debug_task = sample.debug_task
+    sample.debug_task = AsyncMock()
+
+    try:
+        result = await message_handler.pre_process()
+
+        # Should return TaskResult with success status
+        assert result is not None
+        assert result.status.value == "success"
+        assert result.task_id == message_handler.task.task_id
+        assert result.graph_id == message_handler.task.graph_id
+        assert result.result == 0
+        assert result.errors == []
+
+        # Should have called debug_task and complete_message
+        sample.debug_task.assert_called_once_with(message_handler.state)
+        mockservicebus._receiver.complete_message.assert_called_once_with(
+            message_handler.task.msg
+        )
+    finally:
+        # Restore original function
+        sample.debug_task = original_debug_task
+
+
+async def test_message_handler_pre_process_debug_task_lease_lost(
+    message_handler, mockservicebus
+):
+    """Test MessageHandler pre_process handles debug task with message lease lost."""
+    from boilermaker import exc, sample
+
+    # Set task to debug task
+    message_handler.task.function_name = sample.TASK_NAME
+
+    # Mock sample.debug_task
+    original_debug_task = sample.debug_task
+    sample.debug_task = AsyncMock()
+
+    # Mock complete_message to raise lease lost error
+    mockservicebus._receiver.complete_message.side_effect = (
+        exc.BoilermakerTaskLeaseLost("lease lost")
+    )
+
+    try:
+        result = await message_handler.pre_process()
+
+        # Should return TaskResult with failure status
+        assert result is not None
+        assert result.status.value == "failure"
+        assert result.task_id == message_handler.task.task_id
+        assert result.graph_id == message_handler.task.graph_id
+        assert result.result == 0
+        assert len(result.errors) == 1
+        assert "Lost message lease when trying to complete early" in result.errors[0]
+
+        # Should have called debug_task and complete_message
+        sample.debug_task.assert_called_once_with(message_handler.state)
+        mockservicebus._receiver.complete_message.assert_called_once_with(
+            message_handler.task.msg
+        )
+    finally:
+        # Restore original function
+        sample.debug_task = original_debug_task
+
+
+async def test_message_handler_pre_process_debug_task_service_bus_error(
+    message_handler, mockservicebus
+):
+    """Test MessageHandler pre_process handles debug task with service bus error."""
+    from boilermaker import exc, sample
+
+    # Set task to debug task
+    message_handler.task.function_name = sample.TASK_NAME
+
+    # Mock sample.debug_task
+    original_debug_task = sample.debug_task
+    sample.debug_task = AsyncMock()
+
+    # Mock complete_message to raise service bus error
+    mockservicebus._receiver.complete_message.side_effect = (
+        exc.BoilermakerServiceBusError("service bus error")
+    )
+
+    try:
+        result = await message_handler.pre_process()
+
+        # Should return TaskResult with failure status
+        assert result is not None
+        assert result.status.value == "failure"
+        assert result.task_id == message_handler.task.task_id
+        assert result.graph_id == message_handler.task.graph_id
+        assert result.result == 0
+        assert len(result.errors) == 1
+        assert "Lost message lease when trying to complete early" in result.errors[0]
+
+        # Should have called debug_task and complete_message
+        sample.debug_task.assert_called_once_with(message_handler.state)
+        mockservicebus._receiver.complete_message.assert_called_once_with(
+            message_handler.task.msg
+        )
+    finally:
+        # Restore original function
+        sample.debug_task = original_debug_task
+
+
+async def test_message_handler_pre_process_missing_function(message_handler):
+    """Test MessageHandler pre_process raises exception for missing function."""
+    from boilermaker import exc
+
+    # Set task to non-existent function
+    message_handler.task.function_name = "non_existent_function"
+
+    with pytest.raises(exc.BoilermakerExpectionFailed) as exc_info:
+        await message_handler.pre_process()
+
+    assert "Missing registered function non_existent_function" in str(exc_info.value)
+
+
+async def test_message_handler_pre_process_normal_function(message_handler):
+    """Test MessageHandler pre_process returns None for normal functions."""
+    # Task already has "test_function" which exists in function_registry
+    result = await message_handler.pre_process()
+
+    # Should return None (no early return)
+    assert result is None
