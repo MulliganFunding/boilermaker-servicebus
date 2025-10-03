@@ -13,16 +13,12 @@ def default():
 
 @pytest.fixture()
 def linear():
-    return retries.RetryPolicy(
-        max_tries=5, delay=30, delay_max=600, retry_mode=retries.RetryMode.Linear
-    )
+    return retries.RetryPolicy(max_tries=5, delay=30, delay_max=600, retry_mode=retries.RetryMode.Linear)
 
 
 @pytest.fixture()
 def exponential():
-    return retries.RetryPolicy(
-        max_tries=5, delay=30, delay_max=600, retry_mode=retries.RetryMode.Exponential
-    )
+    return retries.RetryPolicy(max_tries=5, delay=30, delay_max=600, retry_mode=retries.RetryMode.Exponential)
 
 
 @pytest.mark.parametrize("invalid_value", (-1, None))
@@ -74,3 +70,41 @@ def test_attempts():
     attempts.inc(when=later)
     assert attempts.attempts == 3
     assert attempts.last_retry == later
+
+
+def test_retry_exception_default():
+    """Test RetryExceptionDefault uses default retry policy."""
+    exception = retries.RetryExceptionDefault("test message")
+
+    # Should use default retry policy
+    assert exception.policy == retries.RetryPolicy.default()
+    assert str(exception) == "test message"
+
+
+def test_retry_exception_default_linear():
+    """Test RetryExceptionDefaultLinear uses linear defaults and accepts kwargs."""
+    # Test with default values
+    exception = retries.RetryExceptionDefaultLinear("test message")
+
+    expected_policy = retries.RetryPolicy(
+        max_tries=5,
+        delay=30,
+        delay_max=600,
+        retry_mode=retries.RetryMode.Linear,
+    )
+
+    assert exception.policy == expected_policy
+    assert str(exception) == "test message"
+
+    # Test with overridden values
+    custom_exception = retries.RetryExceptionDefaultLinear("custom message", max_tries=3, delay=60)
+
+    expected_custom_policy = retries.RetryPolicy(
+        max_tries=3,
+        delay=60,
+        delay_max=600,  # default not overridden
+        retry_mode=retries.RetryMode.Linear,
+    )
+
+    assert custom_exception.policy == expected_custom_policy
+    assert str(custom_exception) == "custom message"

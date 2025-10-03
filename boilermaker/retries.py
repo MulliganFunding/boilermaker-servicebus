@@ -22,6 +22,7 @@ class RetryMode(enum.IntEnum):
         Exponential: Exponentially increasing delay with jitter to prevent thundering herd
         Linear: Linearly increasing delay (e.g., 30s, 60s, 90s...)
     """
+
     # Every schedule-interval is the same, e.g., "sleep for 30s and retry loop"
     Fixed = 0
     # Schedule-interval exponentially increases (with jitter) up to max
@@ -56,6 +57,7 @@ class RetryPolicy(BaseModel):
         ...     retry_mode=RetryMode.Exponential
         ... )
     """
+
     # Capped at this value
     max_tries: int = DEFAULT_MAX_TRIES
     # Seconds
@@ -138,12 +140,8 @@ class RetryPolicy(BaseModel):
             case RetryMode.Exponential:
                 # Jitter is added so that a lot of work doesn't get bunched up at the
                 # end and eventually hurt throughput.
-                exponential_delay = min(
-                    (2**attempts_so_far) * self.delay, self.delay_max
-                )
-                return (exponential_delay // 2) + random.randint(
-                    0, exponential_delay // 2
-                )
+                exponential_delay = min((2**attempts_so_far) * self.delay, self.delay_max)
+                return (exponential_delay // 2) + random.randint(0, exponential_delay // 2)
 
 
 # NoRetry only tries one time
@@ -158,6 +156,7 @@ class NoRetry(RetryPolicy):
         >>> no_retry_task = Task.si(risky_function, policy=NoRetry())
         >>> # Task will not retry on failure
     """
+
     def __init__(self):
         """Duplicates RetryPolicy.no_retry() constructor"""
         super().__init__(max_tries=1, delay=5, delay_max=5, retry_mode=RetryMode.Fixed)
@@ -179,6 +178,7 @@ class RetryAttempts(BaseModel):
         >>> attempts.inc(datetime.now())        # Record first attempt
         >>> print(f"Attempts: {attempts.attempts}")  # Prints: Attempts: 1
     """
+
     # how many so far
     attempts: int = 0
     # Timestamp of last retry
@@ -227,6 +227,7 @@ class RetryException(Exception):
         ...     else:
         ...         raise RetryException("Use default retry policy")
     """
+
     def __init__(self, msg: str, policy: RetryPolicy | None = None):
         self.msg = msg
         self.policy = policy
@@ -243,6 +244,7 @@ class RetryExceptionDefault(RetryException):
         ...     if network_unavailable():
         ...         raise RetryExceptionDefault("Network timeout")
     """
+
     def __init__(self, msg: str):
         super().__init__(msg, policy=RetryPolicy.default())
 
@@ -265,6 +267,7 @@ class RetryExceptionDefaultExponential(RetryException):
         ...             "Rate limited", max_tries=3, delay=10
         ...         )
     """
+
     def __init__(self, msg: str, **kwargs):
         defaults = {
             "max_tries": 5,
@@ -294,6 +297,7 @@ class RetryExceptionDefaultLinear(RetryException):
         ...             "Database busy", delay=60, delay_max=300
         ...         )
     """
+
     def __init__(self, msg: str, **kwargs):
         defaults = {
             "max_tries": 5,
