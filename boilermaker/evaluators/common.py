@@ -303,7 +303,8 @@ class TaskEvaluatorBase:
         """Call pre-processing hook and then `message_handler`."""
 
         try:
-            await self.pre_process()
+            if not await self.pre_process():
+                return None
         except exc.BoilermakerUnregisteredFunction:
             await self.deadletter_or_complete_task(
                 "ExpectationFailed", detail="Pre-processing expectation failed"
@@ -331,8 +332,12 @@ class TaskEvaluatorBase:
 
         return await self.message_handler()
 
-    async def pre_process(self) -> None:
-        """Hook for pre-processing before task execution."""
+    async def pre_process(self) -> bool:
+        """
+        Hook for pre-processing before task execution.
+
+        Returns True if processing should continue, False if it should not.
+        """
 
         # Check if it's a debug task
         if self.task.function_name == sample.TASK_NAME:
@@ -343,9 +348,10 @@ class TaskEvaluatorBase:
                 msg = f"Lost message lease when trying to complete early for task {self.task.function_name}"
                 logger.error(msg)
             # Early return - don't create TaskResult here as caller handles it
-            return
+            return False
 
         if not self.function_registry.get(self.task.function_name):
             raise exc.BoilermakerUnregisteredFunction(
                 f"Missing registered function {self.task.function_name}"
             )
+        return True

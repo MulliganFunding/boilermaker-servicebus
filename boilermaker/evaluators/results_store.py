@@ -1,4 +1,5 @@
 import logging
+import traceback
 import typing
 
 from azure.servicebus.aio import ServiceBusReceiver
@@ -76,7 +77,8 @@ class ResultsStorageTaskEvaluator(TaskEvaluatorBase):
                     task_id=self.task.task_id,
                     graph_id=self.task.graph_id,
                     status=TaskStatus.Failure,
-                    errors=["ServiceBus error"],
+                    errors=["Service Bus error"],
+                    formatted_exception=traceback.format_exc(),
                 )
 
         if not self.task.can_retry:
@@ -103,6 +105,7 @@ class ResultsStorageTaskEvaluator(TaskEvaluatorBase):
                         graph_id=self.task.graph_id,
                         status=TaskStatus.Failure,
                         errors=["ServiceBus error during retry exhaustion"],
+                        formatted_exception=traceback.format_exc(),
                     )
 
             # This task is a failure because it did not succeed and retries are exhausted

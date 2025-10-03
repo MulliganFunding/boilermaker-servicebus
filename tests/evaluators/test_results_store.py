@@ -1,7 +1,8 @@
 import random
+from unittest.mock import AsyncMock
 
 import pytest
-from boilermaker import failure, retries
+from boilermaker import exc, failure, retries, sample
 from boilermaker.evaluators import ResultsStorageTaskEvaluator
 from boilermaker.task import Task, TaskResult, TaskStatus
 
@@ -101,15 +102,13 @@ async def test_message_handler_stores_function_exception(evaluator, mock_storage
 
 async def test_message_handler_debug_task(evaluator, mock_storage, make_message):
     """Test that message_handler runs the debug task and DOES NOT store result."""
-    from boilermaker import sample
-
     task = Task.default(sample.TASK_NAME)
     task.msg = make_message(task)
     evaluator.task = task
 
     result = await evaluator()
     # Should return whatever sample.debug_task returns
-    assert result is not None
+    assert result is None
 
     # Verify debug task result was *not* stored
     mock_storage.store_task_result.assert_not_called()
@@ -475,8 +474,6 @@ async def test_early_acks_with_storage(app, mockservicebus, mock_storage, make_m
 
 async def test_early_ack_lease_lost_exception(app, mockservicebus, mock_storage, make_message):
     """Test exception handling when early ack fails with lease lost."""
-    from boilermaker import exc
-
     async def oktask(state):
         return "OK"
 
@@ -501,8 +498,10 @@ async def test_early_ack_lease_lost_exception(app, mockservicebus, mock_storage,
 
     result = await evaluator.message_handler()
 
-    # Should return None when lease is lost during early ack
-    assert result is None
+    # Should return TaskResult when lease is lost during early ack
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert "Lost message lease" in result.errors
 
     # Should still store the started result
     assert mock_storage.store_task_result.call_count == 1
@@ -513,7 +512,6 @@ async def test_early_ack_lease_lost_exception(app, mockservicebus, mock_storage,
 
 async def test_early_ack_service_bus_error_exception(app, mockservicebus, mock_storage, make_message):
     """Test exception handling when early ack fails with service bus error."""
-    from boilermaker import exc
 
     async def oktask(state):
         return "OK"
@@ -542,7 +540,9 @@ async def test_early_ack_service_bus_error_exception(app, mockservicebus, mock_s
     result = await evaluator.message_handler()
 
     # Should return None when service bus error occurs during early ack
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert "Service Bus error" in result.errors
 
     # Should still store the started result
     assert mock_storage.store_task_result.call_count == 1
@@ -553,9 +553,6 @@ async def test_early_ack_service_bus_error_exception(app, mockservicebus, mock_s
 
 async def test_retries_exhausted_settle_lease_lost_exception(app, mockservicebus, mock_storage, make_message):
     """Test exception handling when settling message fails during retries exhausted."""
-    from unittest.mock import AsyncMock
-
-    from boilermaker import exc
 
     async def oktask(state):
         return "OK"
@@ -597,10 +594,6 @@ async def test_retries_exhausted_settle_service_bus_error_exception(
     app, mockservicebus, mock_storage, make_message
 ):
     """Test exception handling when settling message fails during retries exhausted with service bus error."""
-    from unittest.mock import AsyncMock
-
-    from boilermaker import exc
-
     async def oktask(state):
         return "OK"
 
@@ -641,8 +634,6 @@ async def test_retries_exhausted_settle_service_bus_error_exception(
 
 async def test_final_settle_lease_lost_exception(app, mockservicebus, mock_storage, make_message):
     """Test exception handling when final message settlement fails with lease lost."""
-    from boilermaker import exc
-
     async def oktask(state):
         return "OK"
 
@@ -678,8 +669,6 @@ async def test_final_settle_lease_lost_exception(app, mockservicebus, mock_stora
 
 async def test_final_settle_service_bus_error_exception(app, mockservicebus, mock_storage, make_message):
     """Test exception handling when final message settlement fails with service bus error."""
-    from boilermaker import exc
-
     async def oktask(state):
         return "OK"
 
@@ -719,10 +708,6 @@ async def test_final_settle_failure_deadletter_lease_lost_exception(
     app, mockservicebus, mock_storage, make_message
 ):
     """Test exception handling when final deadletter settlement fails with lease lost."""
-    from unittest.mock import AsyncMock
-
-    from boilermaker import exc, failure
-
     async def failtask(state):
         return failure.TaskFailureResult
 

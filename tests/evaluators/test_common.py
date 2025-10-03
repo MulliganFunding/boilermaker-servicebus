@@ -542,15 +542,7 @@ async def test_message_handler_pre_process_debug_task_success(message_handler, m
     sample.debug_task = AsyncMock()
 
     try:
-        result = await message_handler.pre_process()
-
-        # Should return TaskResult with success status
-        assert result is not None
-        assert result.status.value == "success"
-        assert result.task_id == message_handler.task.task_id
-        assert result.graph_id == message_handler.task.graph_id
-        assert result.result == 0
-        assert result.errors == []
+        assert await message_handler.pre_process() is False
 
         # Should have called debug_task and complete_message
         sample.debug_task.assert_called_once_with(message_handler.state)
@@ -573,16 +565,7 @@ async def test_message_handler_pre_process_debug_task_lease_lost(message_handler
     mockservicebus._receiver.complete_message.side_effect = exc.BoilermakerTaskLeaseLost("lease lost")
 
     try:
-        result = await message_handler.pre_process()
-
-        # Should return TaskResult with failure status
-        assert result is not None
-        assert result.status.value == "failure"
-        assert result.task_id == message_handler.task.task_id
-        assert result.graph_id == message_handler.task.graph_id
-        assert result.result == 0
-        assert len(result.errors) == 1
-        assert "Lost message lease when trying to complete early" in result.errors[0]
+        assert await message_handler.pre_process() is False
 
         # Should have called debug_task and complete_message
         sample.debug_task.assert_called_once_with(message_handler.state)
@@ -607,16 +590,7 @@ async def test_message_handler_pre_process_debug_task_service_bus_error(message_
     )
 
     try:
-        result = await message_handler.pre_process()
-
-        # Should return TaskResult with failure status
-        assert result is not None
-        assert result.status.value == "failure"
-        assert result.task_id == message_handler.task.task_id
-        assert result.graph_id == message_handler.task.graph_id
-        assert result.result == 0
-        assert len(result.errors) == 1
-        assert "Lost message lease when trying to complete early" in result.errors[0]
+        assert await message_handler.pre_process() is False
 
         # Should have called debug_task and complete_message
         sample.debug_task.assert_called_once_with(message_handler.state)
@@ -642,5 +616,5 @@ async def test_message_handler_pre_process_normal_function(message_handler):
     # Task already has "test_function" which exists in function_registry
     result = await message_handler.pre_process()
 
-    # Should return None (no early return)
-    assert result is None
+    # Should return True for 'continue processing'
+    assert result is True
