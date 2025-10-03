@@ -66,7 +66,7 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
                 )
         return graph
 
-    async def store_graph(self, graph: TaskGraph) -> str:
+    async def store_graph(self, graph: TaskGraph) -> None:
         """
         Stores a TaskGraph to Azure Blob Storage.
 
@@ -75,7 +75,7 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
         Args:
             graph: The TaskGraph instance to store.
         """
-        fname = f"{self.task_result_prefix}/{graph.storage_path()}"
+        fname = f"{self.task_result_prefix}/{graph.storage_path}"
         graph_stored, _res = await self.upload_blob(fname, graph.model_dump_json())
         if not graph_stored:
             raise BoilermakerStorageError(
@@ -86,14 +86,17 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
                 reason="Unknown",
             )
         # Store pending results for *all* tasks in the graph
+        pending_result = None
         try:
             async with create_task_group() as tg:
                 for pending_result in graph.generate_pending_results():
+                    fname_pr = (
+                        f"{self.task_result_prefix}/{pending_result.storage_path}"
+                    )
                     tg.start_soon(
                         self.upload_blob,
-                        pending_result.storage_path(),
+                        fname_pr,
                         pending_result.model_dump_json(),
-                        overwrite=True,
                     )
                 if not pending_result:
                     raise BoilermakerStorageError(
@@ -113,7 +116,8 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
                 status_code=500,
                 reason="Unknown",
             ) from excgroup
-        return fname
+        # Return None to match StorageInterface
+        return None
 
     async def store_task_result(self, task_result: TaskResult) -> None:
         """Stores a TaskResult to Azure Blob Storage.
@@ -121,7 +125,7 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
         Args:
             task_result: The TaskResult instance to store.
         """
-        fname = str(task_result.storage_path())
+        fname = str(task_result.storage_path)
         if self.task_result_prefix:
             fname = f"{self.task_result_prefix}{fname}"
 

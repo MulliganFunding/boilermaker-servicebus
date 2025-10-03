@@ -1,9 +1,6 @@
 from unittest.mock import AsyncMock
 
 import pytest
-from azure.servicebus import ServiceBusReceivedMessage
-from azure.servicebus._common.constants import SEQUENCENUBMERNAME
-from azure.servicebus._pyamqp.message import Message
 from boilermaker.app import Boilermaker
 from boilermaker.evaluators import (
     evaluator_factory,
@@ -12,17 +9,6 @@ from boilermaker.evaluators import (
     TaskGraphEvaluator,
 )
 from boilermaker.task import Task
-
-
-def make_message(task, sequence_number: int = 123):
-    # Example taken from:
-    # azure-sdk-for-python/blob/main/sdk/servicebus/azure-servicebus/tests/test_message.py#L233
-    my_frame = [0, 0, 0]
-    amqp_received_message = Message(
-        data=[task.model_dump_json().encode("utf-8")],
-        message_annotations={SEQUENCENUBMERNAME: sequence_number},
-    )
-    return ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
 
 
 class State:
@@ -56,7 +42,12 @@ def app(sbus):
     ],
 )
 @pytest.mark.parametrize("has_storage", [True, False])
-def test_evaluator_factory(task, has_storage, app, mockservicebus):
+def test_evaluator_factory(
+    task,
+    has_storage,
+    app,
+    mockservicebus,
+):
     evaluator = evaluator_factory(
         mockservicebus._receiver,
         task,

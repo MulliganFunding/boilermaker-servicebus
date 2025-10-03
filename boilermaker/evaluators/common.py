@@ -1,6 +1,5 @@
 import datetime
 import logging
-import time
 import traceback
 import typing
 from abc import abstractmethod
@@ -20,16 +19,26 @@ from opentelemetry import trace
 from pydantic import ValidationError
 
 from boilermaker import exc, sample
-from boilermaker.failure import TaskFailureResult
-from boilermaker.retries import RetryException
 from boilermaker.storage import StorageInterface
 from boilermaker.task import Task, TaskResult, TaskStatus
-from boilermaker.types import TaskHandler
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
 logger = logging.getLogger("boilermaker.app")
 
 
+# Common Types used when evaluating tasks
+TaskHandler: typing.TypeAlias = Callable[..., Awaitable[typing.Any]]
+TaskHandlerRegistry: typing.TypeAlias = dict[str, TaskHandler]
+
+
+class TaskPublisher(typing.Protocol):
+    # Define types here, as if __call__ were a function (ignore self).
+    def __call__(
+        self, task: Task, delay: int | None = None, publish_attempts: int | None = None
+    ) -> Awaitable[None]: ...
+
+
+# Message handling actions
 class MessageActions:
     """
     Common message actions for handling ServiceBusReceivedMessage.
@@ -43,7 +52,9 @@ class MessageActions:
     """
 
     @classmethod
-    async def task_decoder(cls, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver) -> Task | None:
+    async def task_decoder(
+        cls, msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
+    ) -> Task | None:
         """Decode a ServiceBusReceivedMessage into a Task."""
         try:
             task = Task.model_validate_json(str(msg))
@@ -52,7 +63,8 @@ class MessageActions:
         except (JSONDecodeError, ValidationError):
             # This task is not parseable
             log_err_msg = (
-                f"Invalid task sequence_number={msg.sequence_number} exc_info={traceback.format_exc()}"
+                f"Invalid task sequence_number={msg.sequence_number} "
+                f"exc_info={traceback.format_exc()}"
             )
             logger.error(log_err_msg)
             await receiver.dead_letter_message(
@@ -63,31 +75,38 @@ class MessageActions:
             return None
 
     @staticmethod
-    async def abandon_message(msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver) -> None:
+    async def abandon_message(
+        msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
+    ) -> None:
         """Abandon the message being processed."""
         if msg is not None:
             sequence_number = msg.sequence_number
             try:
                 await receiver.abandon_message(msg)
-                logger.warning(f"Abandoning message: returned to queue {sequence_number=}")
+                logger.warning(
+                    f"Abandoning message: returned to queue {sequence_number=}"
+                )
             except (
                 MessageAlreadySettled,
                 MessageLockLostError,
                 SessionLockLostError,
             ):
-                msg = f"Failed to requeue message {sequence_number=} exc_info={traceback.format_exc()}"
-                logger.error(msg)
-                raise exc.BoilermakerTaskLeaseLost(msg) from None
+                err_msg = f"Failed to requeue message {sequence_number=} exc_info={traceback.format_exc()}"
+                logger.error(err_msg)
+                raise exc.BoilermakerTaskLeaseLost(err_msg) from None
             except ServiceBusError as sb_exc:
-                msg = (
-                    f"ServiceBusError requeuing message {sequence_number=} exc_info={traceback.format_exc()}"
+                err_msg = (
+                    f"ServiceBusError requeuing message {sequence_number=} "
+                    f"exc_info={traceback.format_exc()}"
                 )
-                logger.error(msg)
-                raise exc.BoilermakerServiceBusError(msg) from sb_exc
+                logger.error(err_msg)
+                raise exc.BoilermakerServiceBusError(err_msg) from sb_exc
         return None
 
     @staticmethod
-    async def complete_message(msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver):
+    async def complete_message(
+        msg: ServiceBusReceivedMessage, receiver: ServiceBusReceiver
+    ):
         """Complete the current message being processed."""
         try:
             await receiver.complete_message(msg)
@@ -108,7 +127,7 @@ class MessageActions:
                 f"exc_info={traceback.format_exc()}"
             )
             logger.error(logmsg)
-            raise exc.BoilermakerServiceBusError(msg) from sb_exc
+            raise exc.BoilermakerServiceBusError(logmsg) from sb_exc
         return None
 
     @staticmethod
@@ -135,14 +154,14 @@ class MessageActions:
                 f"exc_info={traceback.format_exc()}"
             )
             logger.error(logmsg)
-            raise exc.BoilermakerTaskLeaseLost(msg) from None
+            raise exc.BoilermakerTaskLeaseLost(logmsg) from None
         except ServiceBusError as sb_exc:
-            logmsg = (
+            sb_logmsg = (
                 f"ServiceBusError deadlettering message sequence_number={msg.sequence_number} "
                 f"exc_info={traceback.format_exc()}"
             )
-            logger.error(logmsg)
-            raise exc.BoilermakerServiceBusError(msg) from sb_exc
+            logger.error(sb_logmsg)
+            raise exc.BoilermakerServiceBusError(sb_logmsg) from sb_exc
 
     @staticmethod
     async def renew_message_lock(
@@ -184,7 +203,9 @@ class MessageActions:
     ):
         """Deadletter or complete the current task based on its configuration."""
         if task.msg is None:
-            logger.warning("No current message to settle for deadletter_or_complete_task")
+            logger.warning(
+                "No current message to settle for deadletter_or_complete_task"
+            )
             return None
 
         if task.should_dead_letter:
@@ -192,14 +213,15 @@ class MessageActions:
                 task.msg,
                 receiver,
                 reason=reason,
-                error_description=detail or "Task failed",
+                error_description=str(detail) if detail else "Task failed",
             )
         else:
             await cls.complete_message(task.msg, receiver)
         return None
 
 
-class MessageHandler:
+# Base class for Task Evaluation
+class TaskEvaluatorBase:
     """
     Handles messages from the service bus.
     This is a base class to be extended by specific evaluators.
@@ -211,8 +233,8 @@ class MessageHandler:
         self,
         receiver: ServiceBusReceiver,
         task: Task,
-        task_publisher: Callable[[Task], Awaitable[None]],
-        function_registry: dict[str, TaskHandler],
+        task_publisher: TaskPublisher,
+        function_registry: TaskHandlerRegistry,
         state: typing.Any | None = None,
         storage_interface: StorageInterface | None = None,
     ):
@@ -249,14 +271,24 @@ class MessageHandler:
 
     # Message handling actions
     async def abandon_current_message(self) -> None:
-        return await MessageActions.abandon_message(self.current_msg, self._receiver)
+        if self.current_msg is not None:
+            return await MessageActions.abandon_message(
+                self.current_msg, self._receiver
+            )
 
     async def complete_message(self) -> None:
-        return await MessageActions.complete_message(self.current_msg, self._receiver)
+        if self.current_msg is not None:
+            return await MessageActions.complete_message(
+                self.current_msg, self._receiver
+            )
 
     async def renew_message_lock(self) -> datetime.datetime | None:
         """Renew the lock on the current message being processed."""
-        return await MessageActions.renew_message_lock(self.current_msg, self._receiver)
+        if self.current_msg is not None:
+            return await MessageActions.renew_message_lock(
+                self.current_msg, self._receiver
+            )
+        return None
 
     async def deadletter_or_complete_task(
         self,
@@ -271,10 +303,8 @@ class MessageHandler:
         """Call pre-processing hook and then `message_handler`."""
 
         try:
-            result = await self.pre_process()
-            if isinstance(result, TaskResult):
-                return result
-        except exc.BoilermakerExpectionFailed:
+            await self.pre_process()
+        except exc.BoilermakerUnregisteredFunction:
             await self.deadletter_or_complete_task(
                 "ExpectationFailed", detail="Pre-processing expectation failed"
             )
@@ -287,7 +317,9 @@ class MessageHandler:
             )
         except Exception:
             logger.error("Exception in pre_process", exc_info=True)
-            await self.deadletter_or_complete_task("ProcessingError", detail="Pre-processing exception")
+            await self.deadletter_or_complete_task(
+                "ProcessingError", detail="Pre-processing exception"
+            )
             return TaskResult(
                 task_id=self.task.task_id,
                 graph_id=self.task.graph_id,
@@ -307,101 +339,13 @@ class MessageHandler:
             await sample.debug_task(self.state)
             try:
                 await self.complete_message()
-                status = TaskStatus.Success
             except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                 msg = f"Lost message lease when trying to complete early for task {self.task.function_name}"
                 logger.error(msg)
-                status = TaskStatus.Failure
-            return TaskResult(
-                task_id=self.task.task_id,
-                graph_id=self.task.graph_id,
-                result=0,
-                status=status,
-                errors=[] if status == TaskStatus.Success else [msg],
-            )
+            # Early return - don't create TaskResult here as caller handles it
+            return
 
         if not self.function_registry.get(self.task.function_name):
-            raise exc.BoilermakerExpectionFailed(f"Missing registered function {self.task.function_name}")
-
-    async def task_handler(self) -> TaskResult:
-        """
-        Dynamically look up function requested and then evaluate it.
-
-        Wrap results in TaskResult. If callers return the special TaskFailureResult,
-        store result as a failure result with no actual result data.
-
-        Note: special case for `sample.debug_task` which returns 0 and does not log.
-
-        Returns:
-            TaskResult instance or 0 for `sample.debug_task`.
-        Raises:
-            ValueError: If the function is not found in the registry.
-        """
-        start = time.monotonic()
-        function = self.function_registry.get(self.task.function_name)
-
-        # Look up function associated with the task
-        logger.info(f"[{self.task.function_name}] Begin Task {self.sequence_number=}")
-
-        try:
-            result = await function(
-                self.state,
-                *self.task.payload["args"],
-                **self.task.payload["kwargs"],
+            raise exc.BoilermakerUnregisteredFunction(
+                f"Missing registered function {self.task.function_name}"
             )
-            # Check if result is TaskFailureResult (special failure case)
-            if result is TaskFailureResult:
-                # Store as failure result (no actual result data to store)
-                task_result = TaskResult(
-                    task_id=self.task.task_id,
-                    graph_id=self.task.graph_id,
-                    result=None,  # No result data for failures
-                    status=TaskStatus.Failure,
-                    errors=["Task returned TaskFailureResult"],
-                )
-                logger.warning(
-                    f"[{self.task.function_name}] Task {self.sequence_number=} "
-                    f"returned TaskFailureResult in {time.monotonic() - start:.3f}s"
-                )
-            else:
-                # Create success result
-                task_result = TaskResult(
-                    task_id=self.task.task_id,
-                    graph_id=self.task.graph_id,
-                    result=result,
-                    status=TaskStatus.Success,
-                )
-                logger.info(
-                    f"[{self.task.function_name}] Completed Task {self.sequence_number=} "
-                    f"in {time.monotonic() - start:.3f}s"
-                )
-        except RetryException as retry:
-            # A retry has been requested:
-            # Calculate next delay and publish retry.
-            # Do not run on_failure run until after retries exhausted!
-            # The `retry` RetryException may have a policy -> What if it's different from the Task?
-            if retry.policy and retry.policy != self.task.policy:
-                # This will publish the *next* instance of the task using *this* policy
-                self.task.policy = retry.policy
-                logger.warning(f"Task policy updated to retry policy {retry.policy}")
-
-            task_result = TaskResult(
-                task_id=self.task.task_id,
-                graph_id=self.task.graph_id,
-                status=TaskStatus.Retry,
-                errors=[retry.msg],
-                formatted_exception=traceback.format_exc(),
-            )
-        except Exception as exc:
-            # Some other exception has been thrown
-            err_msg = f"Exception in task sequence_number={self.sequence_number} {traceback.format_exc()}"
-            logger.error(err_msg)
-            task_result = TaskResult(
-                task_id=self.task.task_id,
-                graph_id=self.task.graph_id,
-                status=TaskStatus.Failure,
-                errors=[str(exc)],
-                formatted_exception=traceback.format_exc(),
-            )
-
-        return task_result

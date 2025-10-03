@@ -15,7 +15,8 @@ from functools import wraps
 from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender  # type: ignore
 from anyio import create_task_group, open_signal_receiver
 from anyio.abc import CancelScope
-from azure.servicebus import ServiceBusReceivedMessage, ServiceBusReceiver
+from azure.servicebus import ServiceBusReceivedMessage
+from azure.servicebus.aio import ServiceBusReceiver
 from azure.servicebus.exceptions import (
     ServiceBusAuthenticationError,
     ServiceBusAuthorizationError,
@@ -25,12 +26,18 @@ from azure.servicebus.exceptions import (
 from opentelemetry import trace
 
 from . import tracing
-from .evaluators import evaluator_factory, MessageActions, MessageHandler
+from .evaluators import (
+    evaluator_factory,
+    MessageActions,
+    TaskEvaluatorBase,
+    TaskHandler,
+    TaskHandlerRegistry,
+    TaskPublisher,
+)
 from .exc import BoilermakerAppException, BoilermakerStorageError
 from .retries import RetryPolicy
 from .storage import StorageInterface
-from .task import Task, TaskGraph
-from .types import TaskHandler
+from .task import Task, TaskGraph, TaskId
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
@@ -78,7 +85,6 @@ class Boilermaker:
         service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender = None,
         enable_opentelemetry: bool = False,
         results_storage: StorageInterface | None = None,
-        delete_successful_graphs: bool = False,
     ):
         # This is likely going to be circular, the app referencing
         # the worker as well. Opt for weakrefs for improved mem safety.
@@ -87,10 +93,9 @@ class Boilermaker:
         self.otel_enabled = enable_opentelemetry
         self.results_storage = results_storage
         # Callables and Tasks
-        self.function_registry: dict[str, typing.Any] = {}
+        self.function_registry: TaskHandlerRegistry = {}
         self.task_registry: dict[str, Task] = {}
-        self._message_evaluators: dict[int, MessageHandler] = {}
-        self.delete_successful_graphs = delete_successful_graphs
+        self._message_evaluators: dict[TaskId, TaskEvaluatorBase] = {}
 
     # ~~ ** Task Registration and Publishing ** ~~
     def task(self, **options):
@@ -264,7 +269,8 @@ class Boilermaker:
             >>> await app.apply_async(cleanup_temp_files, delay=300)
         """
         task = self.create_task(fn, *args, policy=policy, **kwargs)
-        return await self.publish_task(task, delay=delay, publish_attempts=publish_attempts)
+        await self.publish_task(task, delay=delay, publish_attempts=publish_attempts)
+        return task
 
     def chain(self, *tasks: Task, on_failure: Task | None = None) -> Task:
         """Chain multiple tasks to run sequentially on success.
@@ -318,7 +324,7 @@ class Boilermaker:
         task: Task,
         delay: int = 0,
         publish_attempts: int = 1,
-    ) -> Task:
+    ) -> int | None:
         """Publish a task to the Azure Service Bus queue.
 
         Serializes the task to JSON and sends it to the configured queue.
@@ -330,7 +336,7 @@ class Boilermaker:
             publish_attempts: Number of retry attempts for publishing (default: 1)
 
         Returns:
-            Task: The same task with sequence_number populated
+            int | None: The sequence number of the published task, or None if publishing failed
 
         Raises:
             BoilermakerAppException: If publishing fails after all attempts
@@ -338,7 +344,7 @@ class Boilermaker:
         Example:
             >>> task = app.create_task(my_function, "arg1", kwarg="value")
             >>> published = await app.publish_task(task, delay=60)  # 1 minute delay
-            >>> print(f"Published with sequence: {published._sequence_number}")
+            >>> print(f"Published with sequence: {published.sequence_number}")
         """
         encountered_errors = []
         for _i in range(publish_attempts):
@@ -348,8 +354,8 @@ class Boilermaker:
                     delay=delay,
                 )
                 if result and len(result) > 0:
-                    task._sequence_number = result[0]
-                return task
+                    return result[0]
+                return None
             except (
                 ServiceBusError,
                 ServiceBusConnectionError,
@@ -378,7 +384,7 @@ class Boilermaker:
         if not self.results_storage:
             raise BoilermakerAppException("Results storage is required for TaskGraph workflows", [])
 
-        # Set graph_id for all tasks in the graph
+        # Validate graph_id for all tasks in the graph
         for task in graph.children.values():
             if task.graph_id != graph.graph_id:
                 raise BoilermakerAppException(
@@ -386,7 +392,8 @@ class Boilermaker:
                     [f"Expected graph_id={graph.graph_id}, found {task.graph_id=}"],
                 )
 
-        # Store the graph definition
+        # Store the graph definition and all pending task results
+        # If this graph has already been stored, this should fail.
         try:
             await self.results_storage.store_graph(graph)
         except BoilermakerStorageError as exc:
@@ -493,15 +500,14 @@ class Boilermaker:
             evaluator = evaluator_factory(
                 receiver,
                 task,
-                self.publish_task,
+                typing.cast(TaskPublisher, self.publish_task),
                 self.function_registry,
                 state=self.state,
                 storage_interface=self.results_storage,
-                delete_successful_graphs=self.delete_successful_graphs,
             )
-            self._message_evaluators[task.sequence_number] = evaluator
+            self._message_evaluators[task.task_id] = evaluator
             await evaluator()
-            del self._message_evaluators[task.sequence_number]
+            del self._message_evaluators[task.task_id]
 
     async def close(self):
         """Close any open connections to Azure Service Bus."""

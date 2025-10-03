@@ -214,16 +214,16 @@ def test_task_result_slim_paths():
         task_id=task_id, graph_id=graph_id, status=task.TaskStatus.Success
     )
 
-    assert result.directory_path() == Path(graph_id)
-    assert result.storage_path() == Path(graph_id) / "test-task-id.json"
+    assert result.directory_path == Path(graph_id)
+    assert result.storage_path == Path(graph_id) / "test-task-id.json"
 
     # Without graph_id
     result_no_graph = task.TaskResultSlim(
         task_id=task_id, status=task.TaskStatus.Success
     )
 
-    assert result_no_graph.directory_path() == Path(task_id)
-    assert result_no_graph.storage_path() == Path(task_id) / "test-task-id.json"
+    assert result_no_graph.directory_path == Path(task_id)
+    assert result_no_graph.storage_path == Path(task_id) / "test-task-id.json"
 
 
 def test_task_result():

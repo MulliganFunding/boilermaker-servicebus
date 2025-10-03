@@ -10,33 +10,10 @@ from azure.servicebus.exceptions import (
     ServiceBusError,
     SessionLockLostError,
 )
-from boilermaker import exc
-from boilermaker.app import Boilermaker
+from boilermaker import exc, sample
 from boilermaker.evaluators import NoStorageEvaluator
-from boilermaker.evaluators.common import MessageActions, MessageHandler
+from boilermaker.evaluators.common import MessageActions, TaskEvaluatorBase
 from boilermaker.task import Task
-
-
-class State:
-    def __init__(self, inner):
-        self.inner = inner
-
-    def __getitem__(self, key):
-        return self.inner[key]
-
-
-DEFAULT_STATE = State({"somekey": "somevalue"})
-
-
-def make_message(task, sequence_number: int = 123):
-    # Example taken from:
-    # azure-sdk-for-python/blob/main/sdk/servicebus/azure-servicebus/tests/test_message.py#L233
-    my_frame = [0, 0, 0]
-    amqp_received_message = Message(
-        data=[task.model_dump_json().encode("utf-8")],
-        message_annotations={SEQUENCENUBMERNAME: sequence_number},
-    )
-    return ServiceBusReceivedMessage(amqp_received_message, receiver=None, frame=my_frame)
 
 
 def make_garbage_message(sequence_number: int = 456):
@@ -50,12 +27,7 @@ def make_garbage_message(sequence_number: int = 456):
 
 
 @pytest.fixture
-def app(sbus):
-    return Boilermaker(DEFAULT_STATE, sbus)
-
-
-@pytest.fixture
-def dummy_msg():
+def dummy_msg(make_message):
     """Create a basic ServiceBusReceivedMessage for testing."""
     return make_message(Task.default("test_function"), sequence_number=789)
 
@@ -68,12 +40,26 @@ def dummy_task(dummy_msg):
     return task
 
 
+@pytest.fixture
+def no_storage_evaluator(dummy_task, mockservicebus, state):
+    mock_task_publisher = AsyncMock()
+    function_registry = {"test_function": AsyncMock()}
+
+    return NoStorageEvaluator(
+        receiver=mockservicebus._receiver,
+        task=dummy_task,
+        task_publisher=mock_task_publisher,
+        function_registry=function_registry,
+        state=state,
+    )
+
+
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # MessageActions Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 
-async def test_task_decoder_valid_json(dummy_task, mockservicebus):
+async def test_task_decoder_valid_json(dummy_task, mockservicebus, make_message):
     """Test that task_decoder successfully decodes valid Task messages."""
     msg = make_message(dummy_task)
 
@@ -100,21 +86,12 @@ async def test_task_decoder_invalid_json(mockservicebus):
 
 
 # Tests moved from test_base.py that test MessageHandler functionality
-async def test_message_handler_complete_message_integration(mockservicebus, dummy_task):
+async def test_message_handler_complete_message_integration(
+    mockservicebus, dummy_task, no_storage_evaluator
+):
     """Test that MessageHandler complete_message works through NoStorageEvaluator interface."""
 
-    mock_task_publisher = AsyncMock()
-    function_registry = {"test_function": AsyncMock()}
-
-    evaluator = NoStorageEvaluator(
-        receiver=mockservicebus._receiver,
-        task=dummy_task,
-        task_publisher=mock_task_publisher,
-        function_registry=function_registry,
-        state=DEFAULT_STATE,
-    )
-
-    await evaluator.complete_message()
+    await no_storage_evaluator.complete_message()
 
     mockservicebus._receiver.complete_message.assert_called_once_with(dummy_task.msg)
 
@@ -128,52 +105,32 @@ async def test_message_handler_complete_message_integration(mockservicebus, dumm
     ],
 )
 async def test_message_handler_complete_message_with_error_integration(
-    side_effect, wrapped_exc, mockservicebus, dummy_task
+    side_effect, wrapped_exc, mockservicebus, dummy_task, no_storage_evaluator
 ):
     """Test that MessageHandler complete_message wraps appropriate errors through NoStorageEvaluator."""
-
-    mock_task_publisher = AsyncMock()
-    function_registry = {"test_function": AsyncMock()}
-
-    evaluator = NoStorageEvaluator(
-        receiver=mockservicebus._receiver,
-        task=dummy_task,
-        task_publisher=mock_task_publisher,
-        function_registry=function_registry,
-        state=DEFAULT_STATE,
-    )
 
     mockservicebus._receiver.complete_message.side_effect = side_effect
 
     # Should raise wrapped exception if applicable, otherwise original
     if wrapped_exc is not None:
         with pytest.raises(wrapped_exc):
-            await evaluator.complete_message()
+            await no_storage_evaluator.complete_message()
     else:
         with pytest.raises(side_effect.__class__):
-            await evaluator.complete_message()
+            await no_storage_evaluator.complete_message()
 
     mockservicebus._receiver.complete_message.assert_called_once_with(dummy_task.msg)
 
 
-async def test_message_handler_renew_message_lock_integration(mockservicebus, dummy_task):
+async def test_message_handler_renew_message_lock_integration(
+    mockservicebus, dummy_task, state, no_storage_evaluator
+):
     """Test that MessageHandler renew_message_lock works through NoStorageEvaluator interface."""
-
-    mock_task_publisher = AsyncMock()
-    function_registry = {"test_function": AsyncMock()}
-
-    evaluator = NoStorageEvaluator(
-        receiver=mockservicebus._receiver,
-        task=dummy_task,
-        task_publisher=mock_task_publisher,
-        function_registry=function_registry,
-        state=DEFAULT_STATE,
-    )
 
     expected_time = Mock()
     mockservicebus._receiver.renew_message_lock.return_value = expected_time
 
-    result = await evaluator.renew_message_lock()
+    result = await no_storage_evaluator.renew_message_lock()
 
     mockservicebus._receiver.renew_message_lock.assert_called_once_with(dummy_task.msg)
     assert result is expected_time
@@ -188,65 +145,45 @@ async def test_message_handler_renew_message_lock_integration(mockservicebus, du
     ],
 )
 async def test_message_handler_renew_message_lock_errors_integration(
-    side_effect, wrapped_exc, mockservicebus, dummy_task
+    side_effect, wrapped_exc, mockservicebus, dummy_task, no_storage_evaluator
 ):
     """Test that MessageHandler renew_message_lock handles errors through NoStorageEvaluator."""
-
-    mock_task_publisher = AsyncMock()
-    function_registry = {"test_function": AsyncMock()}
-
-    evaluator = NoStorageEvaluator(
-        receiver=mockservicebus._receiver,
-        task=dummy_task,
-        task_publisher=mock_task_publisher,
-        function_registry=function_registry,
-        state=DEFAULT_STATE,
-    )
 
     mockservicebus._receiver.renew_message_lock.side_effect = side_effect
 
     if wrapped_exc is not None:
         with pytest.raises(wrapped_exc):
-            await evaluator.renew_message_lock()
+            await no_storage_evaluator.renew_message_lock()
     else:
         with pytest.raises(side_effect.__class__):
-            await evaluator.renew_message_lock()
+            await no_storage_evaluator.renew_message_lock()
 
     mockservicebus._receiver.renew_message_lock.assert_called_once_with(dummy_task.msg)
 
 
-async def test_message_handler_renew_message_lock_missing_integration(mockservicebus, dummy_task):
+async def test_message_handler_renew_message_lock_missing_integration(
+    mockservicebus, dummy_task, no_storage_evaluator
+):
     """
     Test that MessageHandler renew_message_lock handles
     missing receiver/message through NoStorageEvaluator.
     """
 
-    mock_task_publisher = AsyncMock()
-    function_registry = {"test_function": AsyncMock()}
-
-    evaluator = NoStorageEvaluator(
-        receiver=mockservicebus._receiver,
-        task=dummy_task,
-        task_publisher=mock_task_publisher,
-        function_registry=function_registry,
-        state=DEFAULT_STATE,
-    )
-
     # Missing receiver
-    evaluator._receiver = None
+    no_storage_evaluator._receiver = None
     # Should log warnings but not raise
-    await evaluator.renew_message_lock()
+    await no_storage_evaluator.renew_message_lock()
 
     msg_ptr = dummy_task.msg
     # Missing message
-    evaluator._receiver = mockservicebus._receiver
-    evaluator.task.msg = None
+    no_storage_evaluator._receiver = mockservicebus._receiver
+    no_storage_evaluator.task.msg = None
     # Should log warnings but not raise
-    await evaluator.renew_message_lock()
+    await no_storage_evaluator.renew_message_lock()
 
     # With the stuff
-    evaluator.task.msg = msg_ptr
-    await evaluator.renew_message_lock()
+    no_storage_evaluator.task.msg = msg_ptr
+    await no_storage_evaluator.renew_message_lock()
     assert mockservicebus._receiver.renew_message_lock.called
 
 
@@ -452,18 +389,15 @@ async def test_deadletter_or_complete_task_complete(mockservicebus, dummy_task):
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 
-class ConcreteMessageHandler(MessageHandler):
+class ConcreteMessageHandler(TaskEvaluatorBase):
     """Concrete implementation of MessageHandler for testing."""
 
     async def message_handler(self):
         return "message_handler_result"
 
-    async def task_handler(self):
-        return "task_handler_result"
-
 
 @pytest.fixture
-def message_handler(dummy_task, mockservicebus):
+def message_handler(dummy_task, mockservicebus, state):
     """Create a MessageHandler instance for testing."""
     mock_task_publisher = AsyncMock()
     function_registry = {"test_function": AsyncMock()}
@@ -473,16 +407,16 @@ def message_handler(dummy_task, mockservicebus):
         task=dummy_task,
         task_publisher=mock_task_publisher,
         function_registry=function_registry,
-        state=DEFAULT_STATE,
+        state=state,
     )
     return handler
 
 
-async def test_message_handler_init(message_handler, dummy_task, mockservicebus):
+async def test_message_handler_init(message_handler, dummy_task, mockservicebus, state):
     """Test MessageHandler initialization."""
     assert message_handler._receiver is mockservicebus._receiver
     assert message_handler.task is dummy_task
-    assert message_handler.state is DEFAULT_STATE
+    assert message_handler.state is state
     assert message_handler.function_registry["test_function"] is not None
 
 
@@ -516,7 +450,9 @@ async def test_message_handler_call_with_pre_process_exception(message_handler, 
     )
 
 
-async def test_message_handler_current_msg_property(message_handler, dummy_task):
+async def test_message_handler_current_msg_property(
+    message_handler, dummy_task, make_message
+):
     """Test MessageHandler current_msg property."""
     # Set a message on the task
     msg = make_message(dummy_task)
@@ -529,7 +465,9 @@ async def test_message_handler_current_msg_property(message_handler, dummy_task)
     assert message_handler.current_msg is msg
 
 
-async def test_message_handler_sequence_number_property(message_handler, dummy_task):
+async def test_message_handler_sequence_number_property(
+    message_handler, dummy_task, make_message
+):
     """Test MessageHandler sequence_number property."""
     # Set sequence number on task
     msg = make_message(dummy_task, sequence_number=123)
@@ -596,8 +534,6 @@ async def test_message_handler_deadletter_or_complete_task(message_handler, mock
 
 async def test_message_handler_pre_process_debug_task_success(message_handler, mockservicebus):
     """Test MessageHandler pre_process handles debug task successfully."""
-    from boilermaker import sample
-
     # Set task to debug task
     message_handler.task.function_name = sample.TASK_NAME
 
@@ -626,8 +562,6 @@ async def test_message_handler_pre_process_debug_task_success(message_handler, m
 
 async def test_message_handler_pre_process_debug_task_lease_lost(message_handler, mockservicebus):
     """Test MessageHandler pre_process handles debug task with message lease lost."""
-    from boilermaker import exc, sample
-
     # Set task to debug task
     message_handler.task.function_name = sample.TASK_NAME
 
@@ -660,8 +594,6 @@ async def test_message_handler_pre_process_debug_task_lease_lost(message_handler
 
 async def test_message_handler_pre_process_debug_task_service_bus_error(message_handler, mockservicebus):
     """Test MessageHandler pre_process handles debug task with service bus error."""
-    from boilermaker import exc, sample
-
     # Set task to debug task
     message_handler.task.function_name = sample.TASK_NAME
 
@@ -696,12 +628,10 @@ async def test_message_handler_pre_process_debug_task_service_bus_error(message_
 
 async def test_message_handler_pre_process_missing_function(message_handler):
     """Test MessageHandler pre_process raises exception for missing function."""
-    from boilermaker import exc
-
     # Set task to non-existent function
     message_handler.task.function_name = "non_existent_function"
 
-    with pytest.raises(exc.BoilermakerExpectionFailed) as exc_info:
+    with pytest.raises(exc.BoilermakerUnregisteredFunction) as exc_info:
         await message_handler.pre_process()
 
     assert "Missing registered function non_existent_function" in str(exc_info.value)

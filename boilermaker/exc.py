@@ -4,7 +4,6 @@ from azure.servicebus.exceptions import ServiceBusError
 class BoilermakerAppException(Exception):
     def __init__(self, message: str, errors: list):
         super().__init__(message + str(errors))
-
         self.errors = errors
 
 
@@ -15,17 +14,9 @@ class BoilermakerStorageError(Exception):
         super().__init__(message)
         self.details = kwargs or {}
 
-    @property
-    def reason(self) -> str | None:
-        return self.details.get("reason")
 
-    @property
-    def status_code(self) -> int | None:
-        return self.details.get("status_code")
-
-
-class BoilermakerExpectionFailed(Exception):
-    """Custom exception indicating that a task's expectation has failed."""
+class BoilermakerUnregisteredFunction(ValueError):
+    """Custom exception indicating that an unregistered function was called."""
 
     pass
 

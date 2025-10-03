@@ -111,6 +111,10 @@ class Task(BaseModel):
             policy = kwargs.pop("policy")
         if "payload" in kwargs:
             payload = kwargs.pop("payload")
+            if "args" not in payload:
+                payload["args"] = []
+            if "kwargs" not in payload:
+                payload["kwargs"] = {}
         else:
             payload = {}
         return cls(
@@ -353,6 +357,7 @@ class TaskResultSlim(BaseModel):
         """
         return TaskResultSlim(task_id=task_id, graph_id=graph_id, status=TaskStatus.default())
 
+    @property
     def directory_path(self) -> Path:
         """Returns the directory path for storing this task result.
 
@@ -365,6 +370,7 @@ class TaskResultSlim(BaseModel):
             return Path(self.graph_id)
         return Path(self.task_id)
 
+    @property
     def storage_path(self) -> Path:
         """Returns the storage path for this task result.
 
@@ -373,7 +379,7 @@ class TaskResultSlim(BaseModel):
         Returns:
             A string representing the storage path.
         """
-        directory = self.directory_path()
+        directory = self.directory_path
         return directory / f"{self.task_id}.json"
 
 
@@ -450,7 +456,9 @@ class TaskGraph(BaseModel):
     # Children is a mapping of task IDs to tasks
     children: dict[TaskId, Task] = Field(default_factory=dict)
     # Edges is a mapping of parent task IDs to sets of child task IDs
-    edges: dict[TaskId, set[TaskId]] = Field(default_factory=lambda: defaultdict(set))
+    edges: dict[TaskId, set[TaskId]] = Field(
+        default_factory=lambda: defaultdict(set[TaskId])
+    )
 
     # Task results go here; these get loaded from JSON files on deserialization.
     # We do not write these back because we write only one time: when first publishing this TaskGraph.
@@ -587,21 +595,23 @@ class TaskGraph(BaseModel):
         """Get the result of a completed task."""
         return self.results.get(task_id)
 
-    def get_status(self, task_id: str) -> TaskStatus | None:
+    def get_status(self, task_id: TaskId) -> TaskStatus | None:
         """Check if a task is completed."""
-        tr = self.get_result(task_id)
-        if tr is None:
-            return None
-        return tr.status
+        if tr := self.get_result(task_id):
+            return tr.status
+        return None
 
     def generate_pending_results(self) -> typing.Generator[TaskResultSlim]:
-        """Generate pending TaskResultSlim entries for all tasks."""
+        """
+        Generate pending TaskResultSlim entries for all tasks.
+        """
         for task_id in self.children.keys():
-            yield TaskResultSlim(
-                task_id=task_id,
-                graph_id=self.graph_id,
-                status=TaskStatus.Pending,
-            )
+            if self.get_result(task_id) is None:
+                yield TaskResultSlim(
+                    task_id=task_id,
+                    graph_id=self.graph_id,
+                    status=TaskStatus.Pending,
+                )
 
     def completed_successfully(self) -> bool:
         """Check if all tasks in the graph have completed successfully."""

@@ -487,7 +487,7 @@ async def test_publish_graph_happy_path(app, mockservicebus, mock_storage):
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 async def test_publish_task_sets_sequence_number(app, mockservicebus):
-    """Test that publish_task sets the sequence number after publishing."""
+    """Test that publish_task return  the sequence number after publishing."""
 
     async def somefunc(state):
         return state["somekey"]
@@ -498,8 +498,8 @@ async def test_publish_task_sets_sequence_number(app, mockservicebus):
     mockservicebus._sender.send_message.return_value = [456]
     app.service_bus_client = mockservicebus._sender
 
-    published_task = await app.publish_task(task)
-    assert published_task._sequence_number == 456
+    assert await app.publish_task(task) == 456
+    assert mockservicebus._sender.send_message.call_count == 1
 
 
 async def test_publish_task_error_handling(app, mockservicebus):

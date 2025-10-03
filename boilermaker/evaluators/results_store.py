@@ -1,28 +1,27 @@
 import logging
 import typing
-from collections.abc import Awaitable, Callable
 
 from azure.servicebus.aio import ServiceBusReceiver
 
 from boilermaker import exc
 from boilermaker.storage import StorageInterface
 from boilermaker.task import Task, TaskResult, TaskStatus
-from boilermaker.types import TaskHandler
 
-from .common import MessageHandler
+from .common import TaskEvaluatorBase, TaskHandlerRegistry, TaskPublisher
+from .eval import eval_task
 
 logger = logging.getLogger("boilermaker.app")
 
 
-class ResultsStorageTaskEvaluator(MessageHandler):
+class ResultsStorageTaskEvaluator(TaskEvaluatorBase):
     """Evaluator for standalone tasks (not part of TaskGraph) that stores results."""
 
     def __init__(
         self,
         receiver: ServiceBusReceiver,
         task: Task,
-        task_publisher: Callable[[Task], Awaitable[None]],
-        function_registry: dict[str, TaskHandler],
+        task_publisher: TaskPublisher,
+        function_registry: TaskHandlerRegistry,
         state: typing.Any | None = None,
         storage_interface: StorageInterface | None = None,
     ):
@@ -37,6 +36,8 @@ class ResultsStorageTaskEvaluator(MessageHandler):
             state=state,
             storage_interface=storage_interface,
         )
+        # Override type to indicate storage_interface is never None after validation
+        self.storage_interface: StorageInterface = storage_interface
 
     # The main message handler
     async def message_handler(self) -> TaskResult:
@@ -63,10 +64,20 @@ class ResultsStorageTaskEvaluator(MessageHandler):
                 logger.error(
                     f"Lost message lease when trying to complete early for task {self.task.function_name}"
                 )
-                return None
+                return TaskResult(
+                    task_id=self.task.task_id,
+                    graph_id=self.task.graph_id,
+                    status=TaskStatus.Failure,
+                    errors=["Lost message lease"],
+                )
             except exc.BoilermakerServiceBusError:
                 logger.error("Unknown ServiceBusError", exc_info=True)
-                return None
+                return TaskResult(
+                    task_id=self.task.task_id,
+                    graph_id=self.task.graph_id,
+                    status=TaskStatus.Failure,
+                    errors=["ServiceBus error"],
+                )
 
         if not self.task.can_retry:
             logger.error(f"Retries exhausted for event {self.task.function_name}")
@@ -79,10 +90,20 @@ class ResultsStorageTaskEvaluator(MessageHandler):
                         f"Lost message lease when trying to deadletter/complete "
                         f" for task {self.task.function_name}"
                     )
-                    return None
+                    return TaskResult(
+                        task_id=self.task.task_id,
+                        graph_id=self.task.graph_id,
+                        status=TaskStatus.Failure,
+                        errors=["Lost message lease during retry exhaustion"],
+                    )
                 except exc.BoilermakerServiceBusError:
                     logger.error("Unknown ServiceBusError", exc_info=True)
-                    return None
+                    return TaskResult(
+                        task_id=self.task.task_id,
+                        graph_id=self.task.graph_id,
+                        status=TaskStatus.Failure,
+                        errors=["ServiceBus error during retry exhaustion"],
+                    )
 
             # This task is a failure because it did not succeed and retries are exhausted
             if self.task.on_failure is not None:
@@ -98,7 +119,11 @@ class ResultsStorageTaskEvaluator(MessageHandler):
             return task_result
 
         # Actually invoke the task here
-        result: TaskResult = await self.task_handler()
+        result: TaskResult = await eval_task(
+            self.task,
+            self.function_registry,
+            self.state,
+        )
         await self.storage_interface.store_task_result(result)
 
         if result.status == TaskStatus.Success and self.task.on_success is not None:
