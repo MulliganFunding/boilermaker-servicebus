@@ -76,6 +76,8 @@ class Task(BaseModel):
 
     # Can set this once we receive the message
     _msg: ServiceBusReceivedMessage | None = None
+    # After publishing, we can set this to the sequence number
+    _sequence_number: int | None = None
 
     # If this task is a member of a TaskGraph, this will identify the root node.
     graph_id: GraphId | None = None
@@ -145,6 +147,8 @@ class Task(BaseModel):
         """
         if self._msg:
             return self._msg.sequence_number
+        if self._sequence_number:
+            return self._sequence_number
         return None
 
     @property
@@ -184,6 +188,14 @@ class Task(BaseModel):
                   the maximum tries allowed by the retry policy
         """
         return self.attempts.attempts <= self.policy.max_tries
+
+    def mark_published(self, sequence_number: int) -> None:
+        """Mark the task as published by setting the sequence number.
+
+        Args:
+            sequence_number: The Service Bus sequence number assigned upon publishing
+        """
+        self._sequence_number = sequence_number
 
     def get_next_delay(self):
         """Calculate the delay before the next retry attempt.

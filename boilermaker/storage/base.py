@@ -23,7 +23,7 @@ class StorageInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def store_graph(self, graph: TaskGraph) -> None:
+    async def store_graph(self, graph: TaskGraph) -> TaskGraph:
         """
         Stores a TaskGraph to storage.
 

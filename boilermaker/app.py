@@ -82,7 +82,7 @@ class Boilermaker:
     def __init__(
         self,
         state: typing.Any,
-        service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender = None,
+        service_bus_client: AzureServiceBus | ManagedAzureServiceBusSender,
         enable_opentelemetry: bool = False,
         results_storage: StorageInterface | None = None,
     ):
@@ -225,53 +225,6 @@ class Boilermaker:
 
         return task
 
-    async def apply_async(
-        self,
-        fn: TaskHandler,
-        *args,
-        delay: int = 0,
-        publish_attempts: int = 1,
-        policy: RetryPolicy | None = None,
-        **kwargs,
-    ) -> Task:
-        """Schedule a task for background execution.
-
-        Creates a task and immediately publishes it to the Azure Service Bus queue.
-        This is the most common way to schedule background work.
-
-        Args:
-            fn: Registered async function to execute
-            *args: Positional arguments for the function
-            delay: Seconds to delay before task becomes visible (default: 0)
-            publish_attempts: Retry attempts for publishing failures (default: 1)
-            policy: Override retry policy for this task instance
-            **kwargs: Keyword arguments for the function
-
-        Returns:
-            Task: The published task with sequence_number set
-
-        Raises:
-            BoilermakerAppException: If publishing fails after all attempts
-            ValueError: If function is not registered
-
-        Example:
-            >>> # Simple task scheduling
-            >>> await app.apply_async(send_email, "user@example.com")
-            >>>
-            >>> # With custom retry policy
-            >>> await app.apply_async(
-            >>>     process_image,
-            >>>     image_url="https://example.com/image.jpg",
-            >>>     policy=retries.RetryPolicy(max_tries=3)
-            >>> )
-            >>>
-            >>> # Delayed execution (5 minutes)
-            >>> await app.apply_async(cleanup_temp_files, delay=300)
-        """
-        task = self.create_task(fn, *args, policy=policy, **kwargs)
-        await self.publish_task(task, delay=delay, publish_attempts=publish_attempts)
-        return task
-
     def chain(self, *tasks: Task, on_failure: Task | None = None) -> Task:
         """Chain multiple tasks to run sequentially on success.
 
@@ -318,13 +271,61 @@ class Boilermaker:
 
         return task1
 
+    async def apply_async(
+        self,
+        fn: TaskHandler,
+        *args,
+        delay: int = 0,
+        publish_attempts: int = 1,
+        policy: RetryPolicy | None = None,
+        **kwargs,
+    ) -> Task:
+        """Schedule a task for background execution.
+
+        Creates a task and immediately publishes it to the Azure Service Bus queue.
+        This is the most common way to schedule background work.
+
+        Args:
+            fn: Registered async function to execute
+            *args: Positional arguments for the function
+            delay: Seconds to delay before task becomes visible (default: 0)
+            publish_attempts: Retry attempts for publishing failures (default: 1)
+            policy: Override retry policy for this task instance
+            **kwargs: Keyword arguments for the function
+
+        Returns:
+            Task: The published task
+
+        Raises:
+            BoilermakerAppException: If publishing fails after all attempts
+            ValueError: If function is not registered
+
+        Example:
+            >>> # Simple task scheduling
+            >>> await app.apply_async(send_email, "user@example.com")
+            >>>
+            >>> # With custom retry policy
+            >>> await app.apply_async(
+            >>>     process_image,
+            >>>     image_url="https://example.com/image.jpg",
+            >>>     policy=retries.RetryPolicy(max_tries=3)
+            >>> )
+            >>>
+            >>> # Delayed execution (5 minutes)
+            >>> await app.apply_async(cleanup_temp_files, delay=300)
+        """
+        task = self.create_task(fn, *args, policy=policy, **kwargs)
+        return await self.publish_task(
+            task, delay=delay, publish_attempts=publish_attempts
+        )
+
     @tracer.start_as_current_span("boilermaker.publish-task")
     async def publish_task(
         self,
         task: Task,
         delay: int = 0,
         publish_attempts: int = 1,
-    ) -> int | None:
+    ) -> Task:
         """Publish a task to the Azure Service Bus queue.
 
         Serializes the task to JSON and sends it to the configured queue.
@@ -336,7 +337,7 @@ class Boilermaker:
             publish_attempts: Number of retry attempts for publishing (default: 1)
 
         Returns:
-            int | None: The sequence number of the published task, or None if publishing failed
+            Task: The published task instance
 
         Raises:
             BoilermakerAppException: If publishing fails after all attempts
@@ -349,13 +350,18 @@ class Boilermaker:
         encountered_errors = []
         for _i in range(publish_attempts):
             try:
-                result: list[int] = await self.service_bus_client.send_message(
+                results: list[int] = await self.service_bus_client.send_message(
                     task.model_dump_json(),
                     delay=delay,
                 )
-                if result and len(result) > 0:
-                    return result[0]
-                return None
+                if results and len(results) == 1:
+                    sequence_number = results[0]
+                    task.mark_published(sequence_number)
+                    logger.debug(
+                        f"Published task {task.task_id} to queue with sequence_number={sequence_number}"
+                    )
+                return task
+
             except (
                 ServiceBusError,
                 ServiceBusConnectionError,
