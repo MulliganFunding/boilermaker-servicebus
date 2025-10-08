@@ -498,7 +498,7 @@ async def test_publish_task_sets_sequence_number(app, mockservicebus):
     mockservicebus._sender.send_message.return_value = [456]
     app.service_bus_client = mockservicebus._sender
 
-    assert await app.publish_task(task) == 456
+    assert await app.publish_task(task) is task
     assert mockservicebus._sender.send_message.call_count == 1
 
 

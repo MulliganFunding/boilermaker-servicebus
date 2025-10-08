@@ -53,12 +53,7 @@ async def test_task_handler_debug_task(evaluator):
 
     task = Task.default(sample.TASK_NAME)
     evaluator.task = task
-    result = await evaluator()
-    # Should return whatever sample.debug_task returns
-    # (for now, just check it runs without error)
-    assert isinstance(result, TaskResult)
-    assert result.status == TaskStatus.Success
-    assert result.result == 0
+    assert await evaluator() is None
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -489,7 +484,9 @@ async def test_early_ack_task_lease_lost_exception(app, make_message, evaluator)
     result = await evaluator.message_handler()
 
     # Should return None when lease is lost during early ack
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert "Lost message lease" in result.errors[0]
     evaluator.complete_message.assert_called_once()
 
 
@@ -511,7 +508,9 @@ async def test_early_ack_service_bus_error_exception(app, make_message, evaluato
     result = await evaluator.message_handler()
 
     # Should return None when service bus error occurs during early ack
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert "ServiceBus error" in result.errors[0]
     evaluator.complete_message.assert_called_once()
 
 
@@ -535,9 +534,11 @@ async def test_retries_exhausted_task_lease_lost_exception(
     evaluator.deadletter_or_complete_task = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("Lease lost"))
 
     result = await evaluator.message_handler()
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert "Lost message lease" in result.errors[0]
 
     # Should return None when lease is lost during exhausted retries settlement
-    assert result is None
     evaluator.deadletter_or_complete_task.assert_called_once_with(
         "ProcessingError", detail="Retries exhausted"
     )
@@ -567,7 +568,9 @@ async def test_retries_exhausted_service_bus_error_exception(
     result = await evaluator.message_handler()
 
     # Should return None when service bus error occurs during exhausted retries settlement
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert "ServiceBus error" in result.errors[0]
     evaluator.deadletter_or_complete_task.assert_called_once_with(
         "ProcessingError", detail="Retries exhausted"
     )

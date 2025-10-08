@@ -14,6 +14,13 @@ class BoilermakerStorageError(Exception):
         super().__init__(message)
         self.details = kwargs or {}
 
+    def __getattr__(self, item):
+        if self.details.get(item, None):
+            return self.details[item]
+        raise AttributeError(
+            f"BoilermakerStorageError object has no attribute '{item}'"
+        )
+
 
 class BoilermakerUnregisteredFunction(ValueError):
     """Custom exception indicating that an unregistered function was called."""

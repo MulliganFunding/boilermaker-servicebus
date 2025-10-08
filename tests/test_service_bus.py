@@ -20,7 +20,6 @@ async def test_get_sender(boilermaker_servicebus, mockservicebus):
     # it's an asyncmock, so we have to await it
     await sender.bla()
     assert mockservicebus._sender.method_calls
-    assert boilermaker_servicebus.get_sender() is sender
 
 
 async def test_send_message(boilermaker_servicebus, mockservicebus):

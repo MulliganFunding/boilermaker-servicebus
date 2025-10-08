@@ -1,5 +1,7 @@
 import datetime
 import logging
+import traceback
+from functools import partial
 
 from aio_azure_clients_toolbox import AzureBlobStorageClient as MFBlobClient
 from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
@@ -24,7 +26,7 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
     specifically for handling TaskResult objects.
     """
 
-    task_result_prefix = "task-results/"
+    task_result_prefix = "task-results"
 
     def __init__(
         self,
@@ -70,21 +72,14 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
 
         # Load all TaskResultSlim instances associated with this graph
         # We don't want to load *all* return values into memory. Just the statuses.
-        async with self.get_blob_service_client() as blob_service_client:
-            container_client = blob_service_client.get_container_client(
-                self.container_name
-            )
-
-            async for blob in container_client.list_blobs(name_starts_with=graph_dir):
-                tr = TaskResultSlim.model_validate_json(
-                    await self.download_blob(blob.name)
+        async for blob in self.list_blobs(prefix=graph_dir):
+            tr = TaskResultSlim.model_validate_json(await self.download_blob(blob.name))
+            if tr.graph_id == graph_id:
+                graph.results[tr.task_id] = tr
+            else:
+                logger.warning(
+                    f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!"
                 )
-                if tr.graph_id == graph_id:
-                    graph.results[tr.task_id] = tr
-                else:
-                    logger.warning(
-                        f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!"
-                    )
         return graph
 
     async def store_graph(self, graph: TaskGraph) -> TaskGraph:
@@ -138,17 +133,18 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
                         fname_pr = (
                             f"{self.task_result_prefix}/{pending_result.storage_path}"
                         )
-                        tg.start_soon(
+                        uploader = partial(
                             container_client.upload_blob,
                             fname_pr,
                             pending_result.model_dump_json(),
                             **upload_kwargs,
                         )
+                        tg.start_soon(uploader)
             except* Exception as excgroup:
-                for exc in excgroup.exceptions:
-                    logger.error(
-                        f"Error occurred while storing pending TaskResults: {exc}"
-                    )
+                formatted_traceback = traceback.format_exception_only(excgroup)
+                logger.error(
+                    f"Error occurred while storing pending TaskResults:\n {formatted_traceback}"
+                )
                 raise BoilermakerStorageError(
                     f"Failed to store pending TaskResults for graph {graph.graph_id}",
                     task_id=None,

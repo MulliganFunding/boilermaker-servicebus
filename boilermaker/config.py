@@ -1,3 +1,4 @@
+from aio_azure_clients_toolbox.clients import CredentialFactory
 from azure.identity.aio import DefaultAzureCredential
 from pydantic_settings import BaseSettings
 
@@ -38,7 +39,7 @@ class Config(BaseSettings):
     # Service Bus ENV vars
     service_bus_namespace_url: str
     service_bus_queue_name: str
-    service_bus_credential: DefaultAzureCredential | None = None
+    service_bus_credential: CredentialFactory | None = None
 
     def az_credential(self):
         """Create or return Azure credential for Service Bus authentication.

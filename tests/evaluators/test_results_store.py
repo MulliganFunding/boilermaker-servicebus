@@ -581,7 +581,9 @@ async def test_retries_exhausted_settle_lease_lost_exception(app, mockservicebus
     result = await evaluator.message_handler()
 
     # Should return None when lease is lost during retries exhausted settlement
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert "Lost message lease" in result.errors[0]
 
     # Should store started result
     assert mock_storage.store_task_result.call_count == 1
@@ -623,7 +625,9 @@ async def test_retries_exhausted_settle_service_bus_error_exception(
     result = await evaluator.message_handler()
 
     # Should return None when service bus error occurs during retries exhausted settlement
-    assert result is None
+    assert isinstance(result, TaskResult)
+    assert result.status == TaskStatus.Failure
+    assert "ServiceBus error" in result.errors[0]
 
     # Should store started result
     assert mock_storage.store_task_result.call_count == 1
