@@ -3,6 +3,7 @@ import enum
 import logging
 import typing
 from collections import defaultdict
+from collections.abc import Generator
 from functools import cached_property
 from pathlib import Path
 
@@ -592,7 +593,7 @@ class TaskGraph(BaseModel):
         # If we get here, all antecedents succeeded *OR* there are no antecedents.
         return True
 
-    def ready_tasks(self) -> typing.Generator[Task, None, None]:
+    def ready_tasks(self) -> Generator[Task]:
         """Get a list of tasks that are ready to be executed (not started and all antecedents succeeded)."""
         for task_id in self.children.keys():
             # Task is ready if:
@@ -613,7 +614,7 @@ class TaskGraph(BaseModel):
             return tr.status
         return None
 
-    def generate_pending_results(self) -> typing.Generator[TaskResultSlim]:
+    def generate_pending_results(self) -> Generator[TaskResultSlim]:
         """
         Generate pending TaskResultSlim entries for all tasks.
         """

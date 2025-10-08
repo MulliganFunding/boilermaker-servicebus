@@ -19,7 +19,7 @@ jobs:
         tool: just
     - uses: "actions/setup-python@v4"
       with:
-        python-version: "3.12"
+        python-version: "3.13"
     - name: Set up uv
       run: curl -LsSf https://astral.sh/uv/install.sh | sh
     - name: Install pypa/build
