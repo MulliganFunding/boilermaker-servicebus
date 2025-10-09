@@ -285,17 +285,17 @@ def test_task_graph_add_task_with_parent():
     assert t2.graph_id == graph.graph_id
 
 
-def test_task_graph_start_task():
+def test_task_graph_schedule_task():
     graph = task.TaskGraph()
     t1 = task.Task.default("func1")
     graph.add_task(t1)
 
-    result = graph.start_task(t1.task_id)
+    result = graph.schedule_task(t1.task_id)
 
-    assert isinstance(result, task.TaskResultSlim)
+    assert isinstance(result, task.TaskResult)
     assert result.task_id == t1.task_id
     assert result.graph_id == graph.graph_id
-    assert result.status == task.TaskStatus.Started
+    assert result.status == task.TaskStatus.Scheduled
     assert graph.results[t1.task_id] is result
 
 
@@ -304,7 +304,7 @@ def test_task_graph_start_result_invalid_task():
     invalid_task_id = task.TaskId("nonexistent")
 
     try:
-        graph.start_task(invalid_task_id)
+        graph.schedule_task(invalid_task_id)
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
         assert "not found in graph" in str(e)
@@ -422,7 +422,7 @@ def test_task_graph_ready_tasks_excludes_started():
     assert len(ready_tasks) == 1
 
     # Mark as started
-    graph.start_task(t1.task_id)
+    graph.schedule_task(t1.task_id)
 
     # Should no longer be ready
     ready_tasks = list(graph.ready_tasks())

@@ -94,7 +94,6 @@ async def test_store_task_result_success(
     tags = blob_upload_call.kwargs["tags"]
     assert tags["graph_id"] == sample_task_result.graph_id
     assert tags["status"] == sample_task_result.status.value
-    assert "timestamp" in tags
 
 
 async def test_store_task_result_with_azure_blob_error(

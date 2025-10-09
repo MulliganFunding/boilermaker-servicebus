@@ -6,12 +6,14 @@ from functools import partial
 from aio_azure_clients_toolbox import AzureBlobStorageClient as MFBlobClient
 from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
 from anyio import create_task_group
+from azure.core import MatchConditions
 from azure.core.exceptions import (
     HttpResponseError,
     ResourceExistsError,
     ResourceNotFoundError,
 )
 from azure.identity.aio import DefaultAzureCredential
+from azure.storage.blob import ImmutabilityPolicy
 
 from boilermaker.exc import BoilermakerStorageError
 from boilermaker.storage import StorageInterface
@@ -74,6 +76,7 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
         # We don't want to load *all* return values into memory. Just the statuses.
         async for blob in self.list_blobs(prefix=graph_dir):
             tr = TaskResultSlim.model_validate_json(await self.download_blob(blob.name))
+            tr.etag = blob.etag
             if tr.graph_id == graph_id:
                 graph.results[tr.task_id] = tr
             else:
@@ -89,9 +92,12 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
         We use a lease on the container to make sure *only* one task is writing! This means
         that we don't have to worry about concurrent writes causing data corruption.
 
+        We expect the *written graph* to be **immutable** (see the ImmutabilityPolicy below).
+
         Args:
             graph: The TaskGraph instance to store.
         """
+        lease = None
         async with self.get_blob_service_client() as blob_service_client:
             container_client = blob_service_client.get_container_client(
                 self.container_name
@@ -100,6 +106,10 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
             upload_kwargs = {
                 "lease": lease,
                 "blob_type": "BlockBlob",
+                "immutability_policy": ImmutabilityPolicy(
+                    expiry_time=datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(hours=4),
+                    policy_mode="LOCKED",
+                ),
             }
 
             # Store the graph itself first
@@ -142,9 +152,7 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
                         tg.start_soon(uploader)
             except* Exception as excgroup:
                 formatted_traceback = traceback.format_exception_only(excgroup)
-                logger.error(
-                    f"Error occurred while storing pending TaskResults:\n {formatted_traceback}"
-                )
+                logger.error(f"Error occurred while storing pending TaskResults:\n {formatted_traceback}")
                 raise BoilermakerStorageError(
                     f"Failed to store pending TaskResults for graph {graph.graph_id}",
                     task_id=None,
@@ -152,9 +160,12 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
                     status_code=500,
                     reason="Unknown",
                 ) from excgroup
+            finally:
+                if lease is not None:
+                    await lease.release()
         return graph
 
-    async def store_task_result(self, task_result: TaskResult) -> None:
+    async def store_task_result(self, task_result: TaskResult | TaskResultSlim, etag: str | None = None) -> None:
         """Stores a TaskResult to Azure Blob Storage.
 
         Args:
@@ -168,11 +179,15 @@ class BlobClientStorage(MFBlobClient, StorageInterface):
         blob_tags = {
             "graph_id": task_result.graph_id or "none",
             "status": task_result.status,
-            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         }
+        concurrency_kwargs: dict[str, str | int] = {}
+        if etag:
+            concurrency_kwargs["etag"] = etag
+            concurrency_kwargs["if_match"] = MatchConditions.IfNotModified.value
+
         try:
             await self.upload_blob(
-                fname, task_result.model_dump_json(), tags=blob_tags, overwrite=True
+                fname, task_result.model_dump_json(), tags=blob_tags, overwrite=True, **concurrency_kwargs
             )
         except AzureBlobError as exc:
             raise BoilermakerStorageError(

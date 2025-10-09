@@ -1,7 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
 
-from boilermaker.task import GraphId, TaskGraph, TaskResult
+from boilermaker.task import GraphId, TaskGraph, TaskResult, TaskResultSlim
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class StorageInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def store_task_result(self, task_result: TaskResult) -> None:
+    async def store_task_result(self, task_result: TaskResult | TaskResultSlim, etag: str | None = None) -> None:
         """Stores a TaskResult to storage.
 
         Args:

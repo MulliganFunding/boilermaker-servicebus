@@ -80,7 +80,7 @@ src = ["boilermaker", "tests"]
 fix = true
 show-fixes = true
 output-format = "full"
-line-length = 110
+line-length = 120
 
 [tool.ruff.lint]
 select = [

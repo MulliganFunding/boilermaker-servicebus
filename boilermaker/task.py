@@ -323,6 +323,7 @@ class TaskStatus(enum.StrEnum):
     """Enumeration of possible task execution statuses."""
 
     Pending = "pending"
+    Scheduled = "scheduled"
     Started = "started"
     Success = "success"
     Failure = "failure"
@@ -357,6 +358,7 @@ class TaskResultSlim(BaseModel):
         status: Execution status of the task.
     """
 
+    etag: str | None = None
     task_id: TaskId
     graph_id: GraphId | None = None
     status: TaskStatus
@@ -564,12 +566,15 @@ class TaskGraph(BaseModel):
                     f"Adding task {task.task_id} with parent {parent_id} would create a cycle in the DAG"
                 )
 
-    def start_task(self, task_id: TaskId) -> TaskResultSlim:
-        """Mark a task as started to prevent double-scheduling."""
+    def schedule_task(self, task_id: TaskId) -> TaskResult | TaskResultSlim:
+        """Mark a task as scheduled to prevent double-scheduling."""
         if task_id not in self.children:
             raise ValueError(f"Task {task_id} not found in graph")
+        if task_id not in self.results or self.results[task_id].status != TaskStatus.Pending:
+            raise ValueError(f"Task {task_id} is not pending and cannot be scheduled")
 
-        result = TaskResultSlim(task_id=task_id, graph_id=self.graph_id, status=TaskStatus.Started)
+        result = self.results[task_id]
+        result.status = TaskStatus.Scheduled
         self.results[result.task_id] = result
         return result
 

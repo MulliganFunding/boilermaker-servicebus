@@ -1,7 +1,7 @@
 {
   "editor.formatOnSaveMode": "modifications",
   "editor.formatOnSave": true,
-  "ruff.lineLength": 110,
+  "ruff.lineLength": 120,
   "[python]": {
     "editor.defaultFormatter": "charliermarsh.ruff",
     "editor.formatOnSaveMode": "modifications",
