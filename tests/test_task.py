@@ -299,6 +299,17 @@ def test_task_graph_start_task():
     assert graph.results[t1.task_id] is result
 
 
+def test_task_graph_start_result_invalid_task():
+    graph = task.TaskGraph()
+    invalid_task_id = task.TaskId("nonexistent")
+
+    try:
+        graph.start_task(invalid_task_id)
+        raise AssertionError("Should have raised ValueError")
+    except ValueError as e:
+        assert "not found in graph" in str(e)
+
+
 def test_task_graph_add_result():
     graph = task.TaskGraph()
     t1 = task.Task.default("func1")
