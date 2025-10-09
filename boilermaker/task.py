@@ -567,8 +567,7 @@ class TaskGraph(BaseModel):
     def start_task(self, task_id: TaskId) -> TaskResultSlim:
         """Mark a task as started to prevent double-scheduling."""
         result = TaskResultSlim(task_id=task_id, graph_id=self.graph_id, status=TaskStatus.Started)
-        self.results[task_id] = result
-        return result
+        return self.add_result(result)
 
     def add_result(self, result: TaskResult) -> TaskResult:
         """Mark a task as completed with result."""
@@ -617,6 +616,8 @@ class TaskGraph(BaseModel):
     def generate_pending_results(self) -> Generator[TaskResultSlim]:
         """
         Generate pending TaskResultSlim entries for all tasks.
+
+        This should probably only be run when the graph is first created and stored.
         """
         for task_id in self.children.keys():
             if self.get_result(task_id) is None:

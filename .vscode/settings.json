@@ -1,6 +1,10 @@
 {
-  "editor.defaultFormatter": "charliermarsh.ruff",
   "editor.formatOnSaveMode": "modifications",
   "editor.formatOnSave": true,
-  "python-envs.pythonProjects": []
+  "ruff.lineLength": 110,
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSaveMode": "modifications",
+    "editor.formatOnSave": true
+  }
 }
