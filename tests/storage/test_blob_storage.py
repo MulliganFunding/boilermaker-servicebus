@@ -224,22 +224,26 @@ async def test_store_graph_success(mock_azureblob, blob_storage, sample_task_gra
 
     # Verify upload_blob was called with correct parameters
     # Expect 1) acquire lease, 2) upload graph, 3) upload task one result
-    assert len(container_client.mock_calls) == 3
-    lease_call, upload_graph_call, task_result_upload_call = container_client.mock_calls
+    assert len(container_client.mock_calls) == 4
+    lease_call, upload_graph_call, task_result_upload_call, release_lease_call = container_client.mock_calls
     assert lease_call[0] == "acquire_lease"
     assert upload_graph_call[0] == "upload_blob"
     assert task_result_upload_call[0] == "upload_blob"
+    assert release_lease_call[0] == "acquire_lease().release"
 
     # Check filenames
     expected_graph_name = f"task-results/{sample_task_graph.storage_path}"
-    pending_task_res = next(iter(sample_task_graph.generate_pending_results()))
+    pending_task_res = next(iter(sample_task_graph.results.values()))
     expected_task_result_name = f"task-results/{pending_task_res.storage_path}"
 
     assert expected_graph_name == upload_graph_call.args[0]
     assert expected_task_result_name == task_result_upload_call.args[0]
 
     # Check JSON content
-    assert sample_task_graph.model_dump_json() == upload_graph_call.args[1]
+    deserialized_graph = TaskGraph.model_validate_json(upload_graph_call.args[1])
+    assert sample_task_graph.children == deserialized_graph.children
+    assert sample_task_graph.edges == deserialized_graph.edges
+    assert sample_task_graph.graph_id == deserialized_graph.graph_id
     assert pending_task_res.model_dump_json() == task_result_upload_call.args[1]
 
 

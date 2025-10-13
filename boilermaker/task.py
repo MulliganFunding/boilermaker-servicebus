@@ -629,12 +629,18 @@ class TaskGraph(BaseModel):
         This should probably only be run when the graph is first created and stored
         """
         for task_id in self.children.keys():
+            # Create a pending result if it doesn't exist
             if self.get_result(task_id) is None:
-                yield TaskResultSlim(
+                pending_result = TaskResultSlim(
                     task_id=task_id,
                     graph_id=self.graph_id,
                     status=TaskStatus.Pending,
                 )
+                self.results[pending_result.task_id] = pending_result
+
+            task_result = self.results[task_id]
+            if task_result.status == TaskStatus.Pending:
+                yield task_result
 
     def completed_successfully(self) -> bool:
         """Check if all tasks in the graph have completed successfully."""

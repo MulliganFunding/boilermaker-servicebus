@@ -290,9 +290,13 @@ def test_task_graph_schedule_task():
     t1 = task.Task.default("func1")
     graph.add_task(t1)
 
+    # Make sure marked as pending
+    pending_res = list(graph.generate_pending_results())
+    assert len(pending_res) == 1
+
     result = graph.schedule_task(t1.task_id)
 
-    assert isinstance(result, task.TaskResult)
+    assert isinstance(result, task.TaskResultSlim)
     assert result.task_id == t1.task_id
     assert result.graph_id == graph.graph_id
     assert result.status == task.TaskStatus.Scheduled
@@ -420,6 +424,9 @@ def test_task_graph_ready_tasks_excludes_started():
     # Initially ready
     ready_tasks = list(graph.ready_tasks())
     assert len(ready_tasks) == 1
+
+    # Put a Pending result in there
+    assert len(list(graph.generate_pending_results())) == 1
 
     # Mark as started
     graph.schedule_task(t1.task_id)
@@ -754,6 +761,7 @@ def test_task_graph_generate_pending_results():
         assert isinstance(result, task.TaskResultSlim)
         assert result.graph_id == graph.graph_id
         assert result.status == task.TaskStatus.Pending
+        assert graph.results[result.task_id] is result
 
 
 def test_task_graph_completed_successfully():

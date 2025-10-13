@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 import pytest
 from boilermaker import exc, retries
 from boilermaker.evaluators import TaskGraphEvaluator
-from boilermaker.task import Task, TaskGraph, TaskResult, TaskStatus
+from boilermaker.task import Task, TaskGraph, TaskResult, TaskResultSlim, TaskStatus
 
 # Requires running pytest with `--import-mode importlib`
 from .helpers import verify_storage_started_and_get_result_calls
@@ -369,7 +369,8 @@ async def test_continue_graph_graph_not_found(evaluator, mock_storage):
 async def test_continue_graph_publishes_ready_tasks(evaluator, mock_storage, sample_graph):
     """Test that continue_graph publishes newly ready tasks."""
     # Complete the root task
-    root_task_id = list(sample_graph.edges.keys())[0]  # Get child tasks
+    root_task_id = list(sample_graph.edges.keys())[0]  # Get first child task
+    # mark root task as successful
     result = TaskResult(
         task_id=root_task_id,
         graph_id=sample_graph.graph_id,
@@ -377,6 +378,9 @@ async def test_continue_graph_publishes_ready_tasks(evaluator, mock_storage, sam
         result=42,
     )
     sample_graph.add_result(result)
+    # Make sure others are marked as "pending"
+    pending_tasks = list(sample_graph.generate_pending_results())
+    assert len(pending_tasks) == 2
 
     mock_storage.load_graph.return_value = sample_graph
 
@@ -463,6 +467,11 @@ async def test_full_graph_workflow_integration(app, mockservicebus, mock_storage
     graph.add_task(task_b_instance, parent_id=task_a_instance.task_id)
     graph.add_task(task_c_instance, parent_id=task_a_instance.task_id)
 
+    # Generate pending results (as if we published it)
+    pending_results = list(graph.generate_pending_results())
+    # One for each possible task
+    assert len(pending_results) == 3
+
     # Mock storage to return our graph
     result = TaskResult(
         task_id=task_a_instance.task_id,
@@ -499,14 +508,32 @@ async def test_full_graph_workflow_integration(app, mockservicebus, mock_storage
     assert result.task_id == task_a_instance.task_id
 
     # Should store started and successful result
-    stored_result_call = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
-    assert stored_result_call.status == TaskStatus.Success
-    assert stored_result_call.result == 10
-    assert stored_result_call.task_id == task_a_instance.task_id
+    # stored_result_call = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
+    assert mock_storage.store_task_result.call_count == 4  # Started + Success + 2 pending
+    started_call, result_call, schedule1, schedule2 = mock_storage.store_task_result.mock_calls
+    assert isinstance(started_call.args[0], TaskResult)
+    started_result = started_call.args[0]
+    assert started_result.task_id == evaluator.task.task_id
+    assert started_result.graph_id == evaluator.task.graph_id
+    assert started_result.status == TaskStatus.Started
+
+    # Verify task result was stored
+    assert isinstance(result_call.args[0], TaskResult)
+    stored_result = result_call.args[0]
+    assert stored_result.task_id == evaluator.task.task_id
+    assert stored_result.graph_id == evaluator.task.graph_id
+    assert stored_result.status == TaskStatus.Success
+    assert stored_result.result == 10
+    assert stored_result.task_id == task_a_instance.task_id
 
     # Should have stored results and published child tasks
-    assert mock_storage.store_task_result.call_count >= 2  # Started + Success
     assert len(published_tasks) == 2  # Both child tasks should be published
+    assert isinstance(schedule1[1][0], TaskResultSlim)
+    assert isinstance(schedule2[1][0], TaskResultSlim)
+    for scheduled in (schedule1[1][0], schedule2[1][0]):
+        assert scheduled.graph_id == graph.graph_id
+        assert scheduled.status == TaskStatus.Scheduled
+        assert scheduled.task_id in (task_b_instance.task_id, task_c_instance.task_id)
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
