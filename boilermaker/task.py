@@ -536,12 +536,12 @@ class TaskGraph(BaseModel):
 
         return False
 
-    def add_task(self, task: Task, parent_id: TaskId | None = None) -> None:
+    def add_task(self, task: Task, parent_ids: list[TaskId] | None = None) -> None:
         """Add a task to the graph.
 
         Args:
             task: The Task instance to add to the graph.
-            parent_id: Optional parent task ID to create dependency
+            parent_ids: Optional list of parent task IDs to create dependencies
 
         Raises:
             ValueError: If adding this task would create a cycle in the DAG
@@ -550,17 +550,19 @@ class TaskGraph(BaseModel):
         task.graph_id = self.graph_id
         self.children[task.task_id] = task
 
-        if parent_id:
-            if parent_id not in self.edges:
-                self.edges[parent_id] = set()
-            self.edges[parent_id].add(task.task_id)
+        if parent_ids:
+            for parent_id in parent_ids:
+                if parent_id not in self.edges:
+                    self.edges[parent_id] = set()
+                self.edges[parent_id].add(task.task_id)
 
-            # Check for cycles after adding the edge
+            # Check for cycles after adding the edges
             if self._detect_cycles():
                 # Rollback the changes
-                self.edges[parent_id].remove(task.task_id)
-                if not self.edges[parent_id]:  # Remove empty set
-                    del self.edges[parent_id]
+                for parent_id in parent_ids:
+                    self.edges[parent_id].remove(task.task_id)
+                    if not self.edges[parent_id]:  # Remove empty set
+                        del self.edges[parent_id]
                 del self.children[task.task_id]
                 raise ValueError(
                     f"Adding task {task.task_id} with parent {parent_id} would create a cycle in the DAG"

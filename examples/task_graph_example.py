@@ -69,11 +69,7 @@ async def main():
     )
 
     # Register task functions
-    app.register_async(fetch_data)
-    app.register_async(process_data)
-    app.register_async(save_results)
-    app.register_async(send_notification)
-    app.register_async(cleanup_temp_files)
+    app.register_many_async([fetch_data, process_data, save_results, send_notification, cleanup_temp_files])
 
     # Create a TaskGraph workflow
     graph = app.create_graph()
@@ -90,14 +86,14 @@ async def main():
     graph.add_task(fetch_task)
 
     # process_data depends on fetch_data
-    graph.add_task(process_task, parent_id=fetch_task.task_id)
+    graph.add_task(process_task, parent_ids=[fetch_task.task_id])
 
     # save_results depends on process_data
-    graph.add_task(save_task, parent_id=process_task.task_id)
+    graph.add_task(save_task, parent_ids=[process_task.task_id])
 
     # Both notification and cleanup depend on save_results
-    graph.add_task(notify_task, parent_id=save_task.task_id)
-    graph.add_task(cleanup_task, parent_id=save_task.task_id)
+    graph.add_task(notify_task, parent_ids=[save_task.task_id])
+    graph.add_task(cleanup_task, parent_ids=[save_task.task_id])
 
     # Publish the graph - this will start the workflow
     await app.publish_graph(graph)

@@ -22,8 +22,8 @@ def sample_graph():
 
     # Add tasks to graph
     graph.add_task(task1)  # Root task
-    graph.add_task(task2, parent_id=task1.task_id)  # Depends on task1
-    graph.add_task(task3, parent_id=task1.task_id)  # Also depends on task1
+    graph.add_task(task2, parent_ids=[task1.task_id])  # Depends on task1
+    graph.add_task(task3, parent_ids=[task1.task_id])  # Also depends on task1
 
     return graph
 
@@ -464,8 +464,8 @@ async def test_full_graph_workflow_integration(app, mockservicebus, mock_storage
 
     # Add to graph
     graph.add_task(task_a_instance)
-    graph.add_task(task_b_instance, parent_id=task_a_instance.task_id)
-    graph.add_task(task_c_instance, parent_id=task_a_instance.task_id)
+    graph.add_task(task_b_instance, parent_ids=[task_a_instance.task_id])
+    graph.add_task(task_c_instance, parent_ids=[task_a_instance.task_id])
 
     # Generate pending results (as if we published it)
     pending_results = list(graph.generate_pending_results())

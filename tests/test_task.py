@@ -276,7 +276,7 @@ def test_task_graph_add_task_with_parent():
     t2 = task.Task.default("func2")
 
     graph.add_task(t1)
-    graph.add_task(t2, parent_id=t1.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
 
     assert t1.task_id in graph.children
     assert t2.task_id in graph.children
@@ -352,8 +352,8 @@ def test_task_graph_all_antecedents_succeeded():
     t3 = task.Task.default("func3")
 
     graph.add_task(t1)
-    graph.add_task(t2, parent_id=t1.task_id)
-    graph.add_task(t3, parent_id=t2.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
+    graph.add_task(t3, parent_ids=[t2.task_id])
 
     # t1 has no antecedents, should be ready
     assert graph.all_antecedents_succeeded(t1.task_id) is True
@@ -391,7 +391,7 @@ def test_task_graph_ready_tasks():
     t3 = task.Task.default("func3")
 
     graph.add_task(t1)
-    graph.add_task(t2, parent_id=t1.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
     graph.add_task(t3)  # Independent task
 
     ready_tasks = list(graph.ready_tasks())
@@ -485,9 +485,9 @@ def test_task_graph_complex_dependency():
     t4 = task.Task.default("func4")
 
     graph.add_task(t1)
-    graph.add_task(t2, parent_id=t1.task_id)
-    graph.add_task(t3, parent_id=t1.task_id)
-    graph.add_task(t4, parent_id=t2.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
+    graph.add_task(t3, parent_ids=[t1.task_id])
+    graph.add_task(t4, parent_ids=[t2.task_id])
 
     # Add t4 as child of t3 as well (multiple parents)
     graph.edges[t3.task_id].add(t4.task_id)
@@ -545,7 +545,7 @@ def test_task_graph_cycle_detection_simple():
 
     # Add tasks: t1 -> t2
     graph.add_task(t1)
-    graph.add_task(t2, parent_id=t1.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
 
     # Try to create cycle by manually adding edge t2 -> t1, then adding a task
     # This simulates creating a cycle in the graph
@@ -554,7 +554,7 @@ def test_task_graph_cycle_detection_simple():
     # Now any add_task operation should detect the cycle
     t3 = task.Task.default("task3")
     with pytest.raises(ValueError, match="would create a cycle in the DAG"):
-        graph.add_task(t3, parent_id=t1.task_id)
+        graph.add_task(t3, parent_ids=[t1.task_id])
 
 
 def test_task_graph_cycle_detection_complex():
@@ -566,8 +566,8 @@ def test_task_graph_cycle_detection_complex():
 
     # Build: t1 -> t2 -> t3
     graph.add_task(t1)
-    graph.add_task(t2, parent_id=t1.task_id)
-    graph.add_task(t3, parent_id=t2.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
+    graph.add_task(t3, parent_ids=[t2.task_id])
 
     # Manually create cycle: t3 -> t1 (completing the cycle t1->t2->t3->t1)
     graph.edges[t3.task_id] = {t1.task_id}
@@ -575,7 +575,7 @@ def test_task_graph_cycle_detection_complex():
     # Now any add_task should detect the cycle
     t4 = task.Task.default("task4")
     with pytest.raises(ValueError, match="would create a cycle in the DAG"):
-        graph.add_task(t4, parent_id=t1.task_id)
+        graph.add_task(t4, parent_ids=[t1.task_id])
 
 
 def test_task_graph_cycle_detection_self_loop():
@@ -591,7 +591,7 @@ def test_task_graph_cycle_detection_self_loop():
     # Now any add_task should detect the self-loop cycle
     t2 = task.Task.default("task2")
     with pytest.raises(ValueError, match="would create a cycle in the DAG"):
-        graph.add_task(t2, parent_id=t1.task_id)
+        graph.add_task(t2, parent_ids=[t1.task_id])
 
 
 def test_task_graph_no_false_positive_cycles():
@@ -606,9 +606,9 @@ def test_task_graph_no_false_positive_cycles():
 
     # This should all work without raising cycle detection errors
     graph.add_task(t1)
-    graph.add_task(t2, parent_id=t1.task_id)
-    graph.add_task(t3, parent_id=t1.task_id)
-    graph.add_task(t4, parent_id=t2.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
+    graph.add_task(t3, parent_ids=[t1.task_id])
+    graph.add_task(t4, parent_ids=[t2.task_id])
 
     # Add t4 as child of t3 as well (multiple parents, but no cycle)
     graph.edges[t3.task_id].add(t4.task_id)
@@ -621,7 +621,7 @@ def test_task_graph_no_false_positive_cycles():
 
     # Should be able to add more tasks without cycle detection issues
     t5 = task.Task.default("task5")
-    graph.add_task(t5, parent_id=t4.task_id)
+    graph.add_task(t5, parent_ids=[t4.task_id])
     assert t5.task_id in graph.edges[t4.task_id]
 
 
@@ -673,7 +673,7 @@ def test_task_graph_cycle_detection():
     graph.add_task(t1)
 
     # Add second task depending on first
-    graph.add_task(t2, parent_id=t1.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
 
     # Now manually create the cycle condition that the add_task method checks for
     # We'll directly test the rollback behavior by temporarily modifying the graph
@@ -712,7 +712,7 @@ def test_task_graph_all_antecedents_succeeded_missing_parent():
 
     # Add tasks with dependency: t1 -> t2
     graph.add_task(t1)
-    graph.add_task(t2, parent_id=t1.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
 
     # Don't add any results for t1, so it won't be in graph.results
     # Check that t2 is not ready because t1 has no result
@@ -813,8 +813,8 @@ def test_task_graph_cycle_detection_rollback():
 
     # Add tasks to graph
     graph.add_task(task1)
-    graph.add_task(task2, parent_id=task1.task_id)
-    graph.add_task(task3, parent_id=task2.task_id)
+    graph.add_task(task2, parent_ids=[task1.task_id])
+    graph.add_task(task3, parent_ids=[task2.task_id])
 
     # Verify the current state before attempting cycle
     assert task1.task_id in graph.children
@@ -823,9 +823,7 @@ def test_task_graph_cycle_detection_rollback():
 
     # This should fail and trigger rollback at line 546
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(
-            task1, parent_id=task3.task_id
-        )  # This creates task3 -> task1 cycle
+        graph.add_task(task1, parent_ids=[task3.task_id])  # This creates task3 -> task1 cycle
 
 
 def test_task_default_with_custom_policy_in_kwargs():
@@ -873,22 +871,22 @@ def test_cycle_detection_algorithm_disconnected_components():
     task_c = task.Task.si(sample_task)
 
     graph.add_task(task_a)
-    graph.add_task(task_b, parent_id=task_a.task_id)
-    graph.add_task(task_c, parent_id=task_b.task_id)
+    graph.add_task(task_b, parent_ids=[task_a.task_id])
+    graph.add_task(task_c, parent_ids=[task_b.task_id])
 
     # Component 2: D -> E (no cycle, disconnected)
     task_d = task.Task.si(sample_task)
     task_e = task.Task.si(sample_task)
 
     graph.add_task(task_d)
-    graph.add_task(task_e, parent_id=task_d.task_id)
+    graph.add_task(task_e, parent_ids=[task_d.task_id])
 
     # Should be no cycles yet
     assert not graph._detect_cycles()
 
     # Now try to create a cycle in component 1: C -> A
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(task_a, parent_id=task_c.task_id)
+        graph.add_task(task_a, parent_ids=[task_c.task_id])
 
 
 def test_cycle_detection_algorithm_self_loop_edge_case():
@@ -903,7 +901,7 @@ def test_cycle_detection_algorithm_self_loop_edge_case():
 
     # Try to create a self-loop: A -> A
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(task_a, parent_id=task_a.task_id)
+        graph.add_task(task_a, parent_ids=[task_a.task_id])
 
 
 def test_cycle_detection_algorithm_complex_diamond_with_cycle():
@@ -925,17 +923,17 @@ def test_cycle_detection_algorithm_complex_diamond_with_cycle():
     task_d = task.Task.si(sample_task)  # Convergence
 
     graph.add_task(task_a)
-    graph.add_task(task_b, parent_id=task_a.task_id)  # A -> B
-    graph.add_task(task_c, parent_id=task_a.task_id)  # A -> C
-    graph.add_task(task_d, parent_id=task_b.task_id)  # B -> D
+    graph.add_task(task_b, parent_ids=[task_a.task_id])  # A -> B
+    graph.add_task(task_c, parent_ids=[task_a.task_id])  # A -> C
+    graph.add_task(task_d, parent_ids=[task_b.task_id])  # B -> D
 
     # This should work - adding second parent to D
     # This tests if the algorithm handles multiple parents correctly
-    graph.add_task(task_d, parent_id=task_c.task_id)  # C -> D (second parent)
+    graph.add_task(task_d, parent_ids=[task_c.task_id])  # C -> D (second parent)
 
     # Now try to close the loop: D -> A
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(task_a, parent_id=task_d.task_id)
+        graph.add_task(task_a, parent_ids=[task_d.task_id])
 
 
 def test_cycle_detection_algorithm_long_cycle():
@@ -953,14 +951,14 @@ def test_cycle_detection_algorithm_long_cycle():
 
     # Create chain: A -> B -> C -> D -> E -> F
     for i in range(1, 6):
-        graph.add_task(tasks[i], parent_id=tasks[i - 1].task_id)
+        graph.add_task(tasks[i], parent_ids=[tasks[i - 1].task_id])
 
     # Should be no cycle yet
     assert not graph._detect_cycles()
 
     # Try to close the long cycle: F -> A
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(tasks[0], parent_id=tasks[5].task_id)
+        graph.add_task(tasks[0], parent_ids=[tasks[5].task_id])
 
 
 def test_cycle_detection_algorithm_multiple_entry_points():
@@ -985,16 +983,16 @@ def test_cycle_detection_algorithm_multiple_entry_points():
 
     # Build the graph structure
     graph.add_task(task_a)
-    graph.add_task(task_b, parent_id=task_a.task_id)  # A -> B
-    graph.add_task(task_c, parent_id=task_a.task_id)  # A -> C
-    graph.add_task(task_d, parent_id=task_b.task_id)  # B -> D
-    graph.add_task(task_e, parent_id=task_b.task_id)  # B -> E
-    graph.add_task(task_e, parent_id=task_c.task_id)  # C -> E (E has multiple parents)
-    graph.add_task(task_f, parent_id=task_e.task_id)  # E -> F
+    graph.add_task(task_b, parent_ids=[task_a.task_id])  # A -> B
+    graph.add_task(task_c, parent_ids=[task_a.task_id])  # A -> C
+    graph.add_task(task_d, parent_ids=[task_b.task_id])  # B -> D
+    graph.add_task(task_e, parent_ids=[task_b.task_id])  # B -> E
+    graph.add_task(task_e, parent_ids=[task_c.task_id])  # C -> E (E has multiple parents)
+    graph.add_task(task_f, parent_ids=[task_e.task_id])  # E -> F
 
     # Try to create cycle: F -> B
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(task_b, parent_id=task_f.task_id)
+        graph.add_task(task_b, parent_ids=[task_f.task_id])
 
 
 def test_cycle_detection_stress_test_false_positive():
@@ -1023,26 +1021,30 @@ def test_cycle_detection_stress_test_false_positive():
 
     # Level 2: A -> B, C, D
     for child in "BCD":
-        graph.add_task(tasks[child], parent_id=tasks["A"].task_id)
+        graph.add_task(tasks[child], parent_ids=[tasks["A"].task_id])
 
     # Level 3: B -> E,F; C -> G; D -> H,I
-    graph.add_task(tasks["E"], parent_id=tasks["B"].task_id)
-    graph.add_task(tasks["F"], parent_id=tasks["B"].task_id)
-    graph.add_task(tasks["G"], parent_id=tasks["C"].task_id)
-    graph.add_task(tasks["H"], parent_id=tasks["D"].task_id)
-    graph.add_task(tasks["I"], parent_id=tasks["D"].task_id)
+    graph.add_task(tasks["E"], parent_ids=[tasks["B"].task_id])
+    graph.add_task(tasks["F"], parent_ids=[tasks["B"].task_id])
+    graph.add_task(tasks["G"], parent_ids=[tasks["C"].task_id])
+    graph.add_task(tasks["H"], parent_ids=[tasks["D"].task_id])
+    graph.add_task(tasks["I"], parent_ids=[tasks["D"].task_id])
 
+    # Multiple parents
     # Level 4: E,F,G -> J; H,I -> K
-    graph.add_task(tasks["J"], parent_id=tasks["E"].task_id)
-    graph.add_task(tasks["J"], parent_id=tasks["F"].task_id)  # Multiple parents
-    graph.add_task(tasks["J"], parent_id=tasks["G"].task_id)  # Multiple parents
+    graph.add_task(
+        tasks["J"],
+        parent_ids=[
+            tasks["E"].task_id,
+            tasks["F"].task_id,
+            tasks["G"].task_id,
+        ],
+    )
 
-    graph.add_task(tasks["K"], parent_id=tasks["H"].task_id)
-    graph.add_task(tasks["K"], parent_id=tasks["I"].task_id)  # Multiple parents
+    graph.add_task(tasks["K"], parent_ids=[tasks["H"].task_id, tasks["I"].task_id])
 
     # Level 5: J,K -> L
-    graph.add_task(tasks["L"], parent_id=tasks["J"].task_id)
-    graph.add_task(tasks["L"], parent_id=tasks["K"].task_id)  # Multiple parents
+    graph.add_task(tasks["L"], parent_ids=[tasks["J"].task_id, tasks["K"].task_id])
 
     # This complex DAG should be valid - no cycles
     assert not graph._detect_cycles()
@@ -1084,11 +1086,11 @@ def test_cycle_detection_potential_algorithm_bug_duplicate_add():
 
     # Add tasks normally
     graph.add_task(task_a)
-    graph.add_task(task_b, parent_id=task_a.task_id)
+    graph.add_task(task_b, parent_ids=[task_a.task_id])
 
     # What happens if we try to add the same relationship again?
     # This might reveal if the algorithm handles duplicate edges correctly
-    graph.add_task(task_b, parent_id=task_a.task_id)  # Same relationship again
+    graph.add_task(task_b, parent_ids=[task_a.task_id])  # Same relationship again
 
     # Should still be no cycle
     assert not graph._detect_cycles()
@@ -1107,12 +1109,12 @@ def test_cycle_detection_race_condition_simulation():
     tasks1 = [task.Task.si(sample_task) for _ in range(3)]
 
     graph1.add_task(tasks1[0])  # A
-    graph1.add_task(tasks1[1], parent_id=tasks1[0].task_id)  # A -> B
-    graph1.add_task(tasks1[2], parent_id=tasks1[1].task_id)  # B -> C
+    graph1.add_task(tasks1[1], parent_ids=[tasks1[0].task_id])  # A -> B
+    graph1.add_task(tasks1[2], parent_ids=[tasks1[1].task_id])  # B -> C
 
     # This should create a cycle
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph1.add_task(tasks1[0], parent_id=tasks1[2].task_id)  # C -> A
+        graph1.add_task(tasks1[0], parent_ids=[tasks1[2].task_id])  # C -> A
 
     # Test case 2: Same graph, different order
     graph2 = task.TaskGraph(graph_id="race2")
@@ -1120,12 +1122,12 @@ def test_cycle_detection_race_condition_simulation():
 
     graph2.add_task(tasks2[0])  # A
     graph2.add_task(tasks2[2])  # C (add C first)
-    graph2.add_task(tasks2[1], parent_id=tasks2[0].task_id)  # A -> B
-    graph2.add_task(tasks2[2], parent_id=tasks2[1].task_id)  # B -> C
+    graph2.add_task(tasks2[1], parent_ids=[tasks2[0].task_id])  # A -> B
+    graph2.add_task(tasks2[2], parent_ids=[tasks2[1].task_id])  # B -> C
 
     # Should also detect the same cycle
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph2.add_task(tasks2[0], parent_id=tasks2[2].task_id)  # C -> A
+        graph2.add_task(tasks2[0], parent_ids=[tasks2[2].task_id])  # C -> A
 
 
 def test_cycle_detection_algorithm_subtle_bug_attempt():
@@ -1146,16 +1148,16 @@ def test_cycle_detection_algorithm_subtle_bug_attempt():
 
     # Build a complex structure step by step
     graph.add_task(task_a)  # A (root)
-    graph.add_task(task_b, parent_id=task_a.task_id)  # A -> B
-    graph.add_task(task_c, parent_id=task_b.task_id)  # B -> C
-    graph.add_task(task_d, parent_id=task_c.task_id)  # C -> D
+    graph.add_task(task_b, parent_ids=[task_a.task_id])  # A -> B
+    graph.add_task(task_c, parent_ids=[task_b.task_id])  # B -> C
+    graph.add_task(task_d, parent_ids=[task_c.task_id])  # C -> D
 
     # Now add A as a child of B (should be allowed, creates A -> B -> ... -> B)
     # Wait, this wouldn't work because A already exists...
     # Let me try a different approach
 
     # Add D as additional child of A (creates: A -> B -> C -> D and A -> D)
-    graph.add_task(task_d, parent_id=task_a.task_id)  # A -> D (second parent for D)
+    graph.add_task(task_d, parent_ids=[task_a.task_id])  # A -> D (second parent for D)
 
     # Now we have: A -> B -> C -> D and A -> D
     # This should be fine, no cycle
@@ -1163,7 +1165,7 @@ def test_cycle_detection_algorithm_subtle_bug_attempt():
 
     # Now try to create a cycle: D -> A
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(task_a, parent_id=task_d.task_id)  # D -> A (would create cycle)
+        graph.add_task(task_a, parent_ids=[task_d.task_id])  # D -> A (would create cycle)
 
 
 def test_cycle_detection_algorithm_really_try_to_break_it():
@@ -1187,27 +1189,21 @@ def test_cycle_detection_algorithm_really_try_to_break_it():
     # 0 -> 6 -> 7 -> 8 -> 9
     # 4 -> 9
     # 5 -> 8
-    graph.add_task(tasks[1], parent_id=tasks[0].task_id)  # 0 -> 1
-    graph.add_task(tasks[2], parent_id=tasks[1].task_id)  # 1 -> 2
-    graph.add_task(tasks[3], parent_id=tasks[2].task_id)  # 2 -> 3
+    graph.add_task(tasks[1], parent_ids=[tasks[0].task_id])  # 0 -> 1
+    graph.add_task(tasks[2], parent_ids=[tasks[1].task_id])  # 1 -> 2
+    graph.add_task(tasks[3], parent_ids=[tasks[2].task_id])  # 2 -> 3
 
-    graph.add_task(tasks[4], parent_id=tasks[0].task_id)  # 0 -> 4
-    graph.add_task(tasks[5], parent_id=tasks[4].task_id)  # 4 -> 5
-    graph.add_task(
-        tasks[3], parent_id=tasks[5].task_id
-    )  # 5 -> 3 (multiple parents for 3)
+    graph.add_task(tasks[4], parent_ids=[tasks[0].task_id])  # 0 -> 4
+    graph.add_task(tasks[5], parent_ids=[tasks[4].task_id])  # 4 -> 5
+    graph.add_task(tasks[3], parent_ids=[tasks[5].task_id])  # 5 -> 3 (multiple parents for 3)
 
-    graph.add_task(tasks[6], parent_id=tasks[0].task_id)  # 0 -> 6
-    graph.add_task(tasks[7], parent_id=tasks[6].task_id)  # 6 -> 7
-    graph.add_task(tasks[8], parent_id=tasks[7].task_id)  # 7 -> 8
-    graph.add_task(tasks[9], parent_id=tasks[8].task_id)  # 8 -> 9
+    graph.add_task(tasks[6], parent_ids=[tasks[0].task_id])  # 0 -> 6
+    graph.add_task(tasks[7], parent_ids=[tasks[6].task_id])  # 6 -> 7
+    graph.add_task(tasks[8], parent_ids=[tasks[7].task_id])  # 7 -> 8
+    graph.add_task(tasks[9], parent_ids=[tasks[8].task_id])  # 8 -> 9
 
-    graph.add_task(
-        tasks[9], parent_id=tasks[4].task_id
-    )  # 4 -> 9 (multiple parents for 9)
-    graph.add_task(
-        tasks[8], parent_id=tasks[5].task_id
-    )  # 5 -> 8 (multiple parents for 8)
+    graph.add_task(tasks[9], parent_ids=[tasks[4].task_id])  # 4 -> 9 (multiple parents for 9)
+    graph.add_task(tasks[8], parent_ids=[tasks[5].task_id])  # 5 -> 8 (multiple parents for 8)
 
     # This complex structure should still be a valid DAG
     assert not graph._detect_cycles()
@@ -1216,12 +1212,12 @@ def test_cycle_detection_algorithm_really_try_to_break_it():
 
     # Try: 3 -> 0 (would create multiple cycles)
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(tasks[0], parent_id=tasks[3].task_id)
+        graph.add_task(tasks[0], parent_ids=[tasks[3].task_id])
 
     # Try: 9 -> 4 (would create cycle through 4 -> 9 path)
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(tasks[4], parent_id=tasks[9].task_id)
+        graph.add_task(tasks[4], parent_ids=[tasks[9].task_id])
 
     # Try: 8 -> 5 (would create cycle through 5 -> 8 path)
     with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(tasks[5], parent_id=tasks[8].task_id)
+        graph.add_task(tasks[5], parent_ids=[tasks[8].task_id])

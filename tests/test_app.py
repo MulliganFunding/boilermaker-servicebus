@@ -448,7 +448,7 @@ async def test_publish_graph_failures(app, mockservicebus, mock_storage):
     t1 = Task.si(sample_task, 1, 2)
     t2 = Task.si(sample_task, 3, 4)
     graph.add_task(t1)
-    graph.add_task(t2, parent_id=t1.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
     mock_storage.store_graph.side_effect = BoilermakerStorageError("Storage failure!")
     with pytest.raises(BoilermakerAppException) as exc:
         await app.publish_graph(graph)
@@ -464,7 +464,7 @@ async def test_publish_graph_happy_path(app, mockservicebus, mock_storage):
     t1 = Task.si(sample_task, 1, 2)
     t2 = Task.si(sample_task, 3, 4)
     graph.add_task(t1)
-    graph.add_task(t2, parent_id=t1.task_id)
+    graph.add_task(t2, parent_ids=[t1.task_id])
 
     result = await app.publish_graph(graph)
     # We get the graph back
