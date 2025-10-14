@@ -3,7 +3,7 @@ import logging
 import traceback
 from functools import partial
 
-from aio_azure_clients_toolbox import AzureBlobStorageClient as MFBlobClient
+from aio_azure_clients_toolbox import AzureBlobStorageClient
 from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
 from anyio import create_task_group
 from azure.core import MatchConditions
@@ -22,7 +22,7 @@ from boilermaker.task import GraphId, TaskGraph, TaskResult, TaskResultSlim
 logger = logging.getLogger(__name__)
 
 
-class BlobClientStorage(MFBlobClient, StorageInterface):
+class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
     """Client for uploading TaskResult instances to Azure Blob Storage.
     This client extends the AzureBlobStorageClient to provide functionality
     specifically for handling TaskResult objects.
