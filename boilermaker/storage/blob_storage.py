@@ -173,7 +173,7 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         """
         fname = str(task_result.storage_path)
         if self.task_result_prefix:
-            fname = f"{self.task_result_prefix}{fname}"
+            fname = f"{self.task_result_prefix}/{fname}"
 
         # add tags:
         blob_tags = {
