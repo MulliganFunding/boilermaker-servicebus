@@ -32,6 +32,4 @@ async def debug_task_retry_policy(
     """
     if use_default:
         raise RetryException(msg)
-    raise RetryExceptionDefaultExponential(
-        msg, max_tries=max_tries, delay=delay, delay_max=delay_max
-    )
+    raise RetryExceptionDefaultExponential(msg, max_tries=max_tries, delay=delay, delay_max=delay_max)
