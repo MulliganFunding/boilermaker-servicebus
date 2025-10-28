@@ -141,31 +141,6 @@ class TaskGraph(BaseModel):
 
         return False
 
-    def add_failure_callback(self, parent_id: TaskId, callback_task: Task) -> None:
-        """Add an failure callback task to the graph.
-
-        Args:
-            parent_id: The task ID that will trigger the error callback
-            callback_task: The Task instance to add as an error callback
-
-        Raises:
-            ValueError: If adding this callback would create a cycle in the DAG
-        """
-        if parent_id not in self.edges:
-            self.edges[parent_id] = set()
-        self.fail_edges[parent_id].add(callback_task.task_id)
-        callback_task.graph_id = self.graph_id
-        self.fail_children[callback_task.task_id] = callback_task
-
-        # Check for cycles after adding the edge
-        if self._detect_cycles():
-            # Rollback the changes
-            self.fail_edges[parent_id].remove(callback_task.task_id)
-            if not self.fail_edges[parent_id]:  # Remove empty set
-                del self.fail_edges[parent_id]
-            del self.fail_children[callback_task.task_id]
-            raise ValueError(f"Adding failure callback for task {parent_id} would create a cycle in the DAG")
-
     def add_task(self, task: Task, parent_ids: list[TaskId] | None = None) -> None:
         """Add a task to the graph.
 
@@ -194,9 +169,7 @@ class TaskGraph(BaseModel):
                     if not self.edges[parent_id]:  # Remove empty set
                         del self.edges[parent_id]
                 del self.children[task.task_id]
-                raise ValueError(
-                    f"Adding task {task.task_id} with parent {parent_id} would create a cycle in the DAG"
-                )
+                raise ValueError(f"Adding task {task.task_id} with parent {parent_id} would create a cycle in the DAG")
 
         # If we leave `on_success` and `on_failure` it's potentially confusing for both callers
         # and our own evaluation. It also has the potential to create cycles inadvertently, so we
@@ -208,6 +181,44 @@ class TaskGraph(BaseModel):
         if task.on_failure:
             self.add_failure_callback(task.task_id, task.on_failure)
             task.on_failure = None
+
+    def add_failure_callback(self, parent_id: TaskId, callback_task: Task) -> None:
+        """Add an failure callback task to the graph.
+
+        Args:
+            parent_id: The task ID that will trigger the error callback
+            callback_task: The Task instance to add as an error callback
+
+        Raises:
+            ValueError: If adding this callback would create a cycle in the DAG
+        """
+
+        callback_task.graph_id = self.graph_id
+
+        if callback_task.task_id not in self.fail_children:
+            self.fail_children[callback_task.task_id] = callback_task
+
+        if parent_id not in self.fail_edges:
+            self.fail_edges[parent_id] = set()
+        self.fail_edges[parent_id].add(callback_task.task_id)
+
+        # Check for cycles after adding the edge
+        if self._detect_cycles():
+            # Rollback the changes
+            self.fail_edges[parent_id].remove(callback_task.task_id)
+            if not self.fail_edges[parent_id]:  # Remove empty set
+                del self.fail_edges[parent_id]
+            del self.fail_children[callback_task.task_id]
+            raise ValueError(f"Adding failure callback for task {parent_id} would create a cycle in the DAG")
+
+        # handle recursion
+        if callback_task.on_success:
+            self.add_task(callback_task.on_success, parent_ids=[callback_task.task_id])
+            callback_task.on_success = None
+
+        if callback_task.on_failure:
+            self.add_failure_callback(callback_task.task_id, callback_task.on_failure)
+            callback_task.on_failure = None
 
     def schedule_task(self, task_id: TaskId) -> TaskResult | TaskResultSlim:
         """Mark a task as scheduled to prevent double-scheduling."""
@@ -408,7 +419,7 @@ class TaskGraphBuilder:
     def __init__(self) -> None:
         self._tasks: dict[TaskId, Task] = {}
         self._dependencies: dict[TaskId, set[TaskId]] = {}
-        self._failure_callbacks: dict[TaskId, list[Task]] = {}
+        self._failure_callbacks: dict[TaskId, set[Task]] = {}
         self._last_added: list[TaskId] = []  # Track recently added tasks for chaining
 
     def add(self, task: Task, depends_on: list[TaskId] | None = None) -> "TaskGraphBuilder":
@@ -416,13 +427,13 @@ class TaskGraphBuilder:
 
         Args:
             task: Task to add
-            depends_on: Optional list of task IDs this task depends on
+            depends_on: Optional list of task IDs this task depends on (will run after self._last_added if None)
 
         Returns:
             Self for method chaining
         """
         self._tasks[task.task_id] = task
-        self._dependencies[task.task_id] = set(depends_on or [])
+        self._dependencies[task.task_id] = set(depends_on or self._last_added)
         self._last_added = [task.task_id]
         return self
 
@@ -436,13 +447,12 @@ class TaskGraphBuilder:
         Returns:
             Self for method chaining
         """
-        task_ids = []
+        parents = depends_on or self._last_added
         for task in tasks:
             self._tasks[task.task_id] = task
-            self._dependencies[task.task_id] = set(depends_on or [])
-            task_ids.append(task.task_id)
+            self._dependencies[task.task_id] = set(parents)
 
-        self._last_added = task_ids
+        self._last_added = [t.task_id for t in tasks]
         return self
 
     def then(self, task: Task) -> "TaskGraphBuilder":
@@ -459,20 +469,6 @@ class TaskGraphBuilder:
 
         return self.add(task, depends_on=self._last_added)
 
-    def then_parallel(self, tasks: list[Task]) -> "TaskGraphBuilder":
-        """Add multiple tasks that all depend on the previously added task(s).
-
-        Args:
-            tasks: Tasks to add that depend on last added tasks
-
-        Returns:
-            Self for method chaining
-        """
-        if not self._last_added:
-            raise ValueError("No previous tasks to depend on. Use add() or parallel() first.")
-
-        return self.parallel(tasks, depends_on=self._last_added)
-
     def on_failure(self, parent_task_id: TaskId, callback_task: Task) -> "TaskGraphBuilder":
         """Add a failure callback for a specific task.
 
@@ -487,9 +483,9 @@ class TaskGraphBuilder:
             raise ValueError(f"Parent task {parent_task_id} not found. Add it first.")
 
         if parent_task_id not in self._failure_callbacks:
-            self._failure_callbacks[parent_task_id] = []
+            self._failure_callbacks[parent_task_id] = set()
 
-        self._failure_callbacks[parent_task_id].append(callback_task)
+        self._failure_callbacks[parent_task_id].add(callback_task)
         return self
 
     def chain(self, *tasks: Task) -> "TaskGraphBuilder":
@@ -513,42 +509,8 @@ class TaskGraphBuilder:
 
         return self
 
-    def fan_out(self, tasks: list[Task]) -> "TaskGraphBuilder":
-        """Fan out: make all tasks depend on the last added task(s).
-
-        Alias for then_parallel for more descriptive naming.
-        """
-        return self.then_parallel(tasks)
-
-    def fan_in(self, task: Task, from_tasks: list[TaskId] | None = None) -> "TaskGraphBuilder":
-        """Fan in: make one task depend on multiple specific tasks.
-
-        Args:
-            task: Task that depends on multiple parents
-            from_tasks: Optional specific task IDs to depend on.
-                       If None, depends on all previously added tasks.
-        """
-        if from_tasks is None:
-            from_tasks = self._last_added
-
-        return self.add(task, depends_on=from_tasks)
-
-    def diamond(self, middle_tasks: list[Task], final_task: Task) -> "TaskGraphBuilder":
-        """Create diamond pattern: last -> middle_tasks (parallel) -> final.
-
-        Args:
-            middle_tasks: Tasks that run in parallel after last added task(s)
-            final_task: Task that waits for all middle tasks to complete
-        """
-        # Add all middle tasks in parallel (they all depend on the last added tasks)
-        self.then_parallel(middle_tasks)
-
-        # Final task depends on all middle tasks
-        middle_ids = [task.task_id for task in middle_tasks]
-        return self.add(final_task, depends_on=middle_ids)
-
-    def conditional_branch(
-        self, success_task: Task, failure_task: Task, condition_task_id: TaskId | None = None
+    def add_success_fail_branch(
+        self, success_task: Task, failure_task: Task, branching_task_id: TaskId | None = None
     ) -> "TaskGraphBuilder":
         """Add success and failure branches for a task.
 
@@ -557,13 +519,13 @@ class TaskGraphBuilder:
             failure_task: Task to run on failure
             condition_task_id: Task to branch from (defaults to last added)
         """
-        if condition_task_id is None:
+        if branching_task_id is None:
             if not self._last_added:
                 raise ValueError("No task to branch from")
-            condition_task_id = self._last_added[0]
+            branching_task_id = self._last_added[0]
 
-        self.add(success_task, depends_on=[condition_task_id])
-        self.on_failure(condition_task_id, failure_task)
+        self.add(success_task, depends_on=[branching_task_id])
+        self.on_failure(branching_task_id, failure_task)
         return self
 
     def build(self) -> TaskGraph:
@@ -579,7 +541,6 @@ class TaskGraphBuilder:
             raise ValueError("Cannot build empty graph. Add at least one task.")
 
         tg = TaskGraph()
-
         # Add all tasks with their dependencies
         for task_id, task in self._tasks.items():
             dependencies = list(self._dependencies.get(task_id, set()))

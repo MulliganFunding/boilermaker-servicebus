@@ -1,3 +1,4 @@
+import itertools
 from pathlib import Path
 
 import pytest
@@ -125,11 +126,7 @@ def test_task_graph_all_antecedents_succeeded():
     assert graph.all_antecedents_succeeded(t2.task_id) is False
 
     # Mark t1 as successful
-    graph.add_result(
-        task.TaskResult(
-            task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success
-        )
-    )
+    graph.add_result(task.TaskResult(task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success))
 
     # Now t2 should be ready
     assert graph.all_antecedents_succeeded(t2.task_id) is True
@@ -166,11 +163,7 @@ def test_task_graph_ready_tasks():
     assert t2.task_id not in ready_task_ids
 
     # Mark t1 as successful
-    graph.add_result(
-        task.TaskResult(
-            task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success
-        )
-    )
+    graph.add_result(task.TaskResult(task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success))
 
     # Now t2 should also be ready
     ready_tasks = list(graph.generate_ready_tasks())
@@ -209,9 +202,7 @@ def test_task_graph_get_result_and_status():
     assert graph.get_status(t1.task_id) is None
 
     # Add result
-    result = task.TaskResult(
-        task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success
-    )
+    result = task.TaskResult(task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success)
     graph.add_result(result)
 
     assert graph.get_result(t1.task_id) is result
@@ -219,7 +210,6 @@ def test_task_graph_get_result_and_status():
 
 
 def test_task_graph_storage_path():
-
     graph = task.TaskGraph()
     expected_path = Path(graph.graph_id) / task.TaskGraph.StorageName
     assert graph.storage_path == expected_path
@@ -260,11 +250,7 @@ def test_task_graph_complex_dependency():
     assert ready_tasks[0].task_id == t1.task_id
 
     # Complete t1
-    graph.add_result(
-        task.TaskResult(
-            task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success
-        )
-    )
+    graph.add_result(task.TaskResult(task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success))
 
     # Now t2 and t3 should be ready
     ready_tasks = list(graph.generate_ready_tasks())
@@ -275,11 +261,7 @@ def test_task_graph_complex_dependency():
     assert t4.task_id not in ready_task_ids  # Still needs both t2 and t3
 
     # Complete t2 only
-    graph.add_result(
-        task.TaskResult(
-            task_id=t2.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success
-        )
-    )
+    graph.add_result(task.TaskResult(task_id=t2.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success))
 
     # t4 still not ready (needs t3 too)
     ready_tasks = list(graph.generate_ready_tasks())
@@ -287,11 +269,7 @@ def test_task_graph_complex_dependency():
     assert t4.task_id not in ready_task_ids
 
     # Complete t3
-    graph.add_result(
-        task.TaskResult(
-            task_id=t3.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success
-        )
-    )
+    graph.add_result(task.TaskResult(task_id=t3.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success))
 
     # Now t4 should be ready
     ready_tasks = list(graph.generate_ready_tasks())
@@ -385,6 +363,7 @@ def test_task_graph_no_false_positive_cycles():
     t5 = task.Task.default("task5")
     graph.add_task(t5, parent_ids=[t4.task_id])
     assert t5.task_id in graph.edges[t4.task_id]
+
 
 def test_task_graph_cycle_detection():
     """Test TaskGraph cycle detection in add_task method (line 546)."""
@@ -1479,6 +1458,7 @@ def test_task_chained_callbacks_moved_to_graph():
 # TASKGRAPHBUILDER TESTS
 # =============================================================================
 
+
 def test_task_graph_builder_init():
     """Test TaskGraphBuilder initialization."""
     builder = task.TaskGraphBuilder()
@@ -1597,7 +1577,7 @@ def test_task_graph_builder_then_without_previous_task():
 
 
 def test_task_graph_builder_then_parallel():
-    """Test then_parallel() method functionality."""
+    """Test parallel() method functionality."""
     builder = task.TaskGraphBuilder()
     init_task = task.Task.default("init_task")
     task_a = task.Task.default("task_a")
@@ -1607,7 +1587,7 @@ def test_task_graph_builder_then_parallel():
     builder.add(init_task)
 
     # Add parallel tasks that depend on init_task
-    result = builder.then_parallel([task_a, task_b])
+    result = builder.parallel([task_a, task_b])
 
     # Should return self for chaining
     assert result is builder
@@ -1618,15 +1598,6 @@ def test_task_graph_builder_then_parallel():
 
     # Both should be in _last_added
     assert set(builder._last_added) == {task_a.task_id, task_b.task_id}
-
-
-def test_task_graph_builder_then_parallel_without_previous_task():
-    """Test then_parallel() raises error when no previous tasks."""
-    builder = task.TaskGraphBuilder()
-    task_a = task.Task.default("task_a")
-
-    with pytest.raises(ValueError, match="No previous tasks to depend on"):
-        builder.then_parallel([task_a])
 
 
 def test_task_graph_builder_chain():
@@ -1659,95 +1630,6 @@ def test_task_graph_builder_chain_empty():
     # Should return self and do nothing
     assert result is builder
     assert len(builder._tasks) == 0
-
-
-def test_task_graph_builder_fan_out():
-    """Test fan_out() method (alias for then_parallel)."""
-    builder = task.TaskGraphBuilder()
-    init_task = task.Task.default("init_task")
-    task_a = task.Task.default("task_a")
-    task_b = task.Task.default("task_b")
-
-    # Add initial task and fan out
-    builder.add(init_task)
-    result = builder.fan_out([task_a, task_b])
-
-    # Should return self for chaining
-    assert result is builder
-
-    # Should have same behavior as then_parallel
-    assert builder._dependencies[task_a.task_id] == {init_task.task_id}
-    assert builder._dependencies[task_b.task_id] == {init_task.task_id}
-
-
-def test_task_graph_builder_fan_in():
-    """Test fan_in() method."""
-    builder = task.TaskGraphBuilder()
-    task_a = task.Task.default("task_a")
-    task_b = task.Task.default("task_b")
-    final_task = task.Task.default("final_task")
-
-    # Add parallel tasks
-    builder.parallel([task_a, task_b])
-
-    # Fan in to final task
-    result = builder.fan_in(final_task)
-
-    # Should return self for chaining
-    assert result is builder
-
-    # Final task should depend on both parallel tasks
-    assert builder._dependencies[final_task.task_id] == {task_a.task_id, task_b.task_id}
-    assert builder._last_added == [final_task.task_id]
-
-
-def test_task_graph_builder_fan_in_explicit_tasks():
-    """Test fan_in() with explicit from_tasks parameter."""
-    builder = task.TaskGraphBuilder()
-    task_a = task.Task.default("task_a")
-    task_b = task.Task.default("task_b")
-    task_c = task.Task.default("task_c")
-    final_task = task.Task.default("final_task")
-
-    # Add multiple tasks
-    builder.add(task_a)
-    builder.add(task_b)
-    builder.add(task_c)  # This becomes _last_added
-
-    # Fan in from specific tasks (not just _last_added)
-    builder.fan_in(final_task, from_tasks=[task_a.task_id, task_b.task_id])
-
-    # Final task should depend on A and B only (not C)
-    assert builder._dependencies[final_task.task_id] == {task_a.task_id, task_b.task_id}
-
-
-def test_task_graph_builder_diamond():
-    """Test diamond() pattern method."""
-    builder = task.TaskGraphBuilder()
-    init_task = task.Task.default("init_task")
-    middle_a = task.Task.default("middle_a")
-    middle_b = task.Task.default("middle_b")
-    final_task = task.Task.default("final_task")
-
-    # Create diamond pattern
-    builder.add(init_task)
-    result = builder.diamond([middle_a, middle_b], final_task)
-
-    # Should return self for chaining
-    assert result is builder
-
-    # Verify all tasks were added
-    assert init_task.task_id in builder._tasks
-    assert middle_a.task_id in builder._tasks
-    assert middle_b.task_id in builder._tasks
-    assert final_task.task_id in builder._tasks
-
-    # Middle tasks should depend on init_task
-    assert builder._dependencies[middle_a.task_id] == {init_task.task_id}
-    assert builder._dependencies[middle_b.task_id] == {init_task.task_id}
-
-    # Final task should depend on both middle tasks
-    assert builder._dependencies[final_task.task_id] == {middle_a.task_id, middle_b.task_id}
 
 
 def test_task_graph_builder_on_failure():
@@ -1799,8 +1681,8 @@ def test_task_graph_builder_multiple_failure_callbacks():
     assert handler_b in callbacks
 
 
-def test_task_graph_builder_conditional_branch():
-    """Test conditional_branch() method."""
+def test_task_graph_builder_add_success_fail_branch():
+    """Test add_success_fail_branch() method."""
     builder = task.TaskGraphBuilder()
     condition_task = task.Task.default("condition_task")
     success_task = task.Task.default("success_task")
@@ -1808,7 +1690,7 @@ def test_task_graph_builder_conditional_branch():
 
     # Add condition task and branch
     builder.add(condition_task)
-    result = builder.conditional_branch(success_task, failure_task)
+    result = builder.add_success_fail_branch(success_task, failure_task)
 
     # Should return self for chaining
     assert result is builder
@@ -1821,8 +1703,8 @@ def test_task_graph_builder_conditional_branch():
     assert failure_task in builder._failure_callbacks[condition_task.task_id]
 
 
-def test_task_graph_builder_conditional_branch_explicit_condition():
-    """Test conditional_branch() with explicit condition_task_id."""
+def test_task_graph_builder_add_success_fail_branch_explicit_condition():
+    """Test add_success_fail_branch() with explicit condition_task_id."""
     builder = task.TaskGraphBuilder()
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
@@ -1834,7 +1716,7 @@ def test_task_graph_builder_conditional_branch_explicit_condition():
     builder.add(task_b)  # This becomes _last_added
 
     # Branch from task_a explicitly (not _last_added)
-    builder.conditional_branch(success_task, failure_task, condition_task_id=task_a.task_id)
+    builder.add_success_fail_branch(success_task, failure_task, branching_task_id=task_a.task_id)
 
     # Success task should depend on task_a (not task_b)
     assert builder._dependencies[success_task.task_id] == {task_a.task_id}
@@ -1842,14 +1724,14 @@ def test_task_graph_builder_conditional_branch_explicit_condition():
     assert failure_task in builder._failure_callbacks[task_a.task_id]
 
 
-def test_task_graph_builder_conditional_branch_no_previous_task():
-    """Test conditional_branch() raises error when no previous tasks."""
+def test_task_graph_builder_add_success_fail_branch_no_previous_task():
+    """Test add_success_fail_branch() raises error when no previous tasks."""
     builder = task.TaskGraphBuilder()
     success_task = task.Task.default("success_task")
     failure_task = task.Task.default("failure_task")
 
     with pytest.raises(ValueError, match="No task to branch from"):
-        builder.conditional_branch(success_task, failure_task)
+        builder.add_success_fail_branch(success_task, failure_task)
 
 
 def test_task_graph_builder_build_empty():
@@ -1924,9 +1806,9 @@ def test_task_graph_builder_complex_workflow():
     # with cleanup on validate failure and error_handler on merge failure
     graph = (
         builder.chain(init_task, validate_task)
-        .fan_out([process_a, process_b, process_c])
-        .fan_in(merge_task)
-        .then(finalize_task)
+        .parallel([process_a, process_b, process_c])
+        .then(merge_task)
+        .chain(finalize_task, cleanup_task)
         .on_failure(validate_task.task_id, cleanup_task)
         .on_failure(merge_task.task_id, error_handler)
         .build()
@@ -1935,7 +1817,7 @@ def test_task_graph_builder_complex_workflow():
     # Verify the structure - all tasks should be in children (including failure callbacks)
     # Regular tasks: init, validate, process_a, process_b, process_c, merge, finalize = 7
     # Failure callbacks are also in children: cleanup_task, error_handler
-    assert len(graph.children) == 9  # All tasks including failure callbacks
+    assert len(graph.children) == 8  # All tasks not including failure callbacks
     assert len(graph.fail_children) == 2  # cleanup_task, error_handler
 
     # Verify chain: init -> validate
@@ -1954,8 +1836,9 @@ def test_task_graph_builder_complex_workflow():
             merge_parents.add(parent_id)
     assert merge_parents == {process_a.task_id, process_b.task_id, process_c.task_id}
 
-    # Verify final chain: merge -> finalize
+    # Verify final chain: merge -> finalize -> cleanup
     assert finalize_task.task_id in graph.edges[merge_task.task_id]
+    assert cleanup_task.task_id in graph.edges[finalize_task.task_id]
 
     # Verify failure callbacks
     assert cleanup_task.task_id in graph.fail_edges[validate_task.task_id]
@@ -1974,8 +1857,9 @@ def test_task_graph_builder_method_chaining():
         builder.add(tasks[0])
         .then(tasks[1])
         .parallel(tasks[2:5])
-        .fan_in(tasks[5])
-        .diamond(tasks[6:8], tasks[8])
+        .then(tasks[5])
+        .parallel(tasks[6:8])
+        .then(tasks[8])
         .then(tasks[9])
         .on_failure(tasks[0].task_id, task.Task.default("error_handler"))
     )
@@ -2107,24 +1991,32 @@ def test_multiple_graph_level_callbacks_per_task():
     callback_1 = task.Task.default("callback_1")
     callback_2 = task.Task.default("callback_2")
     callback_3 = task.Task.default("callback_3")
+    success_callback = task.Task.default("callback_1_success")
     main_task.on_failure = callback_1
     callback_1.on_failure = callback_2
+    callback_1.on_success = success_callback
     callback_2.on_failure = callback_3
 
     graph = task.TaskGraph()
     graph.add_task(main_task)
 
     # Verify all callbacks are present
-    assert len(graph.fail_edges) == 3
+    assert len(graph.fail_edges) == 3, "There should be three tasks with failure callbacks"
     assert callback_1.task_id in graph.fail_edges[main_task.task_id]
     assert callback_1.task_id in graph.fail_edges
+    # This one has an on_success so we should check that too
+    assert callback_1.task_id in graph.edges, "Callback 1 should have success edge"
+    assert success_callback.task_id in graph.edges[callback_1.task_id]
+    assert success_callback.task_id in graph.children
     assert callback_2.task_id in graph.fail_edges[callback_1.task_id]
     assert callback_2.task_id in graph.fail_edges
-    assert callback_3.task_id in graph.fail_edges
+    # This one has no children
+    assert callback_3.task_id not in graph.fail_edges, "Callback 3 should have no further failure callbacks"
     assert callback_3.task_id in graph.fail_edges[callback_2.task_id]
 
     for tsk in (main_task, callback_1, callback_2, callback_3):
-        assert tsk.on_failure is None
+        assert tsk.on_failure is None, "Task-level on_failure should be have been removed"
+        assert tsk.on_success is None
 
 
 def test_callback_inheritance_in_task_creation():
@@ -2230,7 +2122,7 @@ def test_backward_compatibility_with_bitshift_operators():
 
     # Old bitshift syntax should still work for task-level callbacks
     task_a >> task_b  # on_success
-    task_c << task_a  # task_a.on_success = task_c (leftward)
+    task_c << task_b  # task_b.on_success = task_c (leftward)
 
     # Verify the old operators still set task-level callbacks
     assert task_a.on_success is task_b
@@ -2242,9 +2134,15 @@ def test_backward_compatibility_with_bitshift_operators():
     graph.add_task(task_b)
     graph.add_task(task_c)
 
-    # Task-level callbacks preserved even in graph
-    assert task_a.on_success is task_b
-
+    # Task-level callbacks removed and put in edges instead
+    assert task_a.on_success is None
+    assert task_b.on_success is None
+    for tsk in (task_a, task_b, task_c):
+        assert tsk.on_failure is None
+        assert tsk.on_success is None
+        assert tsk.task_id in graph.children
+    assert task_b.task_id in graph.edges[task_a.task_id]
+    assert task_c.task_id in graph.edges[task_b.task_id]
 
 def test_callback_system_evolution():
     """Test showing the evolution from task-level to graph-level callbacks."""
@@ -2313,21 +2211,39 @@ def test_failure_ready_tasks_with_complex_dependency_chains():
     graph.add_failure_callback(main_b.task_id, handler_3)
 
     # A fails - only handler_1 should be ready (not handler_2 which depends on handler_1)
-    main_a.attempts.attempts = main_a.policy.max_tries + 1  # Mark as failed
-    failure_tasks = list(graph.generate_failure_ready_tasks())
+    graph.results[main_a.task_id] = task.TaskResultSlim(
+        status=task.TaskStatus.Failure,
+        task_id=main_a.task_id,
+        graph_id=graph.graph_id,
+    )
+    failure_tasks = list(
+        itertools.chain.from_iterable((graph.generate_ready_tasks(), graph.generate_failure_ready_tasks()))
+    )
     assert len(failure_tasks) == 1
     assert failure_tasks[0].task_id == handler_1.task_id
 
-    # handler_1 completes successfully, now handler_2 should be ready
-    handler_1.attempts.attempts = 1  # Mark as started but not failed
+    # handler_1 started,
     graph.results[handler_1.task_id] = task.TaskResultSlim(
         status=task.TaskStatus.Started,
         task_id=handler_1.task_id,
         graph_id=graph.graph_id,
     )
-    failure_tasks = list(graph.generate_failure_ready_tasks())
-    assert len(failure_tasks) == 1
-    assert failure_tasks[0].task_id == handler_2.task_id
+    failure_tasks = list(
+        itertools.chain.from_iterable((graph.generate_ready_tasks(), graph.generate_failure_ready_tasks()))
+    )
+    assert len(failure_tasks) == 0
+
+    # handler 1 completed, now handler_2 should be ready
+    graph.results[handler_1.task_id] = task.TaskResultSlim(
+        status=task.TaskStatus.Success,
+        task_id=handler_1.task_id,
+        graph_id=graph.graph_id,
+    )
+    continue_tasks = list(
+        itertools.chain.from_iterable((graph.generate_ready_tasks(), graph.generate_failure_ready_tasks()))
+    )
+    assert len(continue_tasks) == 1
+    assert continue_tasks[0].task_id == handler_2.task_id
 
 
 def test_failure_ready_tasks_ignores_cycles_in_failure_graph():
