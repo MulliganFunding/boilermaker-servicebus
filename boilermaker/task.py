@@ -343,6 +343,50 @@ class TaskStatus(enum.StrEnum):
         """
         return cls.Pending
 
+    @property
+    def succeeded(self) -> bool:
+        """Check if the task status represents a successful completion.
+
+        Returns:
+            bool: True if the status is Success
+        """
+        return self == TaskStatus.Success
+
+    @classmethod
+    def finished_types(cls) -> set["TaskStatus"]:
+        return {
+            TaskStatus.Success,
+            TaskStatus.Failure,
+            TaskStatus.RetriesExhausted,
+            TaskStatus.Deadlettered,
+        }
+
+    @property
+    def finished(self) -> bool:
+        """Check if the task status represents a finished state.
+
+        Returns:
+            bool: True if the status is one of Success, Failure, RetriesExhausted, or Deadlettered
+        """
+        return self in self.finished_types()
+
+    @property
+    def failed(self) -> bool:
+        """Check if the task status represents a failure.
+
+        Returns:
+            bool: True if the status is one of Failure, RetriesExhausted, or Deadlettered
+        """
+        return self in self.failure_types()
+
+    @classmethod
+    def failure_types(cls) -> set["TaskStatus"]:
+        return {
+            TaskStatus.Failure,
+            TaskStatus.RetriesExhausted,
+            TaskStatus.Deadlettered,
+        }
+
 
 class TaskResultSlim(BaseModel):
     """Slim representation of a task result for lightweight status checks.
@@ -396,6 +440,33 @@ class TaskResultSlim(BaseModel):
         """
         directory = self.directory_path
         return directory / f"{self.task_id}.json"
+
+    @property
+    def finished(self) -> bool:
+        """Check if the task status represents a finished state.
+
+        Returns:
+            bool: True if the status is one of Success, Failure, RetriesExhausted, or Deadlettered
+        """
+        return self.status.finished
+
+    @property
+    def succeeded(self) -> bool:
+        """Check if the task status represents a successful completion.
+
+        Returns:
+            bool: True if the status is Success
+        """
+        return self.status.succeeded
+
+    @property
+    def failed(self) -> bool:
+        """Check if the task status represents a failure.
+
+        Returns:
+            bool: True if the status is one of Failure, RetriesExhausted, or Deadlettered
+        """
+        return self.status.failed
 
 
 class TaskResult(TaskResultSlim):
@@ -470,10 +541,14 @@ class TaskGraph(BaseModel):
     graph_id: GraphId = Field(default_factory=lambda: GraphId(str(uuid.uuid7())))
     # Children is a mapping of task IDs to tasks
     children: dict[TaskId, Task] = Field(default_factory=dict)
+    # Failure children is a mapping of task IDs to tasks
+    fail_children: dict[TaskId, Task] = Field(default_factory=dict)
     # Edges is a mapping of parent task IDs to sets of child task IDs
     edges: dict[TaskId, set[TaskId]] = Field(
         default_factory=lambda: defaultdict(set[TaskId])
     )
+    # fail_edges is a mapping of parent task IDs to sets of child task IDs for failure callbacks
+    fail_edges: dict[TaskId, set[TaskId]] = Field(default_factory=lambda: defaultdict(set[TaskId]))
 
     # Task results go here; these get loaded from JSON files on deserialization.
     # We do not write these back because we write only one time: when first publishing this TaskGraph.
@@ -505,8 +580,18 @@ class TaskGraph(BaseModel):
         visited.add(start_node)
         rec_stack.add(start_node)
 
-        # Check all children of current node
+        # Check all success children of current node
         for child_id in self.edges.get(start_node, set()):
+            # If child not visited, recurse
+            if child_id not in visited:
+                if self._has_cycle_dfs(child_id, visited, rec_stack):
+                    return True
+            # If child is in recursion stack, we found a back edge (cycle)
+            elif child_id in rec_stack:
+                return True
+
+        # Check all failure children of current node
+        for child_id in self.fail_edges.get(start_node, set()):
             # If child not visited, recurse
             if child_id not in visited:
                 if self._has_cycle_dfs(child_id, visited, rec_stack):
@@ -528,13 +613,41 @@ class TaskGraph(BaseModel):
         visited: set[TaskId] = set()
         rec_stack: set[TaskId] = set()
 
+        # Get all task IDs from both success and failure children
+        all_task_ids = set(self.children.keys()) | set(self.fail_children.keys())
+
         # Check each unvisited node as potential start of cycle
-        for task_id in self.children.keys():
+        for task_id in all_task_ids:
             if task_id not in visited:
                 if self._has_cycle_dfs(task_id, visited, rec_stack):
                     return True
 
         return False
+
+    def add_failure_callback(self, parent_id: TaskId, callback_task: Task) -> None:
+        """Add an failure callback task to the graph.
+
+        Args:
+            parent_id: The task ID that will trigger the error callback
+            callback_task: The Task instance to add as an error callback
+
+        Raises:
+            ValueError: If adding this callback would create a cycle in the DAG
+        """
+        if parent_id not in self.edges:
+            self.edges[parent_id] = set()
+        self.fail_edges[parent_id].add(callback_task.task_id)
+        callback_task.graph_id = self.graph_id
+        self.fail_children[callback_task.task_id] = callback_task
+
+        # Check for cycles after adding the edge
+        if self._detect_cycles():
+            # Rollback the changes
+            self.fail_edges[parent_id].remove(callback_task.task_id)
+            if not self.fail_edges[parent_id]:  # Remove empty set
+                del self.fail_edges[parent_id]
+            del self.fail_children[callback_task.task_id]
+            raise ValueError(f"Adding failure callback for task {parent_id} would create a cycle in the DAG")
 
     def add_task(self, task: Task, parent_ids: list[TaskId] | None = None) -> None:
         """Add a task to the graph.
@@ -568,6 +681,17 @@ class TaskGraph(BaseModel):
                     f"Adding task {task.task_id} with parent {parent_id} would create a cycle in the DAG"
                 )
 
+        # If we leave `on_success` and `on_failure` it's potentially confusing for both callers
+        # and our own evaluation. It also has the potential to create cycles inadvertently, so we
+        # dynamically add on_success and on_failure into edges here and remove these as individual task callbacks.
+        if task.on_success:
+            self.add_task(task.on_success, parent_ids=[task.task_id])
+            task.on_success = None  # Clear to avoid duplication
+
+        if task.on_failure:
+            self.add_failure_callback(task.task_id, task.on_failure)
+            task.on_failure = None  # Clear to avoid duplication
+
     def schedule_task(self, task_id: TaskId) -> TaskResult | TaskResultSlim:
         """Mark a task as scheduled to prevent double-scheduling."""
         if task_id not in self.children:
@@ -598,9 +722,21 @@ class TaskGraph(BaseModel):
             if task_id in children_ids:
                 if parent_id not in self.results:
                     return False
-                if not self.results[parent_id].status == TaskStatus.Success:
+                if not self.results[parent_id].suceeded:
                     return False
         # If we get here, all antecedents succeeded *OR* there are no antecedents.
+        return True
+
+    def all_antecedents_finished(self, task_id: TaskId) -> bool:
+        """Check if all antecedent tasks of a given task are completed with `Success` or `Failure` result."""
+        for parent_id, children_ids in self.edges.items():
+            if task_id in children_ids:
+                if parent_id not in self.results:
+                    return False
+                # Check if the parent has actually finished (not just exists in results)
+                if not self.results[parent_id].status.finished:
+                    return False
+        # If we get here, all antecedents have finished *OR* there are no antecedents.
         return True
 
     def ready_tasks(self) -> Generator[Task]:
@@ -613,6 +749,39 @@ class TaskGraph(BaseModel):
             is_not_started = task_result is None or task_result.status == TaskStatus.Pending
             if is_not_started and self.task_is_ready(task_id):
                 yield self.children[task_id]
+
+    def failure_ready_tasks(self) -> Generator[Task]:
+        """Get a list of failure callback tasks that are ready to be executed.
+
+        A failure task is ready if:
+        1. It hasn't started yet (no result or Pending status)
+        2. At least one of its triggering parent tasks has failed
+        3. All other dependencies (if any) have finished
+        """
+        for task_id in self.fail_children.keys():
+            # Check if this failure task has already started
+            task_result = self.results.get(task_id)
+            is_not_started = task_result is None or task_result.status == TaskStatus.Pending
+
+            if not is_not_started:
+                continue
+
+            # Find which parent task(s) would trigger this failure callback
+            triggering_parents = []
+            for parent_id, fail_child_ids in self.fail_edges.items():
+                if task_id in fail_child_ids:
+                    triggering_parents.append(parent_id)
+
+            # Check if any triggering parent has failed
+            has_failed_parent = False
+            for parent_id in triggering_parents:
+                if parent_id in self.results and self.results[parent_id].status.failed:
+                    has_failed_parent = True
+                    break
+
+            # Only yield if we have at least one failed parent
+            if has_failed_parent:
+                yield self.fail_children[task_id]
 
     def get_result(self, task_id: TaskId) -> TaskResultSlim | TaskResult | None:
         """Get the result of a completed task."""
@@ -652,3 +821,243 @@ class TaskGraph(BaseModel):
                 self.children.keys(),
             )
         )
+
+    def has_failures(self) -> bool:
+        """Check if any tasks in the graph have failed."""
+        failure_statuses = TaskStatus.failure_types()
+        return any(
+            self.get_status(task_id) in failure_statuses
+            for task_id in self.children.keys()
+            if self.get_status(task_id) is not None
+        )
+
+    def is_complete(self) -> bool:
+        """Check if the graph has finished executing (either all success or has failures)."""
+        all_tasks = set(self.children.keys()) | set(self.fail_children.keys())
+        complete_statuses = TaskStatus.finished_types()
+        return all(
+            self.get_status(task_id) in complete_statuses
+            for task_id in all_tasks
+            if self.get_status(task_id) is not None
+        )
+
+
+class TaskGraphBuilder:
+    """
+    Builder class for constructing TaskGraph instances with flexible dependency management.
+
+    Supports multiple patterns:
+    1. Layer-based building for simple sequential/parallel workflows
+    2. Explicit dependency management for complex DAGs
+    3. Success and failure callback chaining
+
+    Examples:
+        # Simple chain: A -> B -> C
+        builder = TaskGraphBuilder().add(taskA).then(taskB).then(taskC)
+
+        # Parallel execution: A, B, C all run in parallel
+        builder = TaskGraphBuilder().parallel([taskA, taskB, taskC])
+
+        # Complex dependencies: D depends on A and B, but C runs independently
+        builder = (TaskGraphBuilder()
+            .add(taskA)
+            .add(taskB)
+            .add(taskC)
+            .add(taskD, depends_on=[taskA.task_id, taskB.task_id]))
+
+        # With failure handling
+        builder = (TaskGraphBuilder()
+            .add(taskA)
+            .then(taskB)
+            .on_failure(taskA.task_id, error_handler))
+    """
+
+    def __init__(self) -> None:
+        self._tasks: dict[TaskId, Task] = {}
+        self._dependencies: dict[TaskId, set[TaskId]] = {}
+        self._failure_callbacks: dict[TaskId, list[Task]] = {}
+        self._last_added: list[TaskId] = []  # Track recently added tasks for chaining
+
+    def add(self, task: Task, depends_on: list[TaskId] | None = None) -> "TaskGraphBuilder":
+        """Add a task with optional explicit dependencies.
+
+        Args:
+            task: Task to add
+            depends_on: Optional list of task IDs this task depends on
+
+        Returns:
+            Self for method chaining
+        """
+        self._tasks[task.task_id] = task
+        self._dependencies[task.task_id] = set(depends_on or [])
+        self._last_added = [task.task_id]
+        return self
+
+    def parallel(self, tasks: list[Task], depends_on: list[TaskId] | None = None) -> "TaskGraphBuilder":
+        """Add multiple tasks to run in parallel.
+
+        Args:
+            tasks: List of tasks to run in parallel
+            depends_on: Optional list of task IDs all these tasks depend on
+
+        Returns:
+            Self for method chaining
+        """
+        task_ids = []
+        for task in tasks:
+            self._tasks[task.task_id] = task
+            self._dependencies[task.task_id] = set(depends_on or [])
+            task_ids.append(task.task_id)
+
+        self._last_added = task_ids
+        return self
+
+    def then(self, task: Task) -> "TaskGraphBuilder":
+        """Add a task that depends on the previously added task(s).
+
+        Args:
+            task: Task to add that depends on last added tasks
+
+        Returns:
+            Self for method chaining
+        """
+        if not self._last_added:
+            raise ValueError("No previous tasks to depend on. Use add() first.")
+
+        return self.add(task, depends_on=self._last_added)
+
+    def then_parallel(self, tasks: list[Task]) -> "TaskGraphBuilder":
+        """Add multiple tasks that all depend on the previously added task(s).
+
+        Args:
+            tasks: Tasks to add that depend on last added tasks
+
+        Returns:
+            Self for method chaining
+        """
+        if not self._last_added:
+            raise ValueError("No previous tasks to depend on. Use add() or parallel() first.")
+
+        return self.parallel(tasks, depends_on=self._last_added)
+
+    def on_failure(self, parent_task_id: TaskId, callback_task: Task) -> "TaskGraphBuilder":
+        """Add a failure callback for a specific task.
+
+        Args:
+            parent_task_id: Task ID that triggers the callback on failure
+            callback_task: Task to execute on failure
+
+        Returns:
+            Self for method chaining
+        """
+        if parent_task_id not in self._tasks:
+            raise ValueError(f"Parent task {parent_task_id} not found. Add it first.")
+
+        if parent_task_id not in self._failure_callbacks:
+            self._failure_callbacks[parent_task_id] = []
+
+        self._failure_callbacks[parent_task_id].append(callback_task)
+        return self
+
+    def chain(self, *tasks: Task) -> "TaskGraphBuilder":
+        """Convenience method to chain tasks in sequence: A -> B -> C -> ...
+
+        Args:
+            *tasks: Tasks to chain in order
+
+        Returns:
+            Self for method chaining
+        """
+        if not tasks:
+            return self
+
+        # Add first task
+        self.add(tasks[0])
+
+        # Chain the rest
+        for task in tasks[1:]:
+            self.then(task)
+
+        return self
+
+    def fan_out(self, tasks: list[Task]) -> "TaskGraphBuilder":
+        """Fan out: make all tasks depend on the last added task(s).
+
+        Alias for then_parallel for more descriptive naming.
+        """
+        return self.then_parallel(tasks)
+
+    def fan_in(self, task: Task, from_tasks: list[TaskId] | None = None) -> "TaskGraphBuilder":
+        """Fan in: make one task depend on multiple specific tasks.
+
+        Args:
+            task: Task that depends on multiple parents
+            from_tasks: Optional specific task IDs to depend on.
+                       If None, depends on all previously added tasks.
+        """
+        if from_tasks is None:
+            from_tasks = self._last_added
+
+        return self.add(task, depends_on=from_tasks)
+
+    def diamond(self, middle_tasks: list[Task], final_task: Task) -> "TaskGraphBuilder":
+        """Create diamond pattern: last -> middle_tasks (parallel) -> final.
+
+        Args:
+            middle_tasks: Tasks that run in parallel after last added task(s)
+            final_task: Task that waits for all middle tasks to complete
+        """
+        middle_ids = []
+        for task in middle_tasks:
+            self.then(task)
+            middle_ids.append(task.task_id)
+
+        return self.add(final_task, depends_on=middle_ids)
+
+    def conditional_branch(
+        self, success_task: Task, failure_task: Task, condition_task_id: TaskId | None = None
+    ) -> "TaskGraphBuilder":
+        """Add success and failure branches for a task.
+
+        Args:
+            success_task: Task to run on success
+            failure_task: Task to run on failure
+            condition_task_id: Task to branch from (defaults to last added)
+        """
+        if condition_task_id is None:
+            if not self._last_added:
+                raise ValueError("No task to branch from")
+            condition_task_id = self._last_added[0]
+
+        self.add(success_task, depends_on=[condition_task_id])
+        self.on_failure(condition_task_id, failure_task)
+        return self
+
+    def build(self) -> TaskGraph:
+        """Build and return the final TaskGraph.
+
+        Returns:
+            TaskGraph: Constructed graph with all tasks and dependencies
+
+        Raises:
+            ValueError: If the graph would contain cycles
+        """
+        if not self._tasks:
+            raise ValueError("Cannot build empty graph. Add at least one task.")
+
+        tg = TaskGraph()
+
+        # Add all tasks with their dependencies
+        for task_id, task in self._tasks.items():
+            dependencies = list(self._dependencies.get(task_id, set()))
+            if dependencies:
+                tg.add_task(task, parent_ids=dependencies)
+            else:
+                tg.add_task(task)
+
+        # Add failure callbacks
+        for parent_task_id, callback_tasks in self._failure_callbacks.items():
+            for callback_task in callback_tasks:
+                tg.add_failure_callback(parent_task_id, callback_task)
+
+        return tg

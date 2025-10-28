@@ -128,16 +128,8 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         # We *must* serialize this result before *loading* the graph again
         await self.storage_interface.store_task_result(result)
 
-        if result.status == TaskStatus.Success:
-            if self.task.on_success is not None:
-                # Success case: continue evaluating the graph
-                await self.publish_task(self.task.on_success)
-            if self.task.graph_id is not None:
-                # Success case: continue evaluating the graph
-                await self.continue_graph(result)
-        elif result.status == TaskStatus.Failure and self.task.on_failure is not None:
-            # Schedule on_failure task
-            await self.publish_task(self.task.on_failure)
+        if result.status in (TaskStatus.Success, TaskStatus.Failure):
+            await self.continue_graph(result)
         elif result.status == TaskStatus.Retry:
             # Retry requested: republish the same task with delay
             delay = self.task.get_next_delay()
