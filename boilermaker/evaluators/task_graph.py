@@ -1,3 +1,4 @@
+import itertools
 import logging
 import typing
 
@@ -104,11 +105,6 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                         status=TaskStatus.Failure,
                         errors=["ServiceBus error during retry exhaustion"],
                     )
-
-            # This task is a failure because it did not succeed and retries are exhausted
-            if self.task.on_failure is not None:
-                await self.publish_task(self.task.on_failure)
-
             # Early return here: no more processing
             task_result = TaskResult(
                 task_id=self.task.task_id,
@@ -117,6 +113,8 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 result=None,
             )
             await self.storage_interface.store_task_result(task_result)
+            # Publish failure tasks
+            await self.continue_graph(task_result)
             return task_result
 
         # Actually invoke the task here
@@ -128,7 +126,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         # We *must* serialize this result before *loading* the graph again
         await self.storage_interface.store_task_result(result)
 
-        if result.status in (TaskStatus.Success, TaskStatus.Failure):
+        if result.status.finished:
             await self.continue_graph(result)
         elif result.status == TaskStatus.Retry:
             # Retry requested: republish the same task with delay
@@ -200,7 +198,9 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
 
         # Find and publish newly ready tasks
         ready_count = 0
-        for ready_task in graph.generate_ready_tasks():
+        for ready_task in itertools.chain.from_iterable(
+            (graph.generate_ready_tasks(), graph.generate_failure_ready_tasks())
+        ):
             # Write that the task was *scheduled* back to Blob Storage with blob etag and then publish the task!
             result = graph.schedule_task(ready_task.task_id)
             try:
