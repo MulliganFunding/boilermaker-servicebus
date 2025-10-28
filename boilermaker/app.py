@@ -406,7 +406,7 @@ class Boilermaker:
             raise BoilermakerAppException("Error storing TaskGraph to storage", [str(exc)]) from exc
 
         # Publish all ready tasks (should be root nodes with no dependencies)
-        for task in graph.ready_tasks():
+        for task in graph.generate_ready_tasks():
             await self.publish_task(task)
 
         return graph

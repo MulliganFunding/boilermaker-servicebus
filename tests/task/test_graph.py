@@ -157,7 +157,7 @@ def test_task_graph_ready_tasks():
     graph.add_task(t2, parent_ids=[t1.task_id])
     graph.add_task(t3)  # Independent task
 
-    ready_tasks = list(graph.ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
     ready_task_ids = [t.task_id for t in ready_tasks]
 
     # t1 and t3 should be ready (no antecedents)
@@ -173,7 +173,7 @@ def test_task_graph_ready_tasks():
     )
 
     # Now t2 should also be ready
-    ready_tasks = list(graph.ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
     ready_task_ids = [t.task_id for t in ready_tasks]
     assert t2.task_id in ready_task_ids
     assert t3.task_id in ready_task_ids
@@ -185,7 +185,7 @@ def test_task_graph_ready_tasks_excludes_started():
     graph.add_task(t1)
 
     # Initially ready
-    ready_tasks = list(graph.ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
     assert len(ready_tasks) == 1
 
     # Put a Pending result in there
@@ -195,7 +195,7 @@ def test_task_graph_ready_tasks_excludes_started():
     graph.schedule_task(t1.task_id)
 
     # Should no longer be ready
-    ready_tasks = list(graph.ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
     assert len(ready_tasks) == 0
 
 
@@ -255,7 +255,7 @@ def test_task_graph_complex_dependency():
     graph.edges[t3.task_id].add(t4.task_id)
 
     # Initially only t1 should be ready
-    ready_tasks = list(graph.ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
     assert len(ready_tasks) == 1
     assert ready_tasks[0].task_id == t1.task_id
 
@@ -267,7 +267,7 @@ def test_task_graph_complex_dependency():
     )
 
     # Now t2 and t3 should be ready
-    ready_tasks = list(graph.ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
     ready_task_ids = [t.task_id for t in ready_tasks]
     assert len(ready_tasks) == 2
     assert t2.task_id in ready_task_ids
@@ -282,7 +282,7 @@ def test_task_graph_complex_dependency():
     )
 
     # t4 still not ready (needs t3 too)
-    ready_tasks = list(graph.ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
     ready_task_ids = [t.task_id for t in ready_tasks]
     assert t4.task_id not in ready_task_ids
 
@@ -294,7 +294,7 @@ def test_task_graph_complex_dependency():
     )
 
     # Now t4 should be ready
-    ready_tasks = list(graph.ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
     assert len(ready_tasks) == 1
     assert ready_tasks[0].task_id == t4.task_id
 
@@ -779,7 +779,7 @@ def test_cycle_detection_stress_test_false_positive():
     assert len(graph.children) == 12  # All tasks added
 
     # Only tasks with no parents should be ready initially (just A)
-    ready_tasks = list(graph.ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
     assert len(ready_tasks) == 1
     assert tasks["A"] in ready_tasks  # Only A has no dependencies initially
 
@@ -1117,7 +1117,7 @@ def test_task_graph_failure_ready_tasks():
     graph.add_failure_callback(main_task.task_id, failure_handler)
 
     # Initially, no failure tasks should be ready (main_task hasn't failed)
-    failure_tasks = list(graph.failure_ready_tasks())
+    failure_tasks = list(graph.generate_failure_ready_tasks())
     assert len(failure_tasks) == 0
 
     # Set main_task as failed
@@ -1126,12 +1126,12 @@ def test_task_graph_failure_ready_tasks():
     )
 
     # Now failure_handler should be ready
-    failure_tasks = list(graph.failure_ready_tasks())
+    failure_tasks = list(graph.generate_failure_ready_tasks())
     assert len(failure_tasks) == 1
     assert failure_tasks[0].task_id == failure_handler.task_id
 
     # Success handler should NOT be ready (main_task failed)
-    ready_tasks = list(graph.ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
     success_task_ids = [t.task_id for t in ready_tasks]
     assert success_handler.task_id not in success_task_ids
 
@@ -1170,7 +1170,7 @@ def test_task_graph_failure_ready_tasks_multiple_failure_states():
         )
 
         # Check that failure handler is ready
-        failure_tasks = list(graph.failure_ready_tasks())
+        failure_tasks = list(graph.generate_failure_ready_tasks())
         handler_ids = [t.task_id for t in failure_tasks]
         assert handler.task_id in handler_ids
 
@@ -1191,7 +1191,7 @@ def test_task_graph_failure_ready_tasks_excludes_already_started():
     )
 
     # Failure handler should be ready
-    failure_tasks = list(graph.failure_ready_tasks())
+    failure_tasks = list(graph.generate_failure_ready_tasks())
     assert len(failure_tasks) == 1
 
     # Mark failure handler as started
@@ -1200,7 +1200,7 @@ def test_task_graph_failure_ready_tasks_excludes_already_started():
     )
 
     # Now it should not be ready anymore
-    failure_tasks = list(graph.failure_ready_tasks())
+    failure_tasks = list(graph.generate_failure_ready_tasks())
     assert len(failure_tasks) == 0
 
 
@@ -1386,8 +1386,8 @@ def test_task_graph_mixed_success_failure_dependencies():
         task_id=task_a.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success
     )
 
-    ready_tasks = list(graph.ready_tasks())
-    failure_tasks = list(graph.failure_ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
+    failure_tasks = list(graph.generate_failure_ready_tasks())
 
     # B should be ready, cleanup should not
     ready_ids = [t.task_id for t in ready_tasks]
@@ -1400,8 +1400,8 @@ def test_task_graph_mixed_success_failure_dependencies():
     # Test scenario 2: A fails instead
     graph.results[task_a.task_id].status = task.TaskStatus.Failure
 
-    ready_tasks = list(graph.ready_tasks())
-    failure_tasks = list(graph.failure_ready_tasks())
+    ready_tasks = list(graph.generate_ready_tasks())
+    failure_tasks = list(graph.generate_failure_ready_tasks())
 
     ready_ids = [t.task_id for t in ready_tasks]
     failure_ids = [t.task_id for t in failure_tasks]
@@ -1413,7 +1413,6 @@ def test_task_graph_mixed_success_failure_dependencies():
 
 def test_task_on_success_on_failure_moved_to_graph():
     """Test that on_success and on_failure callbacks are moved to graph edges."""
-    # This tests point #2 from the user's list
     graph = task.TaskGraph()
 
     # Create tasks with callbacks
@@ -2073,7 +2072,7 @@ def test_task_callbacks_can_still_be_set():
     assert task_a.on_failure is task_c
 
 
-def test_graph_level_callbacks_vs_task_level_callbacks():
+def test_callback_migration_pattern():
     """Test that graph-level callbacks work independently from task-level callbacks."""
     # Create tasks
     main_task = task.Task.default("main_task")
@@ -2092,64 +2091,14 @@ def test_graph_level_callbacks_vs_task_level_callbacks():
     # Graph-level failure callback
     graph.add_failure_callback(main_task.task_id, graph_level_failure)
 
-    # Verify both systems coexist
-    assert main_task.on_success is task_level_success  # Task-level still works
-    assert main_task.on_failure is task_level_failure  # Task-level still works
+    # Verify these callbacks have been cleared out and added to the graph
+    assert main_task.on_success is None
+    assert main_task.on_failure is None
 
     # Verify graph-level callbacks
     assert graph_level_failure.task_id in graph.fail_children
     assert main_task.task_id in graph.fail_edges
     assert graph_level_failure.task_id in graph.fail_edges[main_task.task_id]
-
-
-def test_callback_migration_pattern():
-    """Test the migration pattern from task-level to graph-level callbacks."""
-    # OLD STYLE: Task-level callbacks
-    old_main_task = task.Task.default("old_main")
-    old_success_task = task.Task.default("old_success")
-    old_failure_task = task.Task.default("old_failure")
-
-    old_main_task.on_success = old_success_task
-    old_main_task.on_failure = old_failure_task
-
-    # NEW STYLE: Graph-level callbacks
-    new_main_task = task.Task.default("new_main")
-    new_success_task = task.Task.default("new_success")
-    new_failure_task = task.Task.default("new_failure")
-
-    # Build graph with new style
-    graph = task.TaskGraph()
-    graph.add_task(new_main_task)
-    graph.add_task(new_success_task, parent_ids=[new_main_task.task_id])  # Success path via dependency
-    graph.add_failure_callback(new_main_task.task_id, new_failure_task)  # Failure path via graph callback
-
-    # Verify old style still works
-    assert old_main_task.on_success is old_success_task
-    assert old_main_task.on_failure is old_failure_task
-
-    # Verify new style works
-    assert new_main_task.on_success is None  # Callbacks moved to graph level
-    assert new_main_task.on_failure is None
-    assert new_success_task.task_id in graph.children
-    assert new_failure_task.task_id in graph.fail_children
-
-
-def test_graph_callbacks_override_task_callbacks_conceptually():
-    """Test conceptual override: graph callbacks represent the new way vs task callbacks."""
-    main_task = task.Task.default("main_task")
-    task_callback = task.Task.default("task_callback")
-    graph_callback = task.Task.default("graph_callback")
-
-    # Set both task-level and graph-level callbacks
-    main_task.on_failure = task_callback  # Old way
-
-    graph = task.TaskGraph()
-    graph.add_task(main_task)
-    graph.add_failure_callback(main_task.task_id, graph_callback)  # New way
-
-    # Both should coexist but represent different paradigms
-    assert main_task.on_failure is task_callback  # Old paradigm
-    assert graph_callback.task_id in graph.fail_edges[main_task.task_id]  # New paradigm
 
 
 def test_multiple_graph_level_callbacks_per_task():
@@ -2158,24 +2107,24 @@ def test_multiple_graph_level_callbacks_per_task():
     callback_1 = task.Task.default("callback_1")
     callback_2 = task.Task.default("callback_2")
     callback_3 = task.Task.default("callback_3")
+    main_task.on_failure = callback_1
+    callback_1.on_failure = callback_2
+    callback_2.on_failure = callback_3
 
     graph = task.TaskGraph()
     graph.add_task(main_task)
 
-    # Add multiple failure callbacks (new capability with graph-level callbacks)
-    graph.add_failure_callback(main_task.task_id, callback_1)
-    graph.add_failure_callback(main_task.task_id, callback_2)
-    graph.add_failure_callback(main_task.task_id, callback_3)
-
     # Verify all callbacks are present
-    failure_callbacks = graph.fail_edges[main_task.task_id]
-    assert callback_1.task_id in failure_callbacks
-    assert callback_2.task_id in failure_callbacks
-    assert callback_3.task_id in failure_callbacks
-    assert len(failure_callbacks) == 3
+    assert len(graph.fail_edges) == 3
+    assert callback_1.task_id in graph.fail_edges[main_task.task_id]
+    assert callback_1.task_id in graph.fail_edges
+    assert callback_2.task_id in graph.fail_edges[callback_1.task_id]
+    assert callback_2.task_id in graph.fail_edges
+    assert callback_3.task_id in graph.fail_edges
+    assert callback_3.task_id in graph.fail_edges[callback_2.task_id]
 
-    # This wasn't possible with task-level callbacks (could only have one)
-    assert main_task.on_failure is None  # Old system limited to single callback
+    for tsk in (main_task, callback_1, callback_2, callback_3):
+        assert tsk.on_failure is None
 
 
 def test_callback_inheritance_in_task_creation():
@@ -2334,7 +2283,7 @@ def test_failure_ready_tasks_with_no_failures():
     graph.add_failure_callback(task_a.task_id, failure_handler)
 
     # No failures yet, so no failure tasks should be ready
-    failure_tasks = list(graph.failure_ready_tasks())
+    failure_tasks = list(graph.generate_failure_ready_tasks())
     assert len(failure_tasks) == 0
 
 
@@ -2364,15 +2313,19 @@ def test_failure_ready_tasks_with_complex_dependency_chains():
     graph.add_failure_callback(main_b.task_id, handler_3)
 
     # A fails - only handler_1 should be ready (not handler_2 which depends on handler_1)
-    main_a.attempts.attempts = 5  # Mark as failed
-    failure_tasks = list(graph.failure_ready_tasks())
+    main_a.attempts.attempts = main_a.policy.max_tries + 1  # Mark as failed
+    failure_tasks = list(graph.generate_failure_ready_tasks())
     assert len(failure_tasks) == 1
     assert failure_tasks[0].task_id == handler_1.task_id
 
     # handler_1 completes successfully, now handler_2 should be ready
     handler_1.attempts.attempts = 1  # Mark as started but not failed
-    graph.results[handler_1.task_id] = task.TaskResult.success(handler_1)
-    failure_tasks = list(graph.failure_ready_tasks())
+    graph.results[handler_1.task_id] = task.TaskResultSlim(
+        status=task.TaskStatus.Started,
+        task_id=handler_1.task_id,
+        graph_id=graph.graph_id,
+    )
+    failure_tasks = list(graph.generate_failure_ready_tasks())
     assert len(failure_tasks) == 1
     assert failure_tasks[0].task_id == handler_2.task_id
 
@@ -2390,10 +2343,10 @@ def test_failure_ready_tasks_ignores_cycles_in_failure_graph():
     graph.add_failure_callback(main_task.task_id, handler_b)
 
     # Make main task fail
-    main_task.attempts.attempts = 5
+    main_task.attempts.attempts = main_task.policy.max_tries + 1
 
     # Both handlers should be ready since they're parallel failure callbacks
-    failure_tasks = list(graph.failure_ready_tasks())
+    failure_tasks = list(graph.generate_failure_ready_tasks())
     assert len(failure_tasks) == 2
     handler_ids = {t.task_id for t in failure_tasks}
     assert handler_a.task_id in handler_ids
@@ -2420,10 +2373,10 @@ def test_failure_ready_tasks_performance_with_large_graph():
 
     # Make half the main tasks fail
     for i in range(10):
-        main_tasks[i].attempts.attempts = 5
+        main_tasks[i].attempts.attempts = main_tasks[i].policy.max_tries + 1
 
     # Should get 10 failure handlers ready
-    failure_tasks = list(graph.failure_ready_tasks())
+    failure_tasks = list(graph.generate_failure_ready_tasks())
     assert len(failure_tasks) == 10
 
     # Verify the right handlers are ready
@@ -2454,22 +2407,30 @@ def test_failure_ready_tasks_with_mixed_failure_types():
     graph.add_failure_callback(manual_fail_task.task_id, manual_handler)
 
     # Simulate different failure types
-    timeout_task.attempts.attempts = 5  # Max retries reached
+    timeout_task.attempts.attempts = timeout_task.policy.max_tries + 1  # Max retries reached
 
     # Exception task - simulate exception result
     exception_task.attempts.attempts = 3
     graph.results[exception_task.task_id] = task.TaskResult(
-        task_id=exception_task.task_id, success=False, payload=None, exception="Test exception"
+        task_id=exception_task.task_id,
+        graph_id=graph.graph_id,
+        status=task.TaskStatus.Failure,
+        result=None,
+        formatted_exception="Test exception",
     )
 
     # Manual fail - task marked as failed but not max attempts
     manual_fail_task.attempts.attempts = 2  # Not max attempts but has failed result
     graph.results[manual_fail_task.task_id] = task.TaskResult(
-        task_id=manual_fail_task.task_id, success=False, payload=None, exception="Manual failure"
+        task_id=manual_fail_task.task_id,
+        graph_id=graph.graph_id,
+        status=task.TaskStatus.Failure,
+        result=None,
+        formatted_exception="Manual failure"
     )
 
     # All three should have their failure handlers ready
-    failure_tasks = list(graph.failure_ready_tasks())
+    failure_tasks = list(graph.generate_failure_ready_tasks())
     assert len(failure_tasks) == 3
 
     handler_names = {t.function_name for t in failure_tasks}

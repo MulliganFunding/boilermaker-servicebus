@@ -207,7 +207,7 @@ class TaskGraph(BaseModel):
 
         if task.on_failure:
             self.add_failure_callback(task.task_id, task.on_failure)
-            task.on_failure = None  # Clear to avoid duplication
+            task.on_failure = None
 
     def schedule_task(self, task_id: TaskId) -> TaskResult | TaskResultSlim:
         """Mark a task as scheduled to prevent double-scheduling."""
@@ -256,7 +256,27 @@ class TaskGraph(BaseModel):
         # If we get here, all antecedents have finished *OR* there are no antecedents.
         return True
 
-    def ready_tasks(self) -> Generator[Task]:
+    def generate_pending_results(self) -> Generator[TaskResultSlim]:
+        """
+        Generate pending TaskResultSlim entries for all tasks.
+
+        This should probably only be run when the graph is first created and stored
+        """
+        for task_id in self.children.keys():
+            # Create a pending result if it doesn't exist
+            if self.get_result(task_id) is None:
+                pending_result = TaskResultSlim(
+                    task_id=task_id,
+                    graph_id=self.graph_id,
+                    status=TaskStatus.Pending,
+                )
+                self.results[pending_result.task_id] = pending_result
+
+            task_result = self.results[task_id]
+            if task_result.status == TaskStatus.Pending:
+                yield task_result
+
+    def generate_ready_tasks(self) -> Generator[Task]:
         """Get a list of tasks that are ready to be executed (not started and all antecedents succeeded)."""
         for task_id in self.children.keys():
             # Task is ready if:
@@ -267,7 +287,7 @@ class TaskGraph(BaseModel):
             if is_not_started and self.task_is_ready(task_id):
                 yield self.children[task_id]
 
-    def failure_ready_tasks(self) -> Generator[Task]:
+    def generate_failure_ready_tasks(self) -> Generator[Task]:
         """Get a list of failure callback tasks that are ready to be executed.
 
         A failure task is ready if:
@@ -292,9 +312,17 @@ class TaskGraph(BaseModel):
             # Check if any triggering parent has failed
             has_failed_parent = False
             for parent_id in triggering_parents:
+                # Check if parent has failed status in results
                 if parent_id in self.results and self.results[parent_id].status.failed:
                     has_failed_parent = True
                     break
+
+                # Check if parent task is in success state
+                if parent_id in self.children:
+                    parent_task = self.children[parent_id]
+                    if not parent_task.can_retry:
+                        has_failed_parent = True
+                        break
 
             # Only yield if we have at least one failed parent
             if has_failed_parent:
@@ -309,26 +337,6 @@ class TaskGraph(BaseModel):
         if tr := self.get_result(task_id):
             return tr.status
         return None
-
-    def generate_pending_results(self) -> Generator[TaskResultSlim]:
-        """
-        Generate pending TaskResultSlim entries for all tasks.
-
-        This should probably only be run when the graph is first created and stored
-        """
-        for task_id in self.children.keys():
-            # Create a pending result if it doesn't exist
-            if self.get_result(task_id) is None:
-                pending_result = TaskResultSlim(
-                    task_id=task_id,
-                    graph_id=self.graph_id,
-                    status=TaskStatus.Pending,
-                )
-                self.results[pending_result.task_id] = pending_result
-
-            task_result = self.results[task_id]
-            if task_result.status == TaskStatus.Pending:
-                yield task_result
 
     def completed_successfully(self) -> bool:
         """Check if all tasks in the graph have completed successfully."""
@@ -351,12 +359,20 @@ class TaskGraph(BaseModel):
     def is_complete(self) -> bool:
         """Check if the graph has finished executing (either all success or has failures)."""
         all_tasks = set(self.children.keys()) | set(self.fail_children.keys())
+
+        # If there are no tasks, the graph is not complete
+        if not all_tasks:
+            return False
+
         complete_statuses = TaskStatus.finished_types()
-        return all(
-            self.get_status(task_id) in complete_statuses
-            for task_id in all_tasks
-            if self.get_status(task_id) is not None
-        )
+
+        # All tasks must have a status and be in a finished state
+        for task_id in all_tasks:
+            status = self.get_status(task_id)
+            if status is None or status not in complete_statuses:
+                return False
+
+        return True
 
 
 class TaskGraphBuilder:
@@ -524,11 +540,11 @@ class TaskGraphBuilder:
             middle_tasks: Tasks that run in parallel after last added task(s)
             final_task: Task that waits for all middle tasks to complete
         """
-        middle_ids = []
-        for task in middle_tasks:
-            self.then(task)
-            middle_ids.append(task.task_id)
+        # Add all middle tasks in parallel (they all depend on the last added tasks)
+        self.then_parallel(middle_tasks)
 
+        # Final task depends on all middle tasks
+        middle_ids = [task.task_id for task in middle_tasks]
         return self.add(final_task, depends_on=middle_ids)
 
     def conditional_branch(

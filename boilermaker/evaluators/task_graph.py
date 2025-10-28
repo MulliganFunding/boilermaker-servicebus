@@ -200,7 +200,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
 
         # Find and publish newly ready tasks
         ready_count = 0
-        for ready_task in graph.ready_tasks():
+        for ready_task in graph.generate_ready_tasks():
             # Write that the task was *scheduled* back to Blob Storage with blob etag and then publish the task!
             result = graph.schedule_task(ready_task.task_id)
             try:
