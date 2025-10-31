@@ -113,7 +113,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 result=None,
             )
             await self.storage_interface.store_task_result(task_result)
-            # Publish failure tasks
+            # Publish failure tasks which may be ready now
             await self.continue_graph(task_result)
             return task_result
 

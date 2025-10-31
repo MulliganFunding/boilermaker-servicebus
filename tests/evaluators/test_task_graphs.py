@@ -101,33 +101,73 @@ def test_task_graph_evaluator_requires_storage(app, mockservicebus):
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # Message Handler Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
-async def test_message_handler_retries_exhausted(evaluator, mock_storage, mockservicebus):
+async def test_message_handler_retries_exhausted(evaluator, mock_storage, mockservicebus, sample_graph, make_message):
     """Test message_handler when retries are exhausted."""
     # Set up task with exhausted retries
+    evaluator.task = next(sample_graph.generate_ready_tasks())
     evaluator.task.attempts.attempts = evaluator.task.policy.max_tries + 1
-    evaluator.task.graph_id = "test-graph-id"
+    # Can't dead letter without this attrib
+    evaluator.task.msg = make_message(evaluator.task, sequence_number=1234)
+
+    fail_1 = Task.default("fail_1")
+    sample_graph.add_failure_callback(evaluator.task.task_id, fail_1)
+    _ = list(sample_graph.generate_pending_results())
+    sample_graph.results[evaluator.task.task_id] = TaskResult(
+        task_id=evaluator.task.task_id,
+        graph_id=sample_graph.graph_id,
+        status=TaskStatus.RetriesExhausted,
+        errors=["Retries exhausted"],
+    )
+    sample_graph.results[fail_1.task_id] = TaskResult(
+        task_id=fail_1.task_id,
+        graph_id=sample_graph.graph_id,
+        status=TaskStatus.Pending,
+    )
+
+    # Mock the storage to return our sample graph
+    mock_storage.load_graph.return_value = sample_graph
 
     result = await evaluator.message_handler()
     assert isinstance(result, TaskResult)
     assert result.result is None
     assert result.status == TaskStatus.RetriesExhausted
 
-    # Should store failure result
-    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
+    # Should store results various
+    started_call, result_call, *others = mock_storage.store_task_result.mock_calls
+    assert isinstance(started_call.args[0], TaskResult)
+    started_result = started_call.args[0]
+    assert started_result.task_id == evaluator.task.task_id
+    assert started_result.graph_id == evaluator.task.graph_id
+    assert started_result.status == TaskStatus.Started
+
+    # Verify task result was stored
+    assert isinstance(result_call.args[0], TaskResult)
+    stored_result = result_call.args[0]
+    assert stored_result.task_id == evaluator.task.task_id
+    assert stored_result.graph_id == evaluator.task.graph_id
     assert stored_result.status == TaskStatus.RetriesExhausted
 
-    # No graph loaded
-    mock_storage.load_graph.assert_not_called()
+    assert len(others) == 1  # Failed task
+    fail_call = others[0]
+    assert isinstance(fail_call.args[0], TaskResultSlim)
+    fail_slim = fail_call.args[0]
+    assert fail_slim.task_id == fail_1.task_id
+
+    # Graph loaded
+    mock_storage.load_graph.assert_called()
 
     # Should settle message
     assert len(mockservicebus._receiver.method_calls) == 1
+    # Should schedule failure callback task
+    assert len(mockservicebus._sender.method_calls) == 1
 
 
 @pytest.mark.parametrize("acks_early", [True, False])
-async def test_message_handler_no_graph_success(acks_early, evaluator, mock_storage, mockservicebus):
+async def test_message_handler_no_graph_success(acks_early, evaluator, mock_storage, mockservicebus, make_message):
     """Test successful message handling with early/late acks."""
     evaluator.task.acks_late = not acks_early
     evaluator.task.graph_id = None
+    evaluator.task.msg = make_message(evaluator.task, sequence_number=1234)
 
     result = await evaluator.message_handler()
     assert isinstance(result, TaskResult)
@@ -147,7 +187,9 @@ async def test_message_handler_no_graph_success(acks_early, evaluator, mock_stor
     assert len(mockservicebus._receiver.method_calls) == 1
 
 
-async def test_message_handler_with_on_success_callback(evaluator, mock_storage, mockservicebus, app):
+async def test_message_handler_with_on_success_callback(
+    evaluator, mock_storage, mockservicebus, app, sample_graph, make_message
+):
     """
     Test message_handler with on_success callback.
 
@@ -155,13 +197,30 @@ async def test_message_handler_with_on_success_callback(evaluator, mock_storage,
     `on_success` task is published after successful execution.
     """
 
-    async def on_success_func(state):
+    async def main(state):
+        return 42
+
+    async def on_success_fake(state):
+        return "fake"
+
+    async def on_success_real(state):
         return "success"
 
-    app.register_async(on_success_func, policy=retries.NoRetry())
-    success_task = app.create_task(on_success_func)
-    evaluator.task.on_success = success_task
-    evaluator.task.graph_id = "test-graph-id"
+    app.register_async(main)
+    app.register_async(on_success_fake, policy=retries.NoRetry())
+    app.register_async(on_success_real, policy=retries.NoRetry())
+
+    sample_graph.add_task(app.task_registry["main"])
+    evaluator.task = app.task_registry["main"]
+
+    # Can't complete without this attrib
+    evaluator.task.msg = make_message(evaluator.task, sequence_number=1234)
+
+    # This one won't get called because it must be on the *graph* itself
+    evaluator.task.on_success = app.task_registry["on_success_fake"]
+    # This one *should* be called
+    sample_graph.add_task(app.task_registry["on_success_real"], parent_ids=[evaluator.task.task_id])
+    mock_storage.load_graph.return_value = sample_graph
 
     result = await evaluator.message_handler()
     assert isinstance(result, TaskResult)
@@ -176,6 +235,8 @@ async def test_message_handler_with_on_success_callback(evaluator, mock_storage,
     # Graph-id -> Graph loaded
     mock_storage.load_graph.assert_called()
 
+    # Should settle message
+    assert len(mockservicebus._receiver.method_calls) == 1
     # Should publish success callback task
     assert len(mockservicebus._sender.method_calls) == 1
 
@@ -334,7 +395,7 @@ async def test_message_handler_exception_handling(evaluator, mock_storage):
     assert stored_result_call.status == TaskStatus.Failure
 
     # Should not load graph or continue
-    mock_storage.load_graph.assert_not_called()
+    mock_storage.load_graph.assert_called()
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #

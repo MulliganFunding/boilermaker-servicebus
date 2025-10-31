@@ -1,3 +1,4 @@
+import itertools
 import typing
 from collections import defaultdict
 from collections.abc import Generator
@@ -61,9 +62,7 @@ class TaskGraph(BaseModel):
     # Failure children is a mapping of task IDs to tasks
     fail_children: dict[TaskId, Task] = Field(default_factory=dict)
     # Edges is a mapping of parent task IDs to sets of child task IDs
-    edges: dict[TaskId, set[TaskId]] = Field(
-        default_factory=lambda: defaultdict(set[TaskId])
-    )
+    edges: dict[TaskId, set[TaskId]] = Field(default_factory=lambda: defaultdict(set[TaskId]))
     # fail_edges is a mapping of parent task IDs to sets of child task IDs for failure callbacks
     fail_edges: dict[TaskId, set[TaskId]] = Field(default_factory=lambda: defaultdict(set[TaskId]))
 
@@ -222,7 +221,7 @@ class TaskGraph(BaseModel):
 
     def schedule_task(self, task_id: TaskId) -> TaskResult | TaskResultSlim:
         """Mark a task as scheduled to prevent double-scheduling."""
-        if task_id not in self.children:
+        if not (task_id in self.children or task_id in self.fail_children):
             raise ValueError(f"Task {task_id} not found in graph")
         if task_id not in self.results or self.results[task_id].status != TaskStatus.Pending:
             raise ValueError(f"Task {task_id} is not pending and cannot be scheduled")
@@ -234,7 +233,7 @@ class TaskGraph(BaseModel):
 
     def add_result(self, result: TaskResult) -> TaskResult:
         """Mark a task as completed with result."""
-        if result.task_id not in self.children:
+        if result.task_id not in self.children and result.task_id not in self.fail_children:
             raise ValueError(f"Task {result.task_id} not found in graph")
 
         self.results[result.task_id] = result
@@ -273,7 +272,7 @@ class TaskGraph(BaseModel):
 
         This should probably only be run when the graph is first created and stored
         """
-        for task_id in self.children.keys():
+        for task_id in itertools.chain.from_iterable((self.children.keys(), self.fail_children.keys())):
             # Create a pending result if it doesn't exist
             if self.get_result(task_id) is None:
                 pending_result = TaskResultSlim(
