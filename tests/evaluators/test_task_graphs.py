@@ -154,7 +154,7 @@ async def test_message_handler_with_retry_exception(retry_scenario):
         compare_status=TaskStatus.Retry,
         check_graph_loaded=False,
     ) as ctx:
-        assert ctx._evaluation_result.errors == ["Retry for 100"]
+        assert ctx.current_task_result.errors == ["Retry for 100"]
         ctx.assert_messages_scheduled(1)
         ctx.assert_graph_not_loaded()
 
@@ -198,7 +198,7 @@ async def test_message_handler_with_exception(exception_scenario):
         compare_result=None,
         compare_status=TaskStatus.Failure,
     ) as ctx:
-        assert ctx._evaluation_result.errors
+        assert ctx.current_task_result.errors
         # It's okay for this one to have been scheduled: its parent had previously succeeded!
         callback_allowed = ctx.success_callback_single_parent_task.task_id
         # It's *not* okay for this one to have been scheduled because one of its parents failed with exhausted retries

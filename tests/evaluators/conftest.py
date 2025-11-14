@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 from boilermaker import retries
-from boilermaker.evaluators import TaskGraphEvaluator
+from boilermaker.evaluators import ResultsStorageTaskEvaluator, TaskEvaluatorBase, TaskGraphEvaluator
 from boilermaker.failure import TaskFailureResult
 from boilermaker.task import Task, TaskGraph, TaskResult, TaskStatus
 
@@ -71,6 +71,7 @@ class EvaluatorTestContext:
         self.make_message = make_message
 
         self._published_messages = []
+        self._evaluator: TaskEvaluatorBase | None = None
 
         async def mock_task_publisher(task: Task, *args, **kwargs):
             self._published_messages.append(ScheduledMessage(task, args, kwargs))
@@ -132,11 +133,16 @@ class EvaluatorTestContext:
         return self
 
     @property
-    def evaluator(self) -> TaskGraphEvaluator:
+    def evaluator(self) -> TaskEvaluatorBase:
         """Get the current evaluator."""
         if self._evaluator is None:
             self.create_evaluator()
         return self._evaluator
+
+    @evaluator.setter
+    def evaluator(self, value: TaskEvaluatorBase) -> None:
+        """Set the current evaluator."""
+        self._evaluator = value
 
     def create_simple_graph(self) -> TaskGraph:
         """Create a simple test graph."""
@@ -192,6 +198,11 @@ class EvaluatorTestContext:
     def current_task(self, task: Task) -> None:
         """Set the current task for the evaluator."""
         self.evaluator.task = task
+
+    @property
+    def current_task_result(self) -> TaskResult | None:
+        """Get the current task result from the evaluator."""
+        return self._evaluation_result
 
     def get_task(self, task_id: str) -> Task | None:
         """Get a task from the graph by ID."""
@@ -394,6 +405,22 @@ class EvaluatorTestContext:
 def evaluator_context(app, mockservicebus, mock_storage, make_message):
     """Provide a clean evaluator test context."""
     return EvaluatorTestContext(app, mockservicebus, mock_storage, make_message)
+
+
+@pytest.fixture
+def store_evaluator_context(app, mockservicebus, mock_storage, make_message):
+    """Provide a clean evaluator test context."""
+    ctx = EvaluatorTestContext(app, mockservicebus, mock_storage, make_message)
+    # Override the evaluator to not load the graph
+    ctx.evaluator = ResultsStorageTaskEvaluator(
+        ctx.mockservicebus._receiver,
+        ctx.evaluator.task,
+        ctx.mock_task_publisher,
+        ctx.app.function_registry,
+        state=ctx.app.state,
+        storage_interface=ctx.mock_storage,
+    )
+    return ctx
 
 
 @pytest.fixture
