@@ -320,23 +320,10 @@ class TaskGraph(BaseModel):
                     triggering_parents.append(parent_id)
 
             # Check if any triggering parent has failed
-            has_failed_parent = False
             for parent_id in triggering_parents:
                 # Check if parent has failed status in results
                 if parent_id in self.results and self.results[parent_id].status.failed:
-                    has_failed_parent = True
-                    break
-
-                # Check if parent task is in success state
-                if parent_id in self.children:
-                    parent_task = self.children[parent_id]
-                    if not parent_task.can_retry:
-                        has_failed_parent = True
-                        break
-
-            # Only yield if we have at least one failed parent
-            if has_failed_parent:
-                yield self.fail_children[task_id]
+                    yield self.fail_children[task_id]
 
     def get_result(self, task_id: TaskId) -> TaskResultSlim | TaskResult | None:
         """Get the result of a completed task."""
@@ -366,6 +353,7 @@ class TaskGraph(BaseModel):
             if self.get_status(task_id) is not None
         )
 
+    # TODO: WRITE / INCORRECT
     def is_complete(self) -> bool:
         """Check if the graph has finished executing (either all success or has failures)."""
         all_tasks = set(self.children.keys()) | set(self.fail_children.keys())
@@ -377,6 +365,8 @@ class TaskGraph(BaseModel):
         complete_statuses = TaskStatus.finished_types()
 
         # All tasks must have a status and be in a finished state
+        # This won't work in the presence of failure! We need to check if
+        # A succeeding task has failed, its failure callbacks may not have run yet.
         for task_id in all_tasks:
             status = self.get_status(task_id)
             if status is None or status not in complete_statuses:

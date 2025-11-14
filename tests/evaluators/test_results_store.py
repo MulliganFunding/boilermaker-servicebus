@@ -94,7 +94,7 @@ async def test_message_handler_stores_function_exception(evaluator, mock_storage
     # (storage happens in message_handler for exceptions)
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(mock_storage, task)
+    _started_result, stored_result, _ = verify_storage_started_and_get_result_calls(mock_storage, task)
     assert stored_result.result is None
     assert stored_result.status == TaskStatus.Failure
     assert "Something went wrong" in stored_result.formatted_exception
@@ -124,7 +124,7 @@ async def test_message_handler_success(evaluator, mock_storage):
     assert result.status == TaskStatus.Success
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
+    _started_result, stored_result, _ = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.result == 42
     assert stored_result.status == TaskStatus.Success
     assert stored_result.errors is None
@@ -178,7 +178,7 @@ async def test_task_success_with_storage(
     assert complete_msg_call[1][0].sequence_number == message_num
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
+    _started_result, stored_result, _ = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.status == TaskStatus.Success
     assert stored_result.result == "OK"
     assert stored_result.errors is None
@@ -251,7 +251,7 @@ async def test_task_failure_with_storage(
     assert complete_msg_call[1][0].sequence_number == message_num
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
+    _started_result, stored_result, _ = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.status == TaskStatus.Failure
     assert stored_result.result is None
 
@@ -324,7 +324,7 @@ async def test_task_retries_with_storage(
     assert complete_msg_call[1][0].sequence_number == message_num
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
+    _started_result, stored_result, _ = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
 
     if not can_retry:
         # Retries exhausted - should store failure result
@@ -379,7 +379,7 @@ async def test_retries_exhausted_with_storage(app, mockservicebus, mock_storage,
     assert result.result is None
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
+    _started_result, stored_result, _ = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.status == TaskStatus.RetriesExhausted
 
     # Task should be deadlettered
@@ -426,7 +426,7 @@ async def test_retry_policy_update_with_storage(app, mockservicebus, mock_storag
 
     # Should still store result
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
+    _started_result, stored_result, _ = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.status == TaskStatus.Retry
 
 
@@ -463,7 +463,7 @@ async def test_early_acks_with_storage(app, mockservicebus, mock_storage, make_m
     assert complete_msg_call[0] == "complete_message"
 
     # Verify task started was stored and  task_result was stored
-    stored_result = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
+    _started_result, stored_result, _ = verify_storage_started_and_get_result_calls(mock_storage, evaluator.task)
     assert stored_result.status == TaskStatus.Success
 
 

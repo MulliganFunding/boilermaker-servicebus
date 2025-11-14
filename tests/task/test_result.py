@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from boilermaker import task
 
 
@@ -15,9 +17,7 @@ def test_task_result_slim():
     task_id = task.TaskId("test-task-id")
     graph_id = task.GraphId("test-graph-id")
 
-    result = task.TaskResultSlim(
-        task_id=task_id, graph_id=graph_id, status=task.TaskStatus.Success
-    )
+    result = task.TaskResultSlim(task_id=task_id, graph_id=graph_id, status=task.TaskStatus.Success)
 
     assert result.task_id == task_id
     assert result.graph_id == graph_id
@@ -25,15 +25,11 @@ def test_task_result_slim():
 
 
 def test_task_result_slim_paths():
-    from pathlib import Path
-
     task_id = task.TaskId("test-task-id")
     graph_id = task.GraphId("test-graph-id")
 
     # With graph_id
-    result = task.TaskResultSlim(
-        task_id=task_id, graph_id=graph_id, status=task.TaskStatus.Success
-    )
+    result = task.TaskResultSlim(task_id=task_id, graph_id=graph_id, status=task.TaskStatus.Success)
 
     assert result.directory_path == Path(graph_id)
     assert result.storage_path == Path(graph_id) / "test-task-id.json"

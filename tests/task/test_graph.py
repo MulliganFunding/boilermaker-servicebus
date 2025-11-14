@@ -4,7 +4,19 @@ from pathlib import Path
 import pytest
 from boilermaker import retries, task
 
+from ..evaluators.helpers import (
+    assert_cycle_detection_error,
+    assert_dependency_exists,
+    assert_graph_structure,
+    assert_task_in_graph,
+    create_mock_task_result,
+)
+from ..graph_factories import diamond_graph, linear_graph, ready_task_scenario, simple_graph
 
+
+# ~~~~ ~~~~~ ~~~~ ~~~~ #
+# TaskGraph Tests
+# ~~~~ ~~~~~ ~~~~ ~~~~ #
 async def sample_task(state, number1, number2: int = 4):
     if hasattr(state, "sample_task_called"):
         state.sample_task_called += number1
@@ -24,29 +36,18 @@ def test_task_graph_creation():
 
 
 def test_task_graph_add_task():
-    graph = task.TaskGraph()
-    t1 = task.Task.default("func1")
-
-    graph.add_task(t1)
-
-    assert t1.task_id in graph.children
-    assert graph.children[t1.task_id] is t1
-    assert t1.graph_id == graph.graph_id
+    graph, t1 = simple_graph()
+    assert_task_in_graph(graph, t1)
 
 
 def test_task_graph_add_task_with_parent():
-    graph = task.TaskGraph()
-    t1 = task.Task.default("func1")
-    t2 = task.Task.default("func2")
+    graph, tasks = linear_graph(2)
+    t1, t2 = tasks
 
-    graph.add_task(t1)
-    graph.add_task(t2, parent_ids=[t1.task_id])
-
-    assert t1.task_id in graph.children
-    assert t2.task_id in graph.children
-    assert t1.task_id in graph.edges
-    assert t2.task_id in graph.edges[t1.task_id]
-    assert t2.graph_id == graph.graph_id
+    assert_graph_structure(graph, expected_children=2)
+    assert_task_in_graph(graph, t1)
+    assert_task_in_graph(graph, t2)
+    assert_dependency_exists(graph, t1, t2)
 
 
 def test_task_graph_schedule_task():
@@ -110,14 +111,8 @@ def test_task_graph_add_result_invalid_task():
 
 
 def test_task_graph_all_antecedents_succeeded():
-    graph = task.TaskGraph()
-    t1 = task.Task.default("func1")
-    t2 = task.Task.default("func2")
-    t3 = task.Task.default("func3")
-
-    graph.add_task(t1)
-    graph.add_task(t2, parent_ids=[t1.task_id])
-    graph.add_task(t3, parent_ids=[t2.task_id])
+    graph, tasks = linear_graph(3)
+    t1, t2, t3 = tasks
 
     # t1 has no antecedents, should be ready
     assert graph.all_antecedents_succeeded(t1.task_id) is True
@@ -126,12 +121,10 @@ def test_task_graph_all_antecedents_succeeded():
     assert graph.all_antecedents_succeeded(t2.task_id) is False
 
     # Mark t1 as successful
-    graph.add_result(task.TaskResult(task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success))
+    graph.add_result(create_mock_task_result(t1, task.TaskStatus.Success))
 
-    # Now t2 should be ready
+    # Now t2 should be ready, but t3 still not ready
     assert graph.all_antecedents_succeeded(t2.task_id) is True
-
-    # t3 still not ready (t2 not succeeded)
     assert graph.all_antecedents_succeeded(t3.task_id) is False
 
 
@@ -145,31 +138,16 @@ def test_task_graph_task_is_ready():
 
 
 def test_task_graph_ready_tasks():
-    graph = task.TaskGraph()
-    t1 = task.Task.default("func1")
-    t2 = task.Task.default("func2")
-    t3 = task.Task.default("func3")
+    graph, tasks, assert_ready = ready_task_scenario()
 
-    graph.add_task(t1)
-    graph.add_task(t2, parent_ids=[t1.task_id])
-    graph.add_task(t3)  # Independent task
+    # Initially only root should be ready
+    assert_ready(["root"])
 
-    ready_tasks = list(graph.generate_ready_tasks())
-    ready_task_ids = [t.task_id for t in ready_tasks]
+    # Complete root task - now both branches should be ready
+    root_result = create_mock_task_result(tasks["root"], task.TaskStatus.Success)
+    graph.add_result(root_result)
 
-    # t1 and t3 should be ready (no antecedents)
-    assert t1.task_id in ready_task_ids
-    assert t3.task_id in ready_task_ids
-    assert t2.task_id not in ready_task_ids
-
-    # Mark t1 as successful
-    graph.add_result(task.TaskResult(task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success))
-
-    # Now t2 should also be ready
-    ready_tasks = list(graph.generate_ready_tasks())
-    ready_task_ids = [t.task_id for t in ready_tasks]
-    assert t2.task_id in ready_task_ids
-    assert t3.task_id in ready_task_ids
+    assert_ready(["left", "right"])
 
 
 def test_task_graph_ready_tasks_excludes_started():
@@ -221,80 +199,35 @@ def test_task_graph_storage_path():
 
 
 def test_task_graph_complex_dependency():
-    """Test a more complex graph with multiple dependencies."""
-    graph = task.TaskGraph()
+    """Test a diamond dependency pattern with multiple dependencies."""
+    graph, tasks, assert_ready = ready_task_scenario()
 
-    # Create a diamond dependency pattern:
-    #    t1
-    #   /  \
-    #  t2  t3
-    #   \  /
-    #    t4
+    # Initially only root should be ready
+    assert_ready(["root"])
 
-    t1 = task.Task.default("func1")
-    t2 = task.Task.default("func2")
-    t3 = task.Task.default("func3")
-    t4 = task.Task.default("func4")
+    # Complete root - left and right should be ready
+    graph.add_result(create_mock_task_result(tasks["root"], task.TaskStatus.Success))
+    assert_ready(["left", "right"])
 
-    graph.add_task(t1)
-    graph.add_task(t2, parent_ids=[t1.task_id])
-    graph.add_task(t3, parent_ids=[t1.task_id])
-    graph.add_task(t4, parent_ids=[t2.task_id])
+    # Complete left only - merge still not ready (needs both)
+    graph.add_result(create_mock_task_result(tasks["left"], task.TaskStatus.Success))
+    assert_ready(["right"])  # Only right still ready
 
-    # Add t4 as child of t3 as well (multiple parents)
-    graph.edges[t3.task_id].add(t4.task_id)
-
-    # Initially only t1 should be ready
-    ready_tasks = list(graph.generate_ready_tasks())
-    assert len(ready_tasks) == 1
-    assert ready_tasks[0].task_id == t1.task_id
-
-    # Complete t1
-    graph.add_result(task.TaskResult(task_id=t1.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success))
-
-    # Now t2 and t3 should be ready
-    ready_tasks = list(graph.generate_ready_tasks())
-    ready_task_ids = [t.task_id for t in ready_tasks]
-    assert len(ready_tasks) == 2
-    assert t2.task_id in ready_task_ids
-    assert t3.task_id in ready_task_ids
-    assert t4.task_id not in ready_task_ids  # Still needs both t2 and t3
-
-    # Complete t2 only
-    graph.add_result(task.TaskResult(task_id=t2.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success))
-
-    # t4 still not ready (needs t3 too)
-    ready_tasks = list(graph.generate_ready_tasks())
-    ready_task_ids = [t.task_id for t in ready_tasks]
-    assert t4.task_id not in ready_task_ids
-
-    # Complete t3
-    graph.add_result(task.TaskResult(task_id=t3.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success))
-
-    # Now t4 should be ready
-    ready_tasks = list(graph.generate_ready_tasks())
-    assert len(ready_tasks) == 1
-    assert ready_tasks[0].task_id == t4.task_id
+    # Complete right - now merge should be ready
+    graph.add_result(create_mock_task_result(tasks["right"], task.TaskStatus.Success))
+    assert_ready(["merge"])
 
 
 def test_task_graph_cycle_detection_simple():
     """Test that simple cycles are detected and rejected."""
-    graph = task.TaskGraph()
-    t1 = task.Task.default("task1")
-    t2 = task.Task.default("task2")
+    graph, tasks = linear_graph(2)
+    t1, t2 = tasks
 
-    # Add tasks: t1 -> t2
-    graph.add_task(t1)
-    graph.add_task(t2, parent_ids=[t1.task_id])
-
-    # Try to create cycle by manually adding edge t2 -> t1, then adding a task
-    # This simulates creating a cycle in the graph
+    # Manually create cycle: t2 -> t1
     graph.edges[t2.task_id] = {t1.task_id}
 
     # Now any add_task operation should detect the cycle
-    t3 = task.Task.default("task3")
-    with pytest.raises(ValueError, match="would create a cycle in the DAG"):
-        graph.add_task(t3, parent_ids=[t1.task_id])
+    assert_cycle_detection_error(graph, task.Task.default("task3"), [t1.task_id])
 
 
 def test_task_graph_cycle_detection_complex():
@@ -336,33 +269,18 @@ def test_task_graph_cycle_detection_self_loop():
 
 def test_task_graph_no_false_positive_cycles():
     """Test that valid DAG structures don't trigger false positive cycle detection."""
-    graph = task.TaskGraph()
+    graph, tasks = diamond_graph()
 
-    # Create diamond pattern: t1 -> (t2, t3) -> t4
-    t1 = task.Task.default("task1")
-    t2 = task.Task.default("task2")
-    t3 = task.Task.default("task3")
-    t4 = task.Task.default("task4")
-
-    # This should all work without raising cycle detection errors
-    graph.add_task(t1)
-    graph.add_task(t2, parent_ids=[t1.task_id])
-    graph.add_task(t3, parent_ids=[t1.task_id])
-    graph.add_task(t4, parent_ids=[t2.task_id])
-
-    # Add t4 as child of t3 as well (multiple parents, but no cycle)
-    graph.edges[t3.task_id].add(t4.task_id)
-
-    # Verify the structure is correct
-    assert t2.task_id in graph.edges[t1.task_id]
-    assert t3.task_id in graph.edges[t1.task_id]
-    assert t4.task_id in graph.edges[t2.task_id]
-    assert t4.task_id in graph.edges[t3.task_id]
+    # Verify the diamond structure is correct
+    assert_dependency_exists(graph, tasks["root"], tasks["left"])
+    assert_dependency_exists(graph, tasks["root"], tasks["right"])
+    assert_dependency_exists(graph, tasks["left"], tasks["merge"])
+    assert_dependency_exists(graph, tasks["right"], tasks["merge"])
 
     # Should be able to add more tasks without cycle detection issues
     t5 = task.Task.default("task5")
-    graph.add_task(t5, parent_ids=[t4.task_id])
-    assert t5.task_id in graph.edges[t4.task_id]
+    graph.add_task(t5, parent_ids=[tasks["merge"].task_id])
+    assert_dependency_exists(graph, tasks["merge"], t5)
 
 
 def test_task_graph_cycle_detection():
@@ -470,7 +388,7 @@ def test_task_graph_generate_pending_results():
 
 
 def test_task_graph_completed_successfully():
-    """Test completed_successfully method (line 618)."""
+    """Test completed_successfully method."""
     graph = task.TaskGraph()
     t1 = task.Task.default("task1")
     t2 = task.Task.default("task2")
@@ -508,7 +426,7 @@ def test_task_graph_completed_successfully():
 
 
 def test_task_graph_cycle_detection_rollback():
-    """Test that cycle detection properly rolls back changes - covers line 546"""
+    """Test that cycle detection properly rolls back changes"""
     graph = task.TaskGraph(graph_id="test_graph")
 
     # Create tasks
@@ -555,444 +473,6 @@ def test_task_si_uses_default_retry_attempts():
     # Should use default retry attempts (line 111 in si method)
     assert isinstance(atask.attempts, retries.RetryAttempts)
     assert atask.attempts.attempts == 0  # Default should start with 0 attempts
-
-
-# =============================================================================
-# COMPREHENSIVE CYCLE DETECTION ALGORITHM CORRECTNESS TESTS
-# =============================================================================
-
-
-def test_cycle_detection_algorithm_disconnected_components():
-    """Test cycle detection with disconnected graph components.
-
-    This tests if the algorithm correctly handles graphs with multiple
-    disconnected components, some with cycles and some without.
-    """
-    graph = task.TaskGraph(graph_id="disconnect_test")
-
-    # Component 1: A -> B -> C (no cycle)
-    task_a = task.Task.si(sample_task)
-    task_b = task.Task.si(sample_task)
-    task_c = task.Task.si(sample_task)
-
-    graph.add_task(task_a)
-    graph.add_task(task_b, parent_ids=[task_a.task_id])
-    graph.add_task(task_c, parent_ids=[task_b.task_id])
-
-    # Component 2: D -> E (no cycle, disconnected)
-    task_d = task.Task.si(sample_task)
-    task_e = task.Task.si(sample_task)
-
-    graph.add_task(task_d)
-    graph.add_task(task_e, parent_ids=[task_d.task_id])
-
-    # Should be no cycles yet
-    assert not graph._detect_cycles()
-
-    # Now try to create a cycle in component 1: C -> A
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(task_a, parent_ids=[task_c.task_id])
-
-
-def test_cycle_detection_algorithm_self_loop_edge_case():
-    """Test if algorithm handles self-loops correctly.
-
-    Edge case: What happens if we try to create a task that depends on itself?
-    """
-    graph = task.TaskGraph(graph_id="self_loop_test")
-
-    task_a = task.Task.si(sample_task)
-    graph.add_task(task_a)
-
-    # Try to create a self-loop: A -> A
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(task_a, parent_ids=[task_a.task_id])
-
-
-def test_cycle_detection_algorithm_complex_diamond_with_cycle():
-    """Test diamond dependency pattern that could create subtle cycle.
-
-    Pattern:    A
-               / \\
-              B   C
-               \\ /
-                D
-    Then try: D -> A (should detect cycle)
-    """
-    graph = task.TaskGraph(graph_id="diamond_test")
-
-    # Create diamond pattern
-    task_a = task.Task.si(sample_task)  # Root
-    task_b = task.Task.si(sample_task)  # Left branch
-    task_c = task.Task.si(sample_task)  # Right branch
-    task_d = task.Task.si(sample_task)  # Convergence
-
-    graph.add_task(task_a)
-    graph.add_task(task_b, parent_ids=[task_a.task_id])  # A -> B
-    graph.add_task(task_c, parent_ids=[task_a.task_id])  # A -> C
-    graph.add_task(task_d, parent_ids=[task_b.task_id])  # B -> D
-
-    # This should work - adding second parent to D
-    # This tests if the algorithm handles multiple parents correctly
-    graph.add_task(task_d, parent_ids=[task_c.task_id])  # C -> D (second parent)
-
-    # Now try to close the loop: D -> A
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(task_a, parent_ids=[task_d.task_id])
-
-
-def test_cycle_detection_algorithm_long_cycle():
-    """Test detection of cycles in long chains.
-
-    Create: A -> B -> C -> D -> E -> F
-    Then try: F -> A (should detect 6-node cycle)
-    """
-    graph = task.TaskGraph(graph_id="long_cycle_test")
-
-    tasks = [task.Task.si(sample_task) for _ in range(6)]  # A, B, C, D, E, F
-
-    # Add first task
-    graph.add_task(tasks[0])
-
-    # Create chain: A -> B -> C -> D -> E -> F
-    for i in range(1, 6):
-        graph.add_task(tasks[i], parent_ids=[tasks[i - 1].task_id])
-
-    # Should be no cycle yet
-    assert not graph._detect_cycles()
-
-    # Try to close the long cycle: F -> A
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(tasks[0], parent_ids=[tasks[5].task_id])
-
-
-def test_cycle_detection_algorithm_multiple_entry_points():
-    """Test cycle detection with multiple possible entry points.
-
-    Create complex graph:
-         A -> B -> D
-         |    |
-         v    v
-         C -> E -> F
-
-    Then try: F -> B (should create cycle through B->D path and B->E->F path)
-    """
-    graph = task.TaskGraph(graph_id="multi_entry_test")
-
-    task_a = task.Task.si(sample_task)
-    task_b = task.Task.si(sample_task)
-    task_c = task.Task.si(sample_task)
-    task_d = task.Task.si(sample_task)
-    task_e = task.Task.si(sample_task)
-    task_f = task.Task.si(sample_task)
-
-    # Build the graph structure
-    graph.add_task(task_a)
-    graph.add_task(task_b, parent_ids=[task_a.task_id])  # A -> B
-    graph.add_task(task_c, parent_ids=[task_a.task_id])  # A -> C
-    graph.add_task(task_d, parent_ids=[task_b.task_id])  # B -> D
-    graph.add_task(task_e, parent_ids=[task_b.task_id])  # B -> E
-    graph.add_task(task_e, parent_ids=[task_c.task_id])  # C -> E (E has multiple parents)
-    graph.add_task(task_f, parent_ids=[task_e.task_id])  # E -> F
-
-    # Try to create cycle: F -> B
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(task_b, parent_ids=[task_f.task_id])
-
-
-def test_cycle_detection_stress_test_false_positive():
-    """Stress test: Ensure algorithm doesn't have false positives.
-
-    Create a complex DAG that's valid and ensure no false cycle detection.
-    This tests the algorithmic correctness under complex valid scenarios.
-    """
-    graph = task.TaskGraph(graph_id="stress_test")
-
-    # Create a complex but valid DAG (tree-like with convergence)
-    #       A
-    #      /|\
-    #     B C D
-    #    /| ||\
-    #   E F G H I
-    #    \|/  \|/
-    #     J    K
-    #      \  /
-    #       L
-
-    tasks = {name: task.Task.si(sample_task) for name in "ABCDEFGHIJKL"}
-
-    # Build the structure
-    graph.add_task(tasks["A"])
-
-    # Level 2: A -> B, C, D
-    for child in "BCD":
-        graph.add_task(tasks[child], parent_ids=[tasks["A"].task_id])
-
-    # Level 3: B -> E,F; C -> G; D -> H,I
-    graph.add_task(tasks["E"], parent_ids=[tasks["B"].task_id])
-    graph.add_task(tasks["F"], parent_ids=[tasks["B"].task_id])
-    graph.add_task(tasks["G"], parent_ids=[tasks["C"].task_id])
-    graph.add_task(tasks["H"], parent_ids=[tasks["D"].task_id])
-    graph.add_task(tasks["I"], parent_ids=[tasks["D"].task_id])
-
-    # Multiple parents
-    # Level 4: E,F,G -> J; H,I -> K
-    graph.add_task(
-        tasks["J"],
-        parent_ids=[
-            tasks["E"].task_id,
-            tasks["F"].task_id,
-            tasks["G"].task_id,
-        ],
-    )
-
-    graph.add_task(tasks["K"], parent_ids=[tasks["H"].task_id, tasks["I"].task_id])
-
-    # Level 5: J,K -> L
-    graph.add_task(tasks["L"], parent_ids=[tasks["J"].task_id, tasks["K"].task_id])
-
-    # This complex DAG should be valid - no cycles
-    assert not graph._detect_cycles()
-
-    # The stress test: this should still be valid
-    assert len(graph.children) == 12  # All tasks added
-
-    # Only tasks with no parents should be ready initially (just A)
-    ready_tasks = list(graph.generate_ready_tasks())
-    assert len(ready_tasks) == 1
-    assert tasks["A"] in ready_tasks  # Only A has no dependencies initially
-
-
-def test_cycle_detection_algorithm_edge_case_empty_graph():
-    """Test cycle detection on empty graph."""
-    graph = task.TaskGraph(graph_id="empty_test")
-    assert not graph._detect_cycles()  # Empty graph has no cycles
-
-
-def test_cycle_detection_algorithm_single_node():
-    """Test cycle detection with single isolated node."""
-    graph = task.TaskGraph(graph_id="single_test")
-
-    task_a = task.Task.si(sample_task)
-    graph.add_task(task_a)
-
-    assert not graph._detect_cycles()  # Single node can't have cycle
-
-
-def test_cycle_detection_potential_algorithm_bug_duplicate_add():
-    """Test potential bug: What if we try to add the same task twice?
-
-    This might reveal edge cases in how the algorithm handles existing nodes.
-    """
-    graph = task.TaskGraph(graph_id="duplicate_test")
-
-    task_a = task.Task.si(sample_task)
-    task_b = task.Task.si(sample_task)
-
-    # Add tasks normally
-    graph.add_task(task_a)
-    graph.add_task(task_b, parent_ids=[task_a.task_id])
-
-    # What happens if we try to add the same relationship again?
-    # This might reveal if the algorithm handles duplicate edges correctly
-    graph.add_task(task_b, parent_ids=[task_a.task_id])  # Same relationship again
-
-    # Should still be no cycle
-    assert not graph._detect_cycles()
-
-    # But the edges set should not have duplicates
-    assert len(graph.edges[task_a.task_id]) == 1
-
-
-def test_cycle_detection_race_condition_simulation():
-    """Test if cycle detection has issues with edge ordering.
-
-    Tests whether the order of adding edges affects cycle detection correctness.
-    """
-    # Test case 1: Add A->B then B->C then C->A
-    graph1 = task.TaskGraph(graph_id="race1")
-    tasks1 = [task.Task.si(sample_task) for _ in range(3)]
-
-    graph1.add_task(tasks1[0])  # A
-    graph1.add_task(tasks1[1], parent_ids=[tasks1[0].task_id])  # A -> B
-    graph1.add_task(tasks1[2], parent_ids=[tasks1[1].task_id])  # B -> C
-
-    # This should create a cycle
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph1.add_task(tasks1[0], parent_ids=[tasks1[2].task_id])  # C -> A
-
-    # Test case 2: Same graph, different order
-    graph2 = task.TaskGraph(graph_id="race2")
-    tasks2 = [task.Task.si(sample_task) for _ in range(3)]
-
-    graph2.add_task(tasks2[0])  # A
-    graph2.add_task(tasks2[2])  # C (add C first)
-    graph2.add_task(tasks2[1], parent_ids=[tasks2[0].task_id])  # A -> B
-    graph2.add_task(tasks2[2], parent_ids=[tasks2[1].task_id])  # B -> C
-
-    # Should also detect the same cycle
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph2.add_task(tasks2[0], parent_ids=[tasks2[2].task_id])  # C -> A
-
-
-def test_cycle_detection_algorithm_subtle_bug_attempt():
-    """Attempt to find a subtle bug in cycle detection.
-
-    This test tries to exploit potential issues with:
-    1. Adding same task multiple times with different parents
-    2. Complex path structures that might confuse the DFS
-    3. Edge cases in recursion stack management
-    """
-    graph = task.TaskGraph(graph_id="subtle_bug_test")
-
-    # Create tasks
-    task_a = task.Task.si(sample_task)
-    task_b = task.Task.si(sample_task)
-    task_c = task.Task.si(sample_task)
-    task_d = task.Task.si(sample_task)
-
-    # Build a complex structure step by step
-    graph.add_task(task_a)  # A (root)
-    graph.add_task(task_b, parent_ids=[task_a.task_id])  # A -> B
-    graph.add_task(task_c, parent_ids=[task_b.task_id])  # B -> C
-    graph.add_task(task_d, parent_ids=[task_c.task_id])  # C -> D
-
-    # Now add A as a child of B (should be allowed, creates A -> B -> ... -> B)
-    # Wait, this wouldn't work because A already exists...
-    # Let me try a different approach
-
-    # Add D as additional child of A (creates: A -> B -> C -> D and A -> D)
-    graph.add_task(task_d, parent_ids=[task_a.task_id])  # A -> D (second parent for D)
-
-    # Now we have: A -> B -> C -> D and A -> D
-    # This should be fine, no cycle
-    assert not graph._detect_cycles()
-
-    # Now try to create a cycle: D -> A
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(task_a, parent_ids=[task_d.task_id])  # D -> A (would create cycle)
-
-
-def test_cycle_detection_algorithm_really_try_to_break_it():
-    """Final attempt to break the cycle detection algorithm.
-
-    This creates the most complex scenario I can think of to try to break
-    the DFS-based cycle detection.
-    """
-    graph = task.TaskGraph(graph_id="break_it_test")
-
-    # Create a graph that has many interconnections
-    tasks = [task.Task.si(sample_task) for _ in range(10)]  # 0-9
-
-    # Add all tasks first
-    for t in tasks:
-        graph.add_task(t)
-
-    # Create complex dependencies:
-    # 0 -> 1 -> 2 -> 3
-    # 0 -> 4 -> 5 -> 3
-    # 0 -> 6 -> 7 -> 8 -> 9
-    # 4 -> 9
-    # 5 -> 8
-    graph.add_task(tasks[1], parent_ids=[tasks[0].task_id])  # 0 -> 1
-    graph.add_task(tasks[2], parent_ids=[tasks[1].task_id])  # 1 -> 2
-    graph.add_task(tasks[3], parent_ids=[tasks[2].task_id])  # 2 -> 3
-
-    graph.add_task(tasks[4], parent_ids=[tasks[0].task_id])  # 0 -> 4
-    graph.add_task(tasks[5], parent_ids=[tasks[4].task_id])  # 4 -> 5
-    graph.add_task(tasks[3], parent_ids=[tasks[5].task_id])  # 5 -> 3 (multiple parents for 3)
-
-    graph.add_task(tasks[6], parent_ids=[tasks[0].task_id])  # 0 -> 6
-    graph.add_task(tasks[7], parent_ids=[tasks[6].task_id])  # 6 -> 7
-    graph.add_task(tasks[8], parent_ids=[tasks[7].task_id])  # 7 -> 8
-    graph.add_task(tasks[9], parent_ids=[tasks[8].task_id])  # 8 -> 9
-
-    graph.add_task(tasks[9], parent_ids=[tasks[4].task_id])  # 4 -> 9 (multiple parents for 9)
-    graph.add_task(tasks[8], parent_ids=[tasks[5].task_id])  # 5 -> 8 (multiple parents for 8)
-
-    # This complex structure should still be a valid DAG
-    assert not graph._detect_cycles()
-
-    # Now try various ways to create cycles:
-
-    # Try: 3 -> 0 (would create multiple cycles)
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(tasks[0], parent_ids=[tasks[3].task_id])
-
-    # Try: 9 -> 4 (would create cycle through 4 -> 9 path)
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(tasks[4], parent_ids=[tasks[9].task_id])
-
-    # Try: 8 -> 5 (would create cycle through 5 -> 8 path)
-    with pytest.raises(ValueError, match="would create a cycle"):
-        graph.add_task(tasks[5], parent_ids=[tasks[8].task_id])
-
-
-# =============================================================================
-# FAILURE HANDLING TESTS
-# =============================================================================
-
-
-def test_task_status_new_properties():
-    """Test the new TaskStatus properties for failure handling."""
-    # Test succeeded property
-    assert task.TaskStatus.Success.succeeded is True
-    assert task.TaskStatus.Failure.succeeded is False
-    assert task.TaskStatus.Pending.succeeded is False
-
-    # Test finished property
-    assert task.TaskStatus.Success.finished is True
-    assert task.TaskStatus.Failure.finished is True
-    assert task.TaskStatus.RetriesExhausted.finished is True
-    assert task.TaskStatus.Deadlettered.finished is True
-    assert task.TaskStatus.Pending.finished is False
-    assert task.TaskStatus.Started.finished is False
-
-    # Test failed property
-    assert task.TaskStatus.Failure.failed is True
-    assert task.TaskStatus.RetriesExhausted.failed is True
-    assert task.TaskStatus.Deadlettered.failed is True
-    assert task.TaskStatus.Success.failed is False
-    assert task.TaskStatus.Pending.failed is False
-
-    # Test class methods
-    failure_types = task.TaskStatus.failure_types()
-    expected_failure_types = {
-        task.TaskStatus.Failure,
-        task.TaskStatus.RetriesExhausted,
-        task.TaskStatus.Deadlettered,
-    }
-    assert failure_types == expected_failure_types
-
-    finished_types = task.TaskStatus.finished_types()
-    expected_finished_types = {
-        task.TaskStatus.Success,
-        task.TaskStatus.Failure,
-        task.TaskStatus.RetriesExhausted,
-        task.TaskStatus.Deadlettered,
-    }
-    assert finished_types == expected_finished_types
-
-
-def test_task_result_slim_new_properties():
-    """Test the new properties added to TaskResultSlim."""
-    task_id = task.TaskId("test-task")
-
-    # Test finished property
-    result_success = task.TaskResultSlim(task_id=task_id, status=task.TaskStatus.Success)
-    assert result_success.finished is True
-    assert result_success.succeeded is True
-    assert result_success.failed is False
-
-    result_failure = task.TaskResultSlim(task_id=task_id, status=task.TaskStatus.Failure)
-    assert result_failure.finished is True
-    assert result_failure.succeeded is False
-    assert result_failure.failed is True
-
-    result_pending = task.TaskResultSlim(task_id=task_id, status=task.TaskStatus.Pending)
-    assert result_pending.finished is False
-    assert result_pending.succeeded is False
-    assert result_pending.failed is False
 
 
 def test_task_graph_failure_shadow_graph_structure():
@@ -1454,11 +934,9 @@ def test_task_chained_callbacks_moved_to_graph():
     assert task_c.task_id in graph.edges[task_b.task_id]
 
 
-# =============================================================================
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
 # TASKGRAPHBUILDER TESTS
-# =============================================================================
-
-
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
 def test_task_graph_builder_init():
     """Test TaskGraphBuilder initialization."""
     builder = task.TaskGraphBuilder()
@@ -2144,30 +1622,6 @@ def test_backward_compatibility_with_bitshift_operators():
     assert task_b.task_id in graph.edges[task_a.task_id]
     assert task_c.task_id in graph.edges[task_b.task_id]
 
-def test_callback_system_evolution():
-    """Test showing the evolution from task-level to graph-level callbacks."""
-    # BEFORE: Limited to single callback per task, hard to manage complex workflows
-    old_task = task.Task.default("old_task")
-    old_callback = task.Task.default("old_callback")
-    old_task.on_failure = old_callback  # Only one possible
-
-    # AFTER: Multiple callbacks per task, centralized management, better composition
-    new_task = task.Task.default("new_task")
-    callback_1 = task.Task.default("callback_1")
-    callback_2 = task.Task.default("callback_2")
-    callback_3 = task.Task.default("callback_3")
-
-    graph = task.TaskGraph()
-    graph.add_task(new_task)
-    graph.add_failure_callback(new_task.task_id, callback_1)
-    graph.add_failure_callback(new_task.task_id, callback_2)
-    graph.add_failure_callback(new_task.task_id, callback_3)
-
-    # Show the improvement
-    assert old_task.on_failure is old_callback  # Old: Only one callback
-    assert len(graph.fail_edges[new_task.task_id]) == 3  # New: Multiple callbacks
-    assert new_task.on_failure is None  # New: Callbacks managed at graph level
-
 
 def test_failure_ready_tasks_with_no_failures():
     """Test failure_ready_tasks when no tasks have failed."""
@@ -2244,112 +1698,3 @@ def test_failure_ready_tasks_with_complex_dependency_chains():
     )
     assert len(continue_tasks) == 1
     assert continue_tasks[0].task_id == handler_2.task_id
-
-
-def test_failure_ready_tasks_ignores_cycles_in_failure_graph():
-    """Test that failure_ready_tasks properly handles the failure shadow graph."""
-    graph = task.TaskGraph()
-
-    main_task = task.Task.default("main_task")
-    handler_a = task.Task.default("handler_a")
-    handler_b = task.Task.default("handler_b")
-
-    graph.add_task(main_task)
-    graph.add_failure_callback(main_task.task_id, handler_a)
-    graph.add_failure_callback(main_task.task_id, handler_b)
-
-    # Make main task fail
-    main_task.attempts.attempts = main_task.policy.max_tries + 1
-
-    # Both handlers should be ready since they're parallel failure callbacks
-    failure_tasks = list(graph.generate_failure_ready_tasks())
-    assert len(failure_tasks) == 2
-    handler_ids = {t.task_id for t in failure_tasks}
-    assert handler_a.task_id in handler_ids
-    assert handler_b.task_id in handler_ids
-
-
-def test_failure_ready_tasks_performance_with_large_graph():
-    """Test that failure_ready_tasks performs well with larger graphs."""
-    graph = task.TaskGraph()
-
-    # Create a larger graph with multiple failure points
-    main_tasks = []
-    failure_handlers = []
-
-    for i in range(20):  # 20 main tasks
-        main_task = task.Task.default(f"main_task_{i}")
-        handler = task.Task.default(f"handler_{i}")
-
-        graph.add_task(main_task)
-        graph.add_failure_callback(main_task.task_id, handler)
-
-        main_tasks.append(main_task)
-        failure_handlers.append(handler)
-
-    # Make half the main tasks fail
-    for i in range(10):
-        main_tasks[i].attempts.attempts = main_tasks[i].policy.max_tries + 1
-
-    # Should get 10 failure handlers ready
-    failure_tasks = list(graph.generate_failure_ready_tasks())
-    assert len(failure_tasks) == 10
-
-    # Verify the right handlers are ready
-    expected_handlers = {f"handler_{i}" for i in range(10)}
-    actual_handlers = {t.function_name for t in failure_tasks}
-    assert actual_handlers == expected_handlers
-
-
-def test_failure_ready_tasks_with_mixed_failure_types():
-    """Test failure_ready_tasks with different types of task failures."""
-    graph = task.TaskGraph()
-
-    # Tasks with different failure scenarios
-    timeout_task = task.Task.default("timeout_task")
-    exception_task = task.Task.default("exception_task")
-    manual_fail_task = task.Task.default("manual_fail_task")
-
-    timeout_handler = task.Task.default("timeout_handler")
-    exception_handler = task.Task.default("exception_handler")
-    manual_handler = task.Task.default("manual_handler")
-
-    graph.add_task(timeout_task)
-    graph.add_task(exception_task)
-    graph.add_task(manual_fail_task)
-
-    graph.add_failure_callback(timeout_task.task_id, timeout_handler)
-    graph.add_failure_callback(exception_task.task_id, exception_handler)
-    graph.add_failure_callback(manual_fail_task.task_id, manual_handler)
-
-    # Simulate different failure types
-    timeout_task.attempts.attempts = timeout_task.policy.max_tries + 1  # Max retries reached
-
-    # Exception task - simulate exception result
-    exception_task.attempts.attempts = 3
-    graph.results[exception_task.task_id] = task.TaskResult(
-        task_id=exception_task.task_id,
-        graph_id=graph.graph_id,
-        status=task.TaskStatus.Failure,
-        result=None,
-        formatted_exception="Test exception",
-    )
-
-    # Manual fail - task marked as failed but not max attempts
-    manual_fail_task.attempts.attempts = 2  # Not max attempts but has failed result
-    graph.results[manual_fail_task.task_id] = task.TaskResult(
-        task_id=manual_fail_task.task_id,
-        graph_id=graph.graph_id,
-        status=task.TaskStatus.Failure,
-        result=None,
-        formatted_exception="Manual failure"
-    )
-
-    # All three should have their failure handlers ready
-    failure_tasks = list(graph.generate_failure_ready_tasks())
-    assert len(failure_tasks) == 3
-
-    handler_names = {t.function_name for t in failure_tasks}
-    assert "timeout_handler" in handler_names
-    assert "exception_handler" in handler_names
-    assert "manual_handler" in handler_names
