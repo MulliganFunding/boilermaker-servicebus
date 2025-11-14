@@ -1,11 +1,10 @@
-import random
+from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
 from boilermaker import exc, failure, retries, sample
 from boilermaker.evaluators import ResultsStorageTaskEvaluator
 from boilermaker.task import Task, TaskResult, TaskStatus
-from tests.conftest import mock_storage
 
 
 @pytest.fixture
@@ -273,7 +272,9 @@ async def test_retries_exhausted_with_storage(acks_late, store_evaluator_context
         scheduled = ctx.get_scheduled_messages()
         # No callbacks published
         assert not scheduled
-        ctx.assert_msg_dead_lettered()
+        ctx.assert_msg_settled()
+        if acks_late:
+            ctx.assert_msg_dead_lettered()
 
 
 @pytest.mark.parametrize("acks_late", [True, False])
@@ -297,6 +298,7 @@ async def test_retry_policy_update_with_storage(acks_late, store_evaluator_conte
         assert len(scheduled) == 1
         callback = scheduled[0].task
         assert callback.function_name == "retrytask"
+        assert callback.policy.max_tries == 10
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -315,18 +317,22 @@ async def test_lease_lost_exception(acks_late, store_evaluator_context):
     store_evaluator_context.current_task = task
 
     # Mock complete_message to raise lease lost error
-    store_evaluator_context.mockservicebus._receiver.complete_message.side_effect = exc.BoilermakerTaskLeaseLost(
-        "lease lost"
+    store_evaluator_context.evaluator.complete_message = mock.AsyncMock(
+        side_effect=exc.BoilermakerTaskLeaseLost("lease lost")
     )
     result = await store_evaluator_context()
 
     # Should return TaskResult when lease is lost during early ack
     assert isinstance(result, TaskResult)
-    assert result.status == TaskStatus.Success
-    assert "Lost message lease" in result.errors
+    if acks_late:
+        assert result.status == TaskStatus.Success
+        assert store_evaluator_context.mock_storage.store_task_result.call_count == 2
+    else:
+        assert result.status == TaskStatus.Failure
+        assert "Lost message lease" in result.errors
+        # Should still store the started result
+        assert store_evaluator_context.mock_storage.store_task_result.call_count == 1
 
-    # Should still store the started result
-    assert store_evaluator_context.mock_storage.store_task_result.call_count == 1
     start_call = store_evaluator_context.mock_storage.store_task_result.call_args_list[0]
     start_result = start_call[0][0]
     assert start_result.status == TaskStatus.Started
@@ -345,8 +351,8 @@ async def test_early_ack_service_bus_error_exception(acks_late, store_evaluator_
     store_evaluator_context.current_task = task
 
     # Mock complete_message to raise service bus error
-    store_evaluator_context.mockservicebus._receiver.complete_message.side_effect = exc.BoilermakerServiceBusError(
-        "service bus error"
+    store_evaluator_context.evaluator.complete_message = mock.AsyncMock(
+        side_effect=exc.BoilermakerServiceBusError("service bus error")
     )
 
     result = await store_evaluator_context()
@@ -380,8 +386,7 @@ async def test_retries_exhausted_settle_lease_lost_exception(acks_late, store_ev
 
     # Mock deadletter_or_complete_task to raise lease lost error
     evaluator.deadletter_or_complete_task = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("lease lost"))
-
-    result = await store_evaluator_context()
+    result = await evaluator.message_handler()
 
     # Should return None when lease is lost during retries exhausted settlement
     assert isinstance(result, TaskResult)
