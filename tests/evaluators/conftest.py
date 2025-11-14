@@ -14,11 +14,11 @@ task result stored, message settled, graph loaded, etc).
 This module encapsulates all that context into a reusable fixture,
 `EvaluatorTestContext`, which can be used in multiple test cases.
 """
-
+from collections import namedtuple
 import random
 from contextlib import asynccontextmanager
 from typing import Any
-from unittest import mock
+
 
 import pytest
 from boilermaker import retries
@@ -55,6 +55,9 @@ async def failure_callback(state):
     return "Failure handled"
 
 
+ScheduledMessage = namedtuple("ScheduledMessage", ["task", "args", "kwargs"])
+
+
 class EvaluatorTestContext:
     """
     Encapsulates all the context needed for evaluator tests.
@@ -67,7 +70,14 @@ class EvaluatorTestContext:
         self.mockservicebus = mockservicebus
         self.mock_storage = mock_storage
         self.make_message = make_message
-        self.mock_task_publisher = mock.AsyncMock()
+
+        self._published_messages = []
+
+        async def mock_task_publisher(task: Task, *args, **kwargs):
+            self._published_messages.append(ScheduledMessage(task, args, kwargs))
+            return
+
+        self.mock_task_publisher = mock_task_publisher
 
         # Register test functions
         self.app.register_many_async(
@@ -189,7 +199,7 @@ class EvaluatorTestContext:
         self.evaluator.task = task
         return self
 
-    def set_task_to_raise(self) -> "EvaluatorTestContext":
+    def prep_task_to_raise(self) -> "EvaluatorTestContext":
         """Configure positive_task to raise an exception."""
         self.set_task(self.positive_task, -5)
 
@@ -204,7 +214,7 @@ class EvaluatorTestContext:
         self.mock_storage.load_graph.return_value = self._graph
         return self
 
-    def set_task_to_fail(self) -> "EvaluatorTestContext":
+    def prep_task_to_fail(self) -> "EvaluatorTestContext":
         """Configure positive_task to return failure."""
         self.set_task(self.positive_task, 0)
 
@@ -222,7 +232,7 @@ class EvaluatorTestContext:
 
         return self
 
-    def set_task_to_retry(self) -> "EvaluatorTestContext":
+    def prep_task_to_retry(self) -> "EvaluatorTestContext":
         """Configure positive_task to retry."""
         self.set_task(self.positive_task, 100)
 
@@ -234,7 +244,7 @@ class EvaluatorTestContext:
 
         return self
 
-    def set_task_to_exhaust_retries(self) -> "EvaluatorTestContext":
+    def prep_task_to_exhaust_retries(self) -> "EvaluatorTestContext":
         """Configure positive_task to exhaust retries."""
         self.positive_task.attempts.attempts = self.positive_task.policy.max_tries + 1
         self.set_task(self.positive_task, 100)
@@ -307,11 +317,21 @@ class EvaluatorTestContext:
         """Assert that the message was settled."""
         assert len(self.mockservicebus._receiver.method_calls) == 1, "Expected one message settlement call."
 
+    def assert_msg_dead_lettered(self) -> None:
+        """Assert that the message was dead-lettered."""
+        self.assert_msg_settled()
+        complete_msg_call = self.mockservicebus._receiver.method_calls[0]
+        assert complete_msg_call[0] == "dead_letter_message"
+
     def assert_messages_scheduled(self, expected_count: int) -> None:
         """Assert that the expected number of messages were scheduled."""
-        actual_count = self.mock_task_publisher.call_count
+        actual_count = len(self._published_messages)
         msg = f"Expected {expected_count} messages to be scheduled, got {actual_count}."
         assert actual_count == expected_count, msg
+
+    def get_scheduled_messages(self) -> list[tuple[Task, int]]:
+        """Get the list of scheduled messages."""
+        return self._published_messages
 
     @asynccontextmanager
     async def with_regular_assertions(
@@ -365,24 +385,24 @@ def evaluator_context(app, mockservicebus, mock_storage, make_message):
 @pytest.fixture
 def failure_scenario(evaluator_context: EvaluatorTestContext) -> EvaluatorTestContext:
     """Scenario where task fails."""
-    evaluator_context.set_task_to_fail()
+    evaluator_context.prep_task_to_fail()
     return evaluator_context
 
 
 @pytest.fixture
 def retry_scenario(evaluator_context: EvaluatorTestContext) -> EvaluatorTestContext:
     """Scenario where task retries."""
-    return evaluator_context.set_task_to_retry()
+    return evaluator_context.prep_task_to_retry()
 
 
 @pytest.fixture
 def retries_exhausted_scenario(evaluator_context: EvaluatorTestContext) -> EvaluatorTestContext:
     """Scenario where task retries are exhausted."""
-    evaluator_context.set_task_to_exhaust_retries()
+    evaluator_context.prep_task_to_exhaust_retries()
     return evaluator_context
 
 
 @pytest.fixture
 def exception_scenario(evaluator_context: EvaluatorTestContext) -> EvaluatorTestContext:
     """Scenario where task raises an exception."""
-    return evaluator_context.set_task_to_raise()
+    return evaluator_context.prep_task_to_raise()
