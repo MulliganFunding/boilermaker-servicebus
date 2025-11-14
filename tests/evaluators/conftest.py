@@ -14,6 +14,7 @@ task result stored, message settled, graph loaded, etc).
 This module encapsulates all that context into a reusable fixture,
 `EvaluatorTestContext`, which can be used in multiple test cases.
 """
+
 import random
 from collections import namedtuple
 from contextlib import asynccontextmanager
@@ -241,9 +242,7 @@ class EvaluatorTestContext:
         # Because load_graph is called *once* at the end, we have to preseed the result from calling the failing task
         self._graph.add_result(TaskResult(task_id=self.positive_task.task_id, status=TaskStatus.Failure))
         # Set the failure_callback to pending
-        self._graph.add_result(
-            TaskResult(task_id=self.failure_callback_task.task_id, status=TaskStatus.Pending)
-        )
+        self._graph.add_result(TaskResult(task_id=self.failure_callback_task.task_id, status=TaskStatus.Pending))
 
         return self
 

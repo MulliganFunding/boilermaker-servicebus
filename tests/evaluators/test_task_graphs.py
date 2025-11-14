@@ -113,6 +113,7 @@ async def test_message_handler_with_on_success_callback(
     """
     Test message_handler with on_success callback, which should *not* be invoked.
     """
+
     # We are adding a fake on_success callback which we do not expect to be invoked
     async def on_success_fake(state):
         return "fake"
@@ -510,7 +511,7 @@ async def test_graph_workflow_exception_handling(evaluator_context):
     async with evaluator_context.with_regular_assertions(
         compare_result="OK",
         compare_status=TaskStatus.Success,
-    ) as ctx:
+    ):
         # Should still succeed despite the graph load error
         pass
 
