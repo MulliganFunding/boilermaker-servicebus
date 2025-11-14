@@ -13,6 +13,7 @@ Boilermaker is a lightweight task runner exclusively for **async Python** and Az
 
 - **Async-only**: Built specifically for async Python applications
 - **Retry Policies**: Configurable retry strategies with exponential, linear, and fixed backoff
+- **Task Graphs**: Build complex workflows with DAGs using the TaskGraphBuilder
 - **Task Chaining**: Chain tasks together with success/failure callbacks
 - **Observability**: Built-in OpenTelemetry tracing support
 
@@ -22,7 +23,6 @@ Here are some decisions we made in this library, which may give you pause in con
 
 - **Azure ServiceBus Queues**: We needed something for Azure ServiceBus Queues so we are deeply integrated with that service (and the features we use: message-scheduling, dead-lettering).
 - **JSON Serialization**: All task arguments must be JSON-serializable
-- **No DAGs**: Nothing like Chords or Groups (from Celery) present at this time.
 - **No ServiceBus Message in Handlers**: We require some `state` as the first arg for all background tasks, but we don't bind the message itself or pass it.
 - **Requires [`aio-azure-clients-toolbox`](https://pypi.org/project/aio-azure-clients-toolbox/)**: We found that publishing to ServiceBus was extremely slow (too slow for us!), so built a connection-pooling ServiceBus [`aio-azure-clients-toolbox`](https://pypi.org/project/aio-azure-clients-toolbox/) that we load as a dependency in this library.
 
@@ -127,7 +127,30 @@ if __name__ == "__main__":
     asyncio.run(run_worker())
 ```
 
-### Task Registration Requirements
+### Task Graphs for Complex Workflows
+
+For complex workflows with dependencies, use the TaskGraphBuilder:
+
+```python
+from boilermaker.task import TaskGraphBuilder
+
+# Create tasks
+fetch_task = app.create_task(fetch_data, "api-endpoint")
+process_task = app.create_task(process_data)
+save_task = app.create_task(save_results)
+cleanup_task = app.create_task(cleanup_on_error)
+
+# Build workflow with failure handling: fetch → process → save
+graph = (TaskGraphBuilder()
+    .add(fetch_task)
+    .on_failure(fetch_task.task_id, cleanup_task)  # Handle fetch errors
+    .then(process_task)
+    .then(save_task)
+    .build())
+
+# Publish the entire workflow
+await app.publish_graph(graph)
+```### Task Registration Requirements
 
 All task functions in Boilermaker must:
 
@@ -156,6 +179,7 @@ When running workers, you'll see logs such as the following from the `boilermake
 ## Learn More
 
 - **[Quick Start Guide](getting-started/quickstart.md)** - Your first task in 5 minutes
+- **[Task Graphs](guides/task-graphs.md)** - Build complex workflows with dependencies
 - **[User Guide](guides/task-registration.md)** - Comprehensive feature documentation
 - **[API Reference](api-reference/app.md)** - Complete API documentation
 
