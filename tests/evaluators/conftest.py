@@ -28,15 +28,15 @@ from boilermaker.task import Task, TaskGraph, TaskResult, TaskStatus
 
 
 # Simple test functions - these replace the module-level functions
-async def simple_ok_task(state):
+async def ok(state):
     return "OK"
 
 
-async def simple_retry_task(state):
+async def retry(state):
     raise retries.RetryException("Retry me")
 
 
-async def simple_positive_task(state, x):
+async def positive(state, x):
     """Task that behaves differently based on input."""
     if x < 0:
         raise ValueError("x must be non-negative")
@@ -82,9 +82,9 @@ class EvaluatorTestContext:
         # Register test functions
         self.app.register_many_async(
             [
-                simple_ok_task,
-                simple_positive_task,
-                simple_retry_task,
+                ok,
+                positive,
+                retry,
                 success_callback,
                 failure_callback,
             ]
@@ -94,21 +94,24 @@ class EvaluatorTestContext:
         self._reset_tasks()
 
         self._graph = self.create_simple_graph()
+        # We always return a pointer to this graph object no matter how it may be modified below
+        self.mock_storage.load_graph.return_value = self._graph
         self.create_evaluator()
         self._evaluation_result: TaskResult | None = None
 
     # Pre-execution methods: graph and evaluator setup
     async def __call__(self) -> TaskResult:
-        """Invoke the evaluator's message handler."""
-        return await self.evaluator.message_handler()
+        """Invoke the evaluator."""
+        return await self.evaluator()
 
     def _reset_tasks(self) -> None:
         """Reset all tasks to clean state."""
-        self.ok_task = Task.si(simple_ok_task)
-        self.positive_task = Task.si(simple_positive_task, 21)
-        self.retry_task = Task.si(simple_retry_task)
+        self.ok_task = Task.si(ok)
+        self.positive_task = Task.si(positive, 21)
+        self.retry_task = Task.si(retry)
         self.failure_callback_task = Task.si(failure_callback)
-        self.success_callback_task = Task.si(success_callback)
+        self.success_callback_single_parent_task = Task.si(success_callback)
+        self.success_callback_two_parents_task = Task.si(success_callback)
 
     def create_evaluator(self, task=None) -> "EvaluatorTestContext":
         """Create a TaskGraphEvaluator with the given task."""
@@ -132,10 +135,6 @@ class EvaluatorTestContext:
     @property
     def evaluator(self) -> TaskGraphEvaluator:
         """Get the current evaluator."""
-        return self.get_evaluator()
-
-    def get_evaluator(self) -> TaskGraphEvaluator:
-        """Get the current evaluator."""
         if self._evaluator is None:
             self.create_evaluator()
         return self._evaluator
@@ -149,15 +148,18 @@ class EvaluatorTestContext:
 
         # Add root
         self._graph.add_task(self.ok_task)  # Root
-        # Basic success callback
-        self._graph.add_task(self.success_callback_task, parent_ids=[self.ok_task.task_id])
-        # Basic failure callback
+        # Basic success callback for root
+        self._graph.add_task(self.success_callback_single_parent_task, parent_ids=[self.ok_task.task_id])
+        # Basic failure callback for root
         self._graph.add_failure_callback(self.ok_task.task_id, self.failure_callback_task)
 
         # positive_task allows dynamic behavior based on input
         # it is dependent on ok_task and also has a failure callback and a success callback
         self._graph.add_task(self.positive_task, parent_ids=[self.ok_task.task_id])
-        self._graph.add_task(self.success_callback_task, parent_ids=[self.positive_task.task_id])
+        # This one requires success from ok *and* postive
+        self._graph.add_task(
+            self.success_callback_two_parents_task, parent_ids=[self.ok_task.task_id, self.positive_task.task_id]
+        )
         self._graph.add_failure_callback(self.positive_task.task_id, self.failure_callback_task)
 
         # Generate pending results
@@ -187,6 +189,11 @@ class EvaluatorTestContext:
         """Get the current task from the evaluator."""
         return self.evaluator.task
 
+    @current_task.setter
+    def current_task(self, task: Task) -> None:
+        """Set the current task for the evaluator."""
+        self.evaluator.task = task
+
     def get_task(self, task_id: str) -> Task | None:
         """Get a task from the graph by ID."""
         return self.graph.children.get(task_id) or self.graph.fail_children.get(task_id)
@@ -199,11 +206,28 @@ class EvaluatorTestContext:
         self.evaluator.task = task
         return self
 
+    def _add_ok_result(self) -> None:
+        """Add a successful result for ok_task to the graph."""
+        self._graph.add_result(
+            TaskResult(
+                task_id=self.ok_task.task_id,
+                graph_id=self._graph.graph_id,
+                status=TaskStatus.Success,
+                result="OK",
+            )
+        )
+
+    def prep_task_to_succeed(self) -> "EvaluatorTestContext":
+        """Configure ok_task to succeed."""
+        self.set_task(self.ok_task)
+        self._add_ok_result()
+        return self
+
     def prep_task_to_raise(self) -> "EvaluatorTestContext":
         """Configure positive_task to raise an exception."""
         self.set_task(self.positive_task, -5)
 
-        self._graph.add_result(TaskResult(task_id=self.ok_task.task_id, status=TaskStatus.Success, output="OK"))
+        self._add_ok_result()
         # Because load_graph is called *once* at the end, we have to preseed the result from calling the failing task
         self._graph.add_result(TaskResult(task_id=self.positive_task.task_id, status=TaskStatus.Failure))
         # Set the failure_callback to pending
@@ -211,7 +235,6 @@ class EvaluatorTestContext:
             TaskResult(task_id=self.failure_callback_task.task_id, status=TaskStatus.Pending)
         )
 
-        self.mock_storage.load_graph.return_value = self._graph
         return self
 
     def prep_task_to_fail(self) -> "EvaluatorTestContext":
@@ -219,16 +242,12 @@ class EvaluatorTestContext:
         self.set_task(self.positive_task, 0)
 
         # Manipulate the graph to reflect one completed and one failure
-        self._graph.add_result(TaskResult(task_id=self.ok_task.task_id, status=TaskStatus.Success, output="OK"))
+        self._add_ok_result()
         # Because load_graph is called *once* at the end, we have to preseed the result from calling the failing task
         self._graph.add_result(TaskResult(task_id=self.positive_task.task_id, status=TaskStatus.Failure))
 
         # Set the failure_callback to pending
-        self._graph.add_result(
-            TaskResult(task_id=self.failure_callback_task.task_id, status=TaskStatus.Pending)
-        )
-
-        self.mock_storage.load_graph.return_value = self._graph
+        self._graph.add_result(TaskResult(task_id=self.failure_callback_task.task_id, status=TaskStatus.Pending))
 
         return self
 
@@ -237,10 +256,9 @@ class EvaluatorTestContext:
         self.set_task(self.positive_task, 100)
 
         # Manipulate the graph to reflect one completed and one retry
-        self._graph.add_result(TaskResult(task_id=self.ok_task.task_id, status=TaskStatus.Success, output="OK"))
+        self._add_ok_result()
         # Because load_graph is called *once* at the end, we have to preseed the result from calling the failing task
         self._graph.add_result(TaskResult(task_id=self.positive_task.task_id, status=TaskStatus.Retry))
-        self.mock_storage.load_graph.return_value = self._graph
 
         return self
 
@@ -250,14 +268,11 @@ class EvaluatorTestContext:
         self.set_task(self.positive_task, 100)
 
         # Manipulate the graph to reflect one completed and exhausted retries
-        self._graph.add_result(TaskResult(task_id=self.ok_task.task_id, status=TaskStatus.Success, output="OK"))
+        self._add_ok_result()
         # Because load_graph is called *once* at the end, we have to preseed the result from calling the failing task
         self._graph.add_result(TaskResult(task_id=self.positive_task.task_id, status=TaskStatus.RetriesExhausted))
         # Set the failure_callback to pending
-        self._graph.add_result(
-            TaskResult(task_id=self.failure_callback_task.task_id, status=TaskStatus.Pending)
-        )
-        self.mock_storage.load_graph.return_value = self._graph
+        self._graph.add_result(TaskResult(task_id=self.failure_callback_task.task_id, status=TaskStatus.Pending))
 
         return self
 
@@ -340,7 +355,7 @@ class EvaluatorTestContext:
         compare_status: TaskStatus | None = None,
         check_graph_loaded: bool = True,
     ):
-        """Enable regular assertions on the mock storage."""
+        """Run the evaluator and perform regular assertions."""
         self.evaluator.task.msg = self.make_message(self.evaluator.task)
         result = await self()
         self._evaluation_result = result
@@ -380,6 +395,13 @@ class EvaluatorTestContext:
 def evaluator_context(app, mockservicebus, mock_storage, make_message):
     """Provide a clean evaluator test context."""
     return EvaluatorTestContext(app, mockservicebus, mock_storage, make_message)
+
+
+@pytest.fixture
+def success_scenario(evaluator_context: EvaluatorTestContext) -> EvaluatorTestContext:
+    """Scenario where task succeeds."""
+    evaluator_context.prep_task_to_succeed()
+    return evaluator_context
 
 
 @pytest.fixture

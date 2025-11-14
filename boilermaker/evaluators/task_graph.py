@@ -214,10 +214,11 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 )
                 continue
 
-            await self.publish_task(ready_task)
             ready_count += 1
+            await self.publish_task(ready_task)
             logger.info(f"Publishing ready task {ready_task.task_id} in graph {graph_id} total={ready_count}")
-        else:
+
+        if ready_count == 0:
             logger.info(
                 f"No new tasks ready in graph {graph_id} after task {completed_task_result.task_id}"
             )

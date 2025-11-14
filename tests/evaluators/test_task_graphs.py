@@ -15,11 +15,11 @@ async def test_message_handler_missing_function(evaluator_context, mock_storage)
     # Create a task with a function name not in registry
     task = Task.default("not_registered")
     task.graph_id = "test-graph-id"
-    evaluator = evaluator_context.get_evaluator()
+    evaluator = evaluator_context.evaluator
     evaluator.task = task
 
     # Should not raise
-    result = await evaluator.message_handler()
+    result = await evaluator()
     assert result.status == TaskStatus.Failure
     mock_storage.store_task_result.assert_not_called()
 
@@ -30,10 +30,10 @@ async def test_message_handler_debug_task(evaluator_context, mock_storage):
 
     task = Task.default(sample.TASK_NAME)
     task.graph_id = "test-graph-id"
-    evaluator = evaluator_context.get_evaluator()
+    evaluator = evaluator_context.evaluator
     evaluator.task = task
 
-    assert await evaluator.message_handler() is None
+    assert await evaluator() is None
 
     # Should not store result
     mock_storage.store_task_result.assert_not_called()
@@ -76,24 +76,33 @@ async def test_message_handler_no_graph_success(
         ctx.assert_graph_not_loaded()
 
 
-async def test_evaluator_success(evaluator_context):
+async def test_evaluator_success(success_scenario):
     """Simple success test for TaskGraphEvaluator."""
 
-    async with evaluator_context.with_regular_assertions(
+    async with success_scenario.with_regular_assertions(
         compare_result="OK",
         compare_status=TaskStatus.Success,
     ) as ctx:
         # Standard success dependent called
-        ctx.assert_messages_scheduled(1)
+        expected = {"positive", "success_callback"}
+        ctx.assert_messages_scheduled(2)
+        published = success_scenario.get_scheduled_messages()
+        assert len(published) == 2
+        pub_funcs = {msg.task.function_name for msg in published}
+        msg = f"Expected messages: {expected}, got {pub_funcs}"
+        assert pub_funcs == expected, msg
 
         others = ctx.get_other_storage_calls()
-        assert len(others) == 1
-        t1 = others[0]
-        assert isinstance(t1.args[0], TaskResultSlim)
-        t1_slim = t1.args[0]
-        task1 = evaluator_context.get_task(t1_slim.task_id)
-        assert t1_slim.task_id == task1.task_id
-        assert task1.function_name == "success_callback"
+        assert len(others) == 2
+        t1, t2 = others
+        t1 = t1.args[0]
+        t2 = t2.args[0]
+        assert all([isinstance(tsk, TaskResultSlim) for tsk in (t1, t2)])
+        task1 = success_scenario.get_task(t1.task_id)
+        task2 = success_scenario.get_task(t2.task_id)
+        stored_funcs = {task1.function_name, task2.function_name}
+        msg = f"Expected tasks: {expected}, got {stored_funcs}"
+        assert stored_funcs == expected, msg
 
 
 async def test_message_handler_with_on_success_callback(
@@ -143,7 +152,7 @@ async def test_message_handler_with_retry_exception(retry_scenario):
 async def test_message_handler_retries_exhausted(retries_exhausted_scenario, make_message):
     """Test message_handler when retries are exhausted."""
     # Set up task with exhausted retries
-    evaluator = retries_exhausted_scenario.get_evaluator()
+    evaluator = retries_exhausted_scenario.evaluator
     evaluator.task.attempts.attempts = evaluator.task.policy.max_tries + 1
     # Can't dead letter without this attrib
     evaluator.task.msg = make_message(evaluator.task, sequence_number=1234)
@@ -265,16 +274,17 @@ async def test_early_ack_service_bus_error_exception(evaluator_context, mock_sto
     evaluator_context.current_task = task
 
     # Mock complete_message to raise BoilermakerServiceBusError
-    evaluator_context.complete_message = AsyncMock(side_effect=exc.BoilermakerServiceBusError("Service bus error"))
+    evaluator_context.evaluator.complete_message = AsyncMock(
+        side_effect=exc.BoilermakerServiceBusError("Service bus error")
+    )
 
-    result = await evaluator_context.message_handler()
+    result = await evaluator_context()
 
     # Should return None when service bus error occurs during early ack
     assert isinstance(result, TaskResult)
     assert result.status == TaskStatus.Failure
     assert "ServiceBus error" in result.errors[0]
-    evaluator.complete_message.assert_called_once()
-
+    evaluator_context.evaluator.complete_message.assert_called_once()
     # Should still store the start result
     assert mock_storage.store_task_result.call_count == 1
     start_call = mock_storage.store_task_result.call_args_list[0][0][0]
@@ -298,13 +308,15 @@ async def test_retries_exhausted_task_lease_lost_exception(evaluator_context, mo
     # Mock deadletter_or_complete_task to raise BoilermakerTaskLeaseLost
     evaluator_context.deadletter_or_complete_task = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("Lease lost"))
 
-    result = await evaluator_context.message_handler()
+    result = await evaluator_context()
 
     # Should return None when lease is lost during exhausted retries settlement
     assert isinstance(result, TaskResult)
     assert result.status == TaskStatus.Failure
     assert "Lost message lease" in result.errors[0]
-    evaluator.deadletter_or_complete_task.assert_called_once_with("ProcessingError", detail="Retries exhausted")
+    evaluator_context.evaluator.deadletter_or_complete_task.assert_called_once_with(
+        "ProcessingError", detail="Retries exhausted"
+    )
 
     # Should store the start result
     assert mock_storage.store_task_result.call_count == 1
@@ -331,13 +343,15 @@ async def test_retries_exhausted_service_bus_error_exception(evaluator_context, 
         side_effect=exc.BoilermakerServiceBusError("Service bus error")
     )
 
-    result = await evaluator.message_handler()
+    result = await evaluator_context()
 
     # Should return None when service bus error occurs during exhausted retries settlement
     assert isinstance(result, TaskResult)
     assert result.status == TaskStatus.Failure
     assert "ServiceBus error" in result.errors[0]
-    evaluator.deadletter_or_complete_task.assert_called_once_with("ProcessingError", detail="Retries exhausted")
+    evaluator_context.evaluator.deadletter_or_complete_task.assert_called_once_with(
+        "ProcessingError", detail="Retries exhausted"
+    )
 
     # Should store the start result
     assert mock_storage.store_task_result.call_count == 1
@@ -360,13 +374,13 @@ async def test_late_settlement_task_lease_lost_exception_success(evaluator_conte
     # Mock complete_message to raise BoilermakerTaskLeaseLost
     evaluator_context.complete_message = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("Lease lost"))
 
-    result = await evaluator_context.message_handler()
+    result = await evaluator_context()
 
     # Should return the task result even when lease is lost during late settlement
     assert result is not None
     assert result.status == TaskStatus.Success
     assert result.result == "OK"
-    evaluator.complete_message.assert_called_once()
+    evaluator_context.evaluator.complete_message.assert_called_once()
 
     # Should store both start and success results
     assert mock_storage.store_task_result.call_count == 2
@@ -388,12 +402,12 @@ async def test_late_settlement_task_lease_lost_exception_failure(evaluator_conte
     # Mock deadletter_or_complete_task to raise BoilermakerTaskLeaseLost
     evaluator_context.deadletter_or_complete_task = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("Lease lost"))
 
-    result = await evaluator_context.message_handler()
+    result = await evaluator_context()
 
     # Should return the task result even when lease is lost during late settlement
     assert result is not None
     assert result.status == TaskStatus.Failure
-    evaluator.deadletter_or_complete_task.assert_called_once_with("TaskFailed")
+    evaluator_context.evaluator.deadletter_or_complete_task.assert_called_once_with("TaskFailed")
 
     # Should store both start and failure results
     assert mock_storage.store_task_result.call_count == 2
@@ -414,13 +428,13 @@ async def test_late_settlement_service_bus_error_exception_success(evaluator_con
     # Mock complete_message to raise BoilermakerServiceBusError
     evaluator_context.complete_message = AsyncMock(side_effect=exc.BoilermakerServiceBusError("Service bus error"))
 
-    result = await evaluator_context.message_handler()
+    result = await evaluator_context()
 
     # Should return the task result even when service bus error occurs during late settlement
     assert result is not None
     assert result.status == TaskStatus.Success
     assert result.result == "OK"
-    evaluator.complete_message.assert_called_once()
+    evaluator_context.evaluator.complete_message.assert_called_once()
 
     # Should store both start and success results
     assert mock_storage.store_task_result.call_count == 2
@@ -444,12 +458,12 @@ async def test_late_settlement_service_bus_error_exception_failure(evaluator_con
         side_effect=exc.BoilermakerServiceBusError("Service bus error")
     )
 
-    result = await evaluator_context.message_handler()
+    result = await evaluator_context()
 
     # Should return the task result even when service bus error occurs during late settlement
     assert result is not None
     assert result.status == TaskStatus.Failure
-    evaluator.deadletter_or_complete_task.assert_called_once_with("TaskFailed")
+    evaluator_context.evaluator.deadletter_or_complete_task.assert_called_once_with("TaskFailed")
 
     # Should store both start and failure results
     assert mock_storage.store_task_result.call_count == 2
