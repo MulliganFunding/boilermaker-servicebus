@@ -357,13 +357,21 @@ async def test_early_ack_service_bus_error_exception(acks_late, store_evaluator_
 
     result = await store_evaluator_context()
 
-    # Should return None when service bus error occurs during early ack
+    # Should return TaskResult when service bus error occurs during ack
     assert isinstance(result, TaskResult)
-    assert result.status == TaskStatus.Success
-    assert "Service Bus error" in result.errors
+    if acks_late:
+        # Late ack: task completes successfully, then fails during final settlement
+        assert result.status == TaskStatus.Success
+        assert result.errors is None
+        # Should store both started and success results
+        assert store_evaluator_context.mock_storage.store_task_result.call_count == 2
+    else:
+        # Early ack: fails immediately during early settlement
+        assert result.status == TaskStatus.Failure
+        assert "Service Bus error" in result.errors
+        # Should only store the started result
+        assert store_evaluator_context.mock_storage.store_task_result.call_count == 1
 
-    # Should still store the started result
-    assert store_evaluator_context.mock_storage.store_task_result.call_count == 1
     start_call = store_evaluator_context.mock_storage.store_task_result.call_args_list[0]
     start_result = start_call[0][0]
     assert start_result.status == TaskStatus.Started
@@ -380,7 +388,7 @@ async def test_retries_exhausted_settle_lease_lost_exception(acks_late, store_ev
     task = store_evaluator_context.app.create_task(oktask)
     # Set attempts to exceed max tries
     task.attempts.attempts = task.policy.max_tries + 1
-    task.acks_late = acks_late  # Late ack so message isn't settled early
+    task.acks_late = acks_late
     store_evaluator_context.current_task = task
     evaluator = store_evaluator_context.evaluator
 
@@ -388,13 +396,19 @@ async def test_retries_exhausted_settle_lease_lost_exception(acks_late, store_ev
     evaluator.deadletter_or_complete_task = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("lease lost"))
     result = await evaluator.message_handler()
 
-    # Should return None when lease is lost during retries exhausted settlement
     assert isinstance(result, TaskResult)
-    assert result.status == TaskStatus.Failure
-    assert "Lost message lease" in result.errors[0]
+    if acks_late:
+        # Late ack: message not settled early, so deadletter_or_complete_task is called and fails
+        assert result.status == TaskStatus.Failure
+        assert "Lost message lease during retry exhaustion" in result.errors[0]
+        # Should only store started result (no retries exhausted result gets stored)
+        assert store_evaluator_context.mock_storage.store_task_result.call_count == 1
+    else:
+        # Early ack: message already settled early, so deadletter_or_complete_task is not called for retries exhausted
+        assert result.status == TaskStatus.RetriesExhausted
+        # Should store both started and retries exhausted results
+        assert store_evaluator_context.mock_storage.store_task_result.call_count == 2
 
-    # Should store started result
-    assert store_evaluator_context.mock_storage.store_task_result.call_count == 1
     start_call = store_evaluator_context.mock_storage.store_task_result.call_args_list[0]
     start_result = start_call[0][0]
     assert start_result.status == TaskStatus.Started
@@ -420,13 +434,19 @@ async def test_retries_exhausted_settle_service_bus_error_exception(acks_late, s
 
     result = await evaluator.message_handler()
 
-    # Should return None when service bus error occurs during retries exhausted settlement
     assert isinstance(result, TaskResult)
-    assert result.status == TaskStatus.Failure
-    assert "ServiceBus error" in result.errors[0]
+    if acks_late:
+        # Late ack: message not settled early, so deadletter_or_complete_task is called and fails
+        assert result.status == TaskStatus.Failure
+        assert "ServiceBus error during retry exhaustion" in result.errors[0]
+        # Should only store started result (no retries exhausted result gets stored)
+        assert store_evaluator_context.mock_storage.store_task_result.call_count == 1
+    else:
+        # Early ack: message already settled early, so deadletter_or_complete_task is not called for retries exhausted
+        assert result.status == TaskStatus.RetriesExhausted
+        # Should store both started and retries exhausted results
+        assert store_evaluator_context.mock_storage.store_task_result.call_count == 2
 
-    # Should store started result
-    assert store_evaluator_context.mock_storage.store_task_result.call_count == 1
     start_call = store_evaluator_context.mock_storage.store_task_result.call_args_list[0]
     start_result = start_call[0][0]
     assert start_result.status == TaskStatus.Started
@@ -495,11 +515,12 @@ async def test_final_settle_failure_deadletter_lease_lost_exception(
     """Test exception handling when final deadletter settlement fails with lease lost."""
 
     async def failtask(state):
-        return failure.TaskFailureResult
+        raise ValueError("Task failed")
 
     store_evaluator_context.app.register_async(failtask, policy=retries.RetryPolicy.default())
     task = store_evaluator_context.app.create_task(failtask)
     task.acks_late = True  # Late ack so message settlement happens at the end
+    store_evaluator_context.current_task = task
     evaluator = store_evaluator_context.evaluator
     # Mock deadletter_or_complete_task to raise lease lost error at the end
     evaluator.deadletter_or_complete_task = AsyncMock(side_effect=exc.BoilermakerTaskLeaseLost("lease lost"))

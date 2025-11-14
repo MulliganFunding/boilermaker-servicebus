@@ -353,26 +353,90 @@ class TaskGraph(BaseModel):
             if self.get_status(task_id) is not None
         )
 
-    # TODO: WRITE / INCORRECT
     def is_complete(self) -> bool:
-        """Check if the graph has finished executing (either all success or has failures)."""
-        all_tasks = set(self.children.keys()) | set(self.fail_children.keys())
+        """Check if the graph has finished executing (reached a terminal state).
 
-        # If there are no tasks, the graph is not complete
-        if not all_tasks:
+        A graph is complete when:
+        1. All main tasks (children) are in finished states, AND
+        2. All reachable failure callback tasks are in finished states
+
+        We don't expect ALL failure children to be invoked, only those reachable
+        from actual failures. The graph is in a terminal state when we've processed
+        as far as we can in both the main graph and the failure graph.
+        """
+        # If there are no main tasks, the graph is not complete
+        if not self.children:
             return False
 
-        complete_statuses = TaskStatus.finished_types()
+        finished_statuses = TaskStatus.finished_types()
 
-        # All tasks must have a status and be in a finished state
-        # This won't work in the presence of failure! We need to check if
-        # A succeeding task has failed, its failure callbacks may not have run yet.
-        for task_id in all_tasks:
+        # Check that all main tasks are either finished OR cannot run due to failed dependencies
+        for task_id in self.children.keys():
             status = self.get_status(task_id)
-            if status is None or status not in complete_statuses:
+            if status is None:
+                # Task hasn't run - check if it CAN run (all antecedents finished successfully)
+                # If it can't run due to failed dependencies, that's OK for completion
+                if self.all_antecedents_finished(task_id) and not self.all_antecedents_succeeded(task_id):
+                    # All antecedents finished but at least one failed - this task will never run
+                    continue
+                else:
+                    # Task could still run but hasn't - graph not complete
+                    return False
+            elif status not in finished_statuses:
+                return False
+
+        # Find all reachable failure callback tasks
+        reachable_failure_tasks = self._get_reachable_failure_tasks()
+
+        # Check that all reachable failure tasks are also finished
+        for task_id in reachable_failure_tasks:
+            status = self.get_status(task_id)
+            if status is None or status not in finished_statuses:
                 return False
 
         return True
+
+    def _get_reachable_failure_tasks(self) -> set[TaskId]:
+        """Get all failure callback tasks that are reachable from actual failures.
+
+        A failure task is reachable if:
+        1. At least one of its triggering parent tasks has failed, AND
+        2. It can be reached through the failure callback chain
+        """
+        reachable: set[TaskId] = set()
+        to_visit = []
+
+        # Find initial failure tasks triggered by failed main tasks
+        for parent_id, fail_child_ids in self.fail_edges.items():
+            parent_status = self.get_status(parent_id)
+            if parent_status is not None and parent_status.failed:
+                for child_id in fail_child_ids:
+                    if child_id not in reachable:
+                        reachable.add(child_id)
+                        to_visit.append(child_id)
+
+        # Follow the failure callback chain to find all reachable tasks
+        while to_visit:
+            current_task_id = to_visit.pop()
+
+            # Check for failure callbacks from this failure task
+            if current_task_id in self.fail_edges:
+                for child_id in self.fail_edges[current_task_id]:
+                    if child_id not in reachable:
+                        reachable.add(child_id)
+                        to_visit.append(child_id)
+
+            # Also check for success callbacks from this failure task
+            # (failure tasks can have success callbacks too)
+            if current_task_id in self.edges:
+                current_status = self.get_status(current_task_id)
+                if current_status is not None and current_status.succeeded:
+                    for child_id in self.edges[current_task_id]:
+                        if child_id not in reachable:
+                            reachable.add(child_id)
+                            to_visit.append(child_id)
+
+        return reachable
 
 
 class TaskGraphBuilder:
