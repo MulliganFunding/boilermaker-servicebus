@@ -14,11 +14,10 @@ task result stored, message settled, graph loaded, etc).
 This module encapsulates all that context into a reusable fixture,
 `EvaluatorTestContext`, which can be used in multiple test cases.
 """
-from collections import namedtuple
 import random
+from collections import namedtuple
 from contextlib import asynccontextmanager
 from typing import Any
-
 
 import pytest
 from boilermaker import retries
