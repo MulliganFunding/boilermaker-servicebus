@@ -4,7 +4,7 @@ Simple task chaining for linear workflows.
 
 ## Basic Usage
 
-```python
+```py title="Basic callbacks"
 # Create tasks
 main = app.create_task(process_data, "input")
 success = app.create_task(send_notification)
@@ -26,7 +26,7 @@ await app.publish_task(main)
 
 Another, more convenient, way to chain `on_success` callbacks is with the `chain` method:
 
-```python
+```py title="Boilermaker.chain method"
 def grows_only(state, one: int, two: int=3) -> int:
     if two <= 0:
         raise ValueError("FAILING ON NEGATIVES")
@@ -51,7 +51,7 @@ In this case `fail_task` will be added on as `on_failure` callback for **each** 
 
 Finally, a binary operator has also been created for visually simplifying chains:
 
-```python
+```py title="chain operator"
 # Use >> for chaining
 taskA >> taskB >> taskC
 await app.publish_task(taskA)
@@ -64,7 +64,7 @@ await app.publish_task(taskA)
 
 TaskGraphs also offer chaining, but there they can be part of larger DAGs:
 
-```python
+```py title="Task Graphs"
 # TaskGraph equivalent (for DAGs)
 from boilermaker.task import TaskGraphBuilder
 

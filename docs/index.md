@@ -32,7 +32,7 @@ Here are some decisions we made in this library, which may give you pause in con
 
 ### Installation
 
-```bash
+```sh
 pip install "boilermaker-servicebus"
 ```
 
@@ -40,7 +40,7 @@ pip install "boilermaker-servicebus"
 
 Set your Azure ServiceBus configuration:
 
-```bash
+```sh
 export SERVICE_BUS_NAMESPACE_URL="https://your-namespace.servicebus.windows.net/"
 export SERVICE_BUS_QUEUE_NAME="your-queue-name"
 ```
@@ -49,7 +49,7 @@ export SERVICE_BUS_QUEUE_NAME="your-queue-name"
 
 Create your first background task:
 
-```python
+```py title="basics"
 import asyncio
 from boilermaker import Boilermaker, retries
 from boilermaker.config import Config
@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
 In a separate process, run the worker to process tasks:
 
-```python
+```py title="Running a worker"
 import asyncio
 from boilermaker import Boilermaker
 from boilermaker.config import Config
@@ -129,7 +129,7 @@ if __name__ == "__main__":
 
 For complex workflows with dependencies, use the TaskGraphBuilder:
 
-```python
+```py title="Building DAGs"
 from boilermaker.task import TaskGraphBuilder
 
 # Create tasks

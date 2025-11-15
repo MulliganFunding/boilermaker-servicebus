@@ -56,27 +56,28 @@ class Boilermaker:
         enable_opentelemetry: Enable OpenTelemetry tracing (default: False)
 
     Example:
-        >>> from boilermaker import Boilermaker
-        >>> from boilermaker.service_bus import AzureServiceBus
-        >>>
-        >>> # Set up ServiceBus client
-        >>> client = AzureServiceBus.from_config(config)
-        >>>
-        >>> # Create app with shared state
-        >>> app = Boilermaker({"counter": 0}, client)
-        >>>
-        >>> # Register a task
-        >>> @app.task()
-        >>> async def my_task(state, message: str):
-        >>>     state["counter"] += 1
-        >>>     print(f"Processing: {message}")
-        >>>     return "completed"
-        >>>
-        >>> # Schedule a task
-        >>> await app.apply_async(my_task, "hello world")
-        >>>
-        >>> # Run worker (in separate process)
-        >>> await app.run()
+
+        from boilermaker import Boilermaker
+        from boilermaker.service_bus import AzureServiceBus
+
+        # Set up ServiceBus client
+        client = AzureServiceBus.from_config(config)
+
+        # Create app with shared state
+        app = Boilermaker({"counter": 0}, client)
+
+        # Register a task
+        @app.task()
+        async def my_task(state, message: str):
+            state["counter"] += 1
+            print(f"Processing: {message}")
+            return "completed"
+
+        # Schedule a task
+        await app.apply_async(my_task, "hello world")
+
+        # Run worker (in separate process)
+        await app.run()
     """
 
     def __init__(
@@ -108,9 +109,10 @@ class Boilermaker:
             Decorator function that registers the task and returns the original function
 
         Example:
-            >>> @app.task(policy=retries.RetryPolicy.default())
-            >>> async def process_data(state, item_id: str):
-            >>>     return await state.db.process(item_id)
+
+            @app.task(policy=retries.RetryPolicy.default())
+            async def process_data(state, item_id: str):
+                return await state.db.process(item_id)
         """
 
         def deco(fn):
@@ -141,13 +143,14 @@ class Boilermaker:
             ValueError: If function is already registered or not async
 
         Example:
-            >>> async def send_email(state, recipient: str, subject: str):
-            >>>     await state.email_client.send(recipient, subject)
-            >>>
-            >>> app.register_async(
-            >>>     send_email,
-            >>>     policy=retries.RetryPolicy(max_tries=3)
-            >>> )
+
+            async def send_email(state, recipient: str, subject: str):
+                await state.email_client.send(recipient, subject)
+
+            app.register_async(
+                send_email,
+                policy=retries.RetryPolicy(max_tries=3)
+            )
         """
         fn_name = fn.__name__
 
@@ -176,8 +179,9 @@ class Boilermaker:
             self: For method chaining
 
         Example:
-            >>> tasks = [process_email, send_notification, update_metrics]
-            >>> app.register_many_async(tasks, policy=retries.NoRetry())
+
+            tasks = [process_email, send_notification, update_metrics]
+            app.register_many_async(tasks, policy=retries.NoRetry())
         """
         for fn in fns:
             self.register_async(fn, **options)
@@ -202,14 +206,15 @@ class Boilermaker:
             ValueError: If function is not registered
 
         Example:
-            >>> # Create task without publishing
-            >>> task = app.create_task(send_email, "user@example.com", subject="Welcome")
-            >>>
-            >>> # Set up callback
-            >>> task.on_success = app.create_task(track_email_sent)
-            >>>
-            >>> # Publish when ready
-            >>> await app.publish_task(task)
+
+            # Create task without publishing
+            task = app.create_task(send_email, "user@example.com", subject="Welcome")
+
+            # Set up callback
+            task.on_success = app.create_task(track_email_sent)
+
+            # Publish when ready
+            await app.publish_task(task)
         """
         if fn.__name__ not in self.function_registry:
             raise ValueError(f"Unregistered function invoked: {fn.__name__}")
@@ -243,17 +248,18 @@ class Boilermaker:
             ValueError: If fewer than 2 tasks provided or on_failure is not a Task
 
         Example:
-            >>> # Create individual tasks
-            >>> fetch = app.create_task(fetch_data, url)
-            >>> process = app.create_task(process_data)
-            >>> save = app.create_task(save_results)
-            >>> cleanup = app.create_task(cleanup_on_failure)
-            >>>
-            >>> # Chain them together
-            >>> workflow = app.chain(fetch, process, save, on_failure=cleanup)
-            >>>
-            >>> # Start the workflow
-            >>> await app.publish_task(workflow)
+
+            # Create individual tasks
+            fetch = app.create_task(fetch_data, url)
+            process = app.create_task(process_data)
+            save = app.create_task(save_results)
+            cleanup = app.create_task(cleanup_on_failure)
+
+            # Chain them together
+            workflow = app.chain(fetch, process, save, on_failure=cleanup)
+
+            # Start the workflow
+            await app.publish_task(workflow)
         """
         if len(tasks) < 2:
             raise ValueError("At least two tasks are required to form a chain")
@@ -301,18 +307,19 @@ class Boilermaker:
             ValueError: If function is not registered
 
         Example:
-            >>> # Simple task scheduling
-            >>> await app.apply_async(send_email, "user@example.com")
-            >>>
-            >>> # With custom retry policy
-            >>> await app.apply_async(
-            >>>     process_image,
-            >>>     image_url="https://example.com/image.jpg",
-            >>>     policy=retries.RetryPolicy(max_tries=3)
-            >>> )
-            >>>
-            >>> # Delayed execution (5 minutes)
-            >>> await app.apply_async(cleanup_temp_files, delay=300)
+
+            # Simple task scheduling
+            await app.apply_async(send_email, "user@example.com")
+
+            # With custom retry policy
+            await app.apply_async(
+                process_image,
+                image_url="https://example.com/image.jpg",
+                policy=retries.RetryPolicy(max_tries=3)
+            )
+
+            # Delayed execution (5 minutes)
+            await app.apply_async(cleanup_temp_files, delay=300)
         """
         task = self.create_task(fn, *args, policy=policy, **kwargs)
         return await self.publish_task(
@@ -343,9 +350,10 @@ class Boilermaker:
             BoilermakerAppException: If publishing fails after all attempts
 
         Example:
-            >>> task = app.create_task(my_function, "arg1", kwarg="value")
-            >>> published = await app.publish_task(task, delay=60)  # 1 minute delay
-            >>> print(f"Published with sequence: {published.sequence_number}")
+
+            task = app.create_task(my_function, "arg1", kwarg="value")
+            published = await app.publish_task(task, delay=60)  # 1 minute delay
+            print(f"Published with sequence: {published.sequence_number}")
         """
         encountered_errors = []
         for _i in range(publish_attempts):
@@ -456,10 +464,11 @@ class Boilermaker:
             - Interrupted workers will abandon current message back to queue
 
         Example:
-            >>> # In your worker process
-            >>> app = Boilermaker(app_state, service_bus_client)
-            >>> # Register your tasks...
-            >>> await app.run()  # Runs forever
+
+            # In your worker process
+            app = Boilermaker(app_state, service_bus_client)
+            # Register your tasks...
+            await app.run()  # Runs forever
 
         Raises:
             Various Azure Service Bus exceptions for connection issues
@@ -487,9 +496,13 @@ class Boilermaker:
         This method is called by the worker loop for each received message.
         It deserializes the Task, executes the associated function, and
         handles success, failure, retries, and callbacks.
+
         Args:
+
             msg: The received ServiceBusReceivedMessage containing the Task JSON
+
         Returns:
+
             None
         """
         task = await MessageActions.task_decoder(msg, receiver)

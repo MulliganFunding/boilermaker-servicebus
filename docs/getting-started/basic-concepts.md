@@ -24,7 +24,7 @@ Tasks are **async functions** that run in the background. They must:
 - Take `state` as the first parameter
 - Be JSON-serializable in their arguments
 
-```python
+```py
 async def my_task(state, user_id: str, priority: str = "normal"):
     """A background task that processes user data."""
     # Task logic here
@@ -35,7 +35,7 @@ async def my_task(state, user_id: str, priority: str = "normal"):
 
 The **state** object is shared across all tasks in a worker process:
 
-```python
+```py
 class AppState:
     def __init__(self):
         self.database = get_db_connection()
@@ -54,7 +54,7 @@ app = Boilermaker(AppState(), service_bus_client)
 
 The `Boilermaker` class orchestrates everything:
 
-```python
+```py
 from boilermaker import Boilermaker
 
 app = Boilermaker(
@@ -68,7 +68,7 @@ app = Boilermaker(
 
 Register tasks before they can be executed:
 
-```python
+```py
 # Method 1: Decorator
 @app.task()
 async def decorated_task(state, data):
@@ -85,14 +85,14 @@ app.register_async(regular_task, policy=retries.RetryPolicy.default())
 
 **Scheduling** happens in your main application:
 
-```python
+```py
 # In your web app, API, etc.
 await app.apply_async(my_task, "arg1", keyword="arg2")
 ```
 
 **Execution** happens in dedicated worker processes:
 
-```python
+```py
 # In your worker process
 await app.run()  # Runs forever, processing tasks
 ```
@@ -137,7 +137,7 @@ Boilermaker supports two acknowledgment patterns:
 
 Tasks are acknowledged **after** successful completion:
 
-```python
+```py
 task = app.create_task(my_function)
 task.acks_late = True  # Default
 ```
@@ -150,7 +150,7 @@ task.acks_late = True  # Default
 
 Tasks are acknowledged **before** execution:
 
-```python
+```py
 task = app.create_task(my_function)
 task.acks_late = False
 ```
@@ -163,7 +163,7 @@ task.acks_late = False
 
 Control how tasks behave when they fail:
 
-```python
+```py
 from boilermaker import retries
 
 # Fixed delay retry
@@ -195,7 +195,7 @@ policy = retries.RetryPolicy(
 
 Raise `RetryException` to trigger retry logic:
 
-```python
+```py
 from boilermaker.retries import RetryException
 
 async def fragile_task(state, data):
@@ -213,7 +213,7 @@ async def fragile_task(state, data):
 
 Return `TaskFailureResult` to mark a task as permanently failed:
 
-```python
+```py
 from boilermaker.failure import TaskFailureResult
 
 async def validation_task(state, email):
@@ -227,7 +227,7 @@ async def validation_task(state, email):
 
 Configure dead letter behavior:
 
-```python
+```py
 task = app.create_task(my_function)
 task.should_dead_letter = True   # Send failed messages to dead letter queue
 task.should_dead_letter = False  # Just complete failed messages
@@ -239,7 +239,7 @@ task.should_dead_letter = False  # Just complete failed messages
 
 Run a task when another succeeds:
 
-```python
+```py
 main_task = app.create_task(process_data, "input")
 success_task = app.create_task(send_notification, "success")
 
@@ -252,7 +252,7 @@ main_task >> success_task  # Syntactic sugar
 
 Run a task when another fails:
 
-```python
+```py
 main_task = app.create_task(risky_operation, data)
 failure_task = app.create_task(send_alert, "failure")
 
@@ -263,7 +263,7 @@ main_task.on_failure = failure_task
 
 Chain multiple tasks together:
 
-```python
+```py
 workflow = app.chain(
     app.create_task(step1, data),
     app.create_task(step2),
@@ -278,7 +278,7 @@ await app.publish_task(workflow)
 
 ### Environment-based Configuration
 
-```python
+```py
 from boilermaker.config import Config
 
 # Automatically reads from environment variables
@@ -310,7 +310,7 @@ Boilermaker uses `DefaultAzureCredential`:
     ```
 
 === "Azure Environments"
-    ```python
+    ```py
     # Managed Identity is used automatically
     config = Config(azure_credential_include_msi=True)
     ```

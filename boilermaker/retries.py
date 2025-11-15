@@ -46,11 +46,12 @@ class RetryPolicy(BaseModel):
         retry_mode: Strategy for calculating delays (default: Fixed)
 
     Example:
-        >>> # Fixed delay of 60 seconds, max 3 attempts
-        >>> policy = RetryPolicy(max_tries=3, delay=60, retry_mode=RetryMode.Fixed)
-        >>>
-        >>> # Exponential backoff starting at 30s, max 10 minutes
-        >>> policy = RetryPolicy(
+
+        # Fixed delay of 60 seconds, max 3 attempts
+        policy = RetryPolicy(max_tries=3, delay=60, retry_mode=RetryMode.Fixed)
+
+        # Exponential backoff starting at 30s, max 10 minutes
+        policy = RetryPolicy(
         ...     max_tries=5,
         ...     delay=30,
         ...     delay_max=600,
@@ -127,10 +128,11 @@ class RetryPolicy(BaseModel):
             int: Delay in seconds before next retry
 
         Example:
-            >>> policy = RetryPolicy(delay=30, retry_mode=RetryMode.Exponential)
-            >>> policy.get_delay_interval(0)  # First retry: ~15-30s
-            >>> policy.get_delay_interval(1)  # Second retry: ~30-60s
-            >>> policy.get_delay_interval(2)  # Third retry: ~60-120s
+
+            policy = RetryPolicy(delay=30, retry_mode=RetryMode.Exponential)
+            policy.get_delay_interval(0)  # First retry: ~15-30s
+            policy.get_delay_interval(1)  # Second retry: ~30-60s
+            policy.get_delay_interval(2)  # Third retry: ~60-120s
         """
         match self.retry_mode:
             case RetryMode.Fixed:
@@ -153,8 +155,9 @@ class NoRetry(RetryPolicy):
     will be marked as failed after the first execution attempt.
 
     Example:
-        >>> no_retry_task = Task.si(risky_function, policy=NoRetry())
-        >>> # Task will not retry on failure
+
+        no_retry_task = Task.si(risky_function, policy=NoRetry())
+        # Task will not retry on failure
     """
 
     def __init__(self):
@@ -174,9 +177,10 @@ class RetryAttempts(BaseModel):
         last_retry: Timestamp of the most recent retry attempt
 
     Example:
-        >>> attempts = RetryAttempts.default()  # Start with 0 attempts
-        >>> attempts.inc(datetime.now())        # Record first attempt
-        >>> print(f"Attempts: {attempts.attempts}")  # Prints: Attempts: 1
+
+        attempts = RetryAttempts.default()  # Start with 0 attempts
+        attempts.inc(datetime.now())        # Record first attempt
+        print(f"Attempts: {attempts.attempts}")  # Prints: Attempts: 1
     """
 
     # how many so far
@@ -220,12 +224,13 @@ class RetryException(Exception):
         policy: Custom retry policy to use (None for task default)
 
     Example:
-        >>> def unreliable_task():
-        ...     if should_retry_aggressively():
-        ...         aggressive_policy = RetryPolicy(max_tries=10, delay=5)
-        ...         raise RetryException("Temporary failure", aggressive_policy)
-        ...     else:
-        ...         raise RetryException("Use default retry policy")
+
+        def unreliable_task():
+            if should_retry_aggressively():
+                aggressive_policy = RetryPolicy(max_tries=10, delay=5)
+                    raise RetryException("Temporary failure", aggressive_policy)
+            else:
+                raise RetryException("Use default retry policy")
     """
 
     def __init__(self, msg: str, policy: RetryPolicy | None = None):
@@ -240,9 +245,9 @@ class RetryExceptionDefault(RetryException):
     retry behavior (5 attempts, 120s fixed delay).
 
     Example:
-        >>> def task_with_retries():
-        ...     if network_unavailable():
-        ...         raise RetryExceptionDefault("Network timeout")
+        def task_with_retries():
+            if network_unavailable():
+                raise RetryExceptionDefault("Network timeout")
     """
 
     def __init__(self, msg: str):
@@ -261,11 +266,12 @@ class RetryExceptionDefaultExponential(RetryException):
         **kwargs: Override default policy parameters
 
     Example:
-        >>> def rate_limited_task():
-        ...     if rate_limit_exceeded():
-        ...         raise RetryExceptionDefaultExponential(
-        ...             "Rate limited", max_tries=3, delay=10
-        ...         )
+
+        def rate_limited_task():
+            if rate_limit_exceeded():
+                raise RetryExceptionDefaultExponential(
+                    "Rate limited", max_tries=3, delay=10
+                )
     """
 
     def __init__(self, msg: str, **kwargs):
@@ -291,11 +297,12 @@ class RetryExceptionDefaultLinear(RetryException):
         **kwargs: Override default policy parameters
 
     Example:
-        >>> def database_task():
-        ...     if database_busy():
-        ...         raise RetryExceptionDefaultLinear(
-        ...             "Database busy", delay=60, delay_max=300
-        ...         )
+
+        def database_task():
+            if database_busy():
+                raise RetryExceptionDefaultLinear(
+                    "Database busy", delay=60, delay_max=300
+                )
     """
 
     def __init__(self, msg: str, **kwargs):

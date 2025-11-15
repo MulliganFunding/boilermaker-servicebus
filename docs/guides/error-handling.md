@@ -6,7 +6,7 @@ Handle task failures with retries, callbacks, and dead letter queues.
 
 Configure retry behavior when registering tasks:
 
-```python
+```py
 from boilermaker import retries
 
 # Exponential backoff
@@ -30,7 +30,7 @@ async def no_retry_task(state, payment_id: str):
 
 ### Retry Modes
 
-```python
+```py
 # Fixed delay (same each time)
 retries.RetryMode.Fixed
 
@@ -45,7 +45,7 @@ retries.RetryMode.Exponential
 
 Tasks only retry when they raise `RetryException`:
 
-```python
+```py
 from boilermaker.retries import RetryException
 
 async def api_task(state, endpoint: str):
@@ -68,7 +68,7 @@ Chain tasks for error handling workflows.
 !!! note "Results not propagated
     **Results are not automatically passed between tasks.**
 
-```python
+```py
 from boilermaker.task import Task
 
 @app.task()
@@ -115,7 +115,7 @@ await app.apply_async_task(main_task)
 
 Configure dead letter behavior:
 
-```python
+```py
 @app.task(
     policy=retries.RetryPolicy(max_tries=3),
     should_dead_letter=True  # Send failed messages to dead letter queue
@@ -136,7 +136,7 @@ async def optional_task(state, data: dict):
 
 For long-running tasks that may exceed the Azure Service Bus message lock duration, renew the lock periodically:
 
-```python
+```py
 @app.task()
 async def long_running_task(state, data_file: str):
     """Process large dataset with lock renewal."""

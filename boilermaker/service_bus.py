@@ -28,17 +28,17 @@ class AzureServiceBus:
         client: The underlying ManagedAzureServiceBusSender instance
 
     Example:
-        >>> # From configuration
-        >>> config = Config()
-        >>> service_bus = AzureServiceBus.from_config(config)
-        >>>
-        >>> # Direct construction
-        >>> credential_factory = lambda: DefaultAzureCredential()
-        >>> service_bus = AzureServiceBus(
-        ...     "https://myapp.servicebus.windows.net/",
-        ...     "tasks",
-        ...     credential_factory
-        ... )
+
+        config = Config()
+        service_bus = AzureServiceBus.from_config(config)
+
+        # Direct construction
+        credential_factory = lambda: DefaultAzureCredential()
+        service_bus = AzureServiceBus(
+            "https://myapp.servicebus.windows.net/",
+            "tasks",
+            credential_factory
+        )
     """
 
     def __init__(
@@ -71,8 +71,9 @@ class AzureServiceBus:
             AzureServiceBus: New instance configured from settings
 
         Example:
-            >>> config = Config()
-            >>> service_bus = AzureServiceBus.from_config(config)
+
+            config = Config()
+            service_bus = AzureServiceBus.from_config(config)
         """
         return cls(
             settings.service_bus_namespace_url,

@@ -444,11 +444,13 @@ class TaskGraphBuilder:
     Builder class for constructing TaskGraph instances with flexible dependency management.
 
     Supports multiple patterns:
+
     1. Layer-based building for simple sequential/parallel workflows
     2. Explicit dependency management for complex DAGs
     3. Success and failure callback chaining
 
     Examples:
+
         # Simple chain: A -> B -> C
         builder = TaskGraphBuilder().add(taskA).then(taskB).then(taskC)
 
@@ -467,6 +469,7 @@ class TaskGraphBuilder:
             .add(taskA)
             .then(taskB)
             .on_failure(taskA.task_id, error_handler))
+
     """
 
     def __init__(self) -> None:

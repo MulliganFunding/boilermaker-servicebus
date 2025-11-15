@@ -24,11 +24,12 @@ class Config(BaseSettings):
         - AZURE_CREDENTIAL_INCLUDE_MSI: Set to "true" for MSI in deployed environments
 
     Example:
-        >>> # From environment variables
-        >>> config = Config()
-        >>>
-        >>> # Direct configuration
-        >>> config = Config(
+
+        # From environment variables
+        config = Config()
+
+        # Direct configuration
+        config = Config(
         ...     service_bus_namespace_url="https://myapp.servicebus.windows.net/",
         ...     service_bus_queue_name="tasks",
         ...     azure_credential_include_msi=True
@@ -52,6 +53,7 @@ class Config(BaseSettings):
             DefaultAzureCredential: Configured Azure credential object
 
         Note:
+
             - Local development: Excludes MSI to prevent 169.254.169.254 timeouts
             - Deployed environments: Includes MSI for automatic authentication
         """

@@ -33,16 +33,17 @@ class Task(BaseModel):
         on_failure: Optional callback task to run on failure
 
     Example:
-        >>> # Create task with default settings
-        >>> task = Task.default("my_function", args=[1, 2], kwargs={"key": "value"})
-        >>>
-        >>> # Create task with custom retry policy
-        >>> policy = RetryPolicy(max_tries=5, backoff_mode="exponential")
-        >>> task = Task.si(my_function, arg1, kwarg=value, policy=policy)
-        >>>
-        >>> # Chain tasks with callbacks
-        >>> task1 >> task2 >> task3  # Success chain
-        >>> task1.on_failure = error_handler_task
+
+        # Create task with default settings
+        task = Task.default("my_function", args=[1, 2], kwargs={"key": "value"})
+
+        # Create task with custom retry policy
+        policy = RetryPolicy(max_tries=5, backoff_mode="exponential")
+        task = Task.si(my_function, arg1, kwarg=value, policy=policy)
+
+        # Chain tasks with callbacks
+        task1 >> task2 >> task3  # Success chain
+        task1.on_failure = error_handler_task
     """
 
     # Unique identifier for this task: UUID7 for timestamp ordered identifiers.
@@ -91,7 +92,8 @@ class Task(BaseModel):
             Task: New task instance with default retry configuration
 
         Example:
-            >>> task = Task.default("process_data", payload={"data": [1, 2, 3]})
+
+            task = Task.default("process_data", payload={"data": [1, 2, 3]})
         """
         attempts = retries.RetryAttempts.default()
         policy = retries.RetryPolicy.default()
@@ -223,9 +225,10 @@ class Task(BaseModel):
             Task: The other task, allowing for continued chaining
 
         Example:
-            >>> task1 >> task2 >> task3
+
             # If task1 succeeds, run task2
             # If task2 succeeds, run task3
+            task1 >> task2 >> task3
         """
         self.on_success = other
         return other
@@ -243,9 +246,10 @@ class Task(BaseModel):
             Task: This task, allowing for continued chaining
 
         Example:
-            >>> task1 << task2 << task3
+
             # If task3 succeeds, run task2
             # If task2 succeeds, run task1
+            task1 << task2 << task3
         """
         other.on_success = self
         return self
@@ -282,11 +286,12 @@ class Task(BaseModel):
             Task: New task with bound function signature
 
         Example:
-            >>> def process_data(data, format="json"):
-            ...     return f"Processed {data} as {format}"
-            >>>
-            >>> task = Task.si(process_data, [1, 2, 3], format="xml")
-            >>> # Arguments are bound to the task
+
+            def process_data(data, format="json"):
+                return f"Processed {data} as {format}"
+
+            # Arguments are bound to the task **immutably** at creation time
+            task = Task.si(process_data, [1, 2, 3], format="xml")
         """
         attempts = retries.RetryAttempts.default()
         policy = policy or retries.RetryPolicy.default()

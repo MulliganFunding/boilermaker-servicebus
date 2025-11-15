@@ -19,7 +19,7 @@ Task graphs allow you to create Directed Acyclic Graphs (DAGs) where tasks can c
 
 ## Quick Start
 
-```python
+```py
 from boilermaker.task import TaskGraphBuilder
 
 # Register your tasks first
@@ -45,7 +45,7 @@ async def create_workflow():
 
 ## Common Patterns
 
-```python
+```py
 # Sequential: A → B → C
 graph = TaskGraphBuilder().chain(task_a, task_b, task_c).build()
 
@@ -62,7 +62,7 @@ graph = (TaskGraphBuilder()
 
 ## Failure Handling
 
-```python
+```py
 # Add failure callbacks with on_failure()
 graph = (TaskGraphBuilder()
     .add(main_task)
@@ -75,7 +75,7 @@ graph = (TaskGraphBuilder()
 
 TaskGraphs need storage to track execution:
 
-```python
+```py
 from boilermaker.storage import BlobClientStorage
 
 storage = BlobClientStorage(
