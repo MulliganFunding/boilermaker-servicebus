@@ -1,6 +1,8 @@
 # Task Graphs
 
-Build complex workflows with dependencies using TaskGraphBuilder. Task graphs allow you to create Directed Acyclic Graphs (DAGs) where tasks run in parallel when possible and wait for their dependencies to complete.
+Build complex workflows with dependencies (DAGs) using the `TaskGraphBuilder`.
+
+Task graphs allow you to create Directed Acyclic Graphs (DAGs) where tasks can chain, run in parallel, trigger failures for various child nodes, or schedule other callbacks. All dependent children in the DAG wait for the parents to complete.
 
 !!! tip "When to Use Task Graphs"
     Use TaskGraphBuilder for workflows with:
@@ -11,6 +13,9 @@ Build complex workflows with dependencies using TaskGraphBuilder. Task graphs al
     - Conditional execution paths
 
     For simple sequential tasks, consider using [task chains](callbacks-chains.md) instead.
+
+!!! tip "DAGS Only
+    They must be DAGs: Accidentally creating a cycle will raise an exception.
 
 ## Quick Start
 

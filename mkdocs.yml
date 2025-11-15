@@ -77,10 +77,9 @@ nav:
     - Basic Concepts: getting-started/basic-concepts.md
   - User Guide:
     - Task Registration: guides/task-registration.md
-    - Task Graphs: guides/task-graphs.md
     - Callbacks & Chains: guides/callbacks-chains.md
-    - Retry Policies: guides/retry-policies.md
-    - Error Handling: guides/error-handling.md
+    - Task Graphs: guides/task-graphs.md
+    - Error Handling & Retries: guides/error-handling.md
   - API Reference:
     - Boilermaker: api-reference/app.md
     - Task: api-reference/task.md

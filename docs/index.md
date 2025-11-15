@@ -1,6 +1,6 @@
 # Boilermaker ServiceBus
 
-**Async Python background tasks with Azure ServiceBus**
+Async Python background tasks with Azure ServiceBus.
 
 [![Tests](https://github.com/MulliganFunding/boilermaker-servicebus/workflows/Tests/badge.svg)](https://github.com/MulliganFunding/boilermaker-servicebus/actions)
 [![PyPI version](https://badge.fury.io/py/boilermaker-servicebus.svg)](https://badge.fury.io/py/boilermaker-servicebus)
@@ -8,13 +8,12 @@
 
 Boilermaker is a lightweight task runner exclusively for **async Python** and Azure Service Bus Queues. It's designed for simplicity and focuses specifically on Azure ServiceBus integration.
 
-
 ## Features
 
-- **Async-only**: Built specifically for async Python applications
+- **Async**: Built specifically for async Python applications
 - **Retry Policies**: Configurable retry strategies with exponential, linear, and fixed backoff
-- **Task Graphs**: Build complex workflows with DAGs using the TaskGraphBuilder
 - **Task Chaining**: Chain tasks together with success/failure callbacks
+- **Task Graphs**: Build complex workflows with DAGs using the TaskGraphBuilder
 - **Observability**: Built-in OpenTelemetry tracing support
 
 ## Tradeoffs
@@ -28,7 +27,6 @@ Here are some decisions we made in this library, which may give you pause in con
 
 !!! note "Why Not Boilermaker?"
     If you need a fully-featured task runner with multiple backends, consider [Celery](https://github.com/celery/celery/tree/main) instead. Boilermaker is purpose-built for Azure ServiceBus with a focus on simplicity and async Python.
-
 
 ## Quick Start
 
@@ -150,7 +148,9 @@ graph = (TaskGraphBuilder()
 
 # Publish the entire workflow
 await app.publish_graph(graph)
-```### Task Registration Requirements
+```
+
+### Task Registration Requirements
 
 All task functions in Boilermaker must:
 
@@ -160,8 +160,8 @@ All task functions in Boilermaker must:
 4. **Be registered before use** - `app.register_async(my_task, policy=...)`
 
 !!! warning "Important Notes"
-    - Boilermaker does not store or use task results
-    - **Task chaining does not pass results between tasks** - all task signatures must be specified up-front when scheduling
+    - By default Boilermaker does not store or use task results (unless using results-store or graphs).
+    - **Task chaining does not pass results between tasks**: all task signatures must be specified up-front when scheduling
     - All task arguments must be JSON-serializable
     - The `state` parameter is injected automatically
     - Tasks run in separate processes from publishers
@@ -182,7 +182,6 @@ When running workers, you'll see logs such as the following from the `boilermake
 - **[Task Graphs](guides/task-graphs.md)** - Build complex workflows with dependencies
 - **[User Guide](guides/task-registration.md)** - Comprehensive feature documentation
 - **[API Reference](api-reference/app.md)** - Complete API documentation
-
 
 ## Where's the Name Come From?
 

@@ -318,4 +318,4 @@ Boilermaker uses `DefaultAzureCredential`:
 ## Next Steps
 
 - **[Task Registration](../guides/task-registration.md)** - Learn different registration patterns
-- **[Retry Policies](../guides/retry-policies.md)** - Master error handling
+- **[Retry Policies](../guides/retry-policies.md)** - Triggering retries on errors

@@ -46,7 +46,7 @@ Task functions must:
 
 - Be `async` functions
 - Accept `state` as the first parameter
-- Use JSON-serializable parameters (str, int, float, bool, dict, list, None)
+- Use JSON-serializable parameters **only**
 
 ## Example
 
