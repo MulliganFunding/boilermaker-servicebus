@@ -245,6 +245,7 @@ class RetryExceptionDefault(RetryException):
     retry behavior (5 attempts, 120s fixed delay).
 
     Example:
+
         def task_with_retries():
             if network_unavailable():
                 raise RetryExceptionDefault("Network timeout")

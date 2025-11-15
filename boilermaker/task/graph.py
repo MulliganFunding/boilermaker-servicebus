@@ -38,14 +38,16 @@ class TaskGraph(BaseModel):
     but we also expect it to be loaded into memory from storage at the conclusion of each task execution.
 
     The order of operations is like this:
+
     - [Send]: Task published -> Graph serialized to storage. We do not write it again!
     - [Receive]: Task invoked
-        -> Evaluation -> TaskResult stored to storage.
-        -> Graph loaded from storage (includes latest TaskResultSlim instances).
-        -> Check which tasks are ready.
-        -> Publish ready tasks.
+        - Evaluation -> TaskResult stored to storage.
+        - Graph loaded from storage (includes latest TaskResultSlim instances).
+        - Check which tasks are ready.
+        - Publish ready tasks.
 
     Attributes:
+
         root_id: Unique identifier for the root of the DAG
         children: Mapping of task IDs to Task instances
         edges: Mapping of parent task IDs to lists of child task IDs
@@ -124,6 +126,7 @@ class TaskGraph(BaseModel):
         """Detect if the graph contains any cycles.
 
         Returns:
+
             bool: True if any cycle is detected, False if DAG is valid
         """
         visited: set[TaskId] = set()
@@ -185,10 +188,12 @@ class TaskGraph(BaseModel):
         """Add an failure callback task to the graph.
 
         Args:
+
             parent_id: The task ID that will trigger the error callback
             callback_task: The Task instance to add as an error callback
 
         Raises:
+
             ValueError: If adding this callback would create a cycle in the DAG
         """
 
@@ -301,6 +306,7 @@ class TaskGraph(BaseModel):
         """Get a list of failure callback tasks that are ready to be executed.
 
         A failure task is ready if:
+
         1. It hasn't started yet (no result or Pending status)
         2. At least one of its triggering parent tasks has failed
         3. All other dependencies (if any) have finished
@@ -497,10 +503,12 @@ class TaskGraphBuilder:
         """Add multiple tasks to run in parallel.
 
         Args:
+
             tasks: List of tasks to run in parallel
             depends_on: Optional list of task IDs all these tasks depend on
 
         Returns:
+
             Self for method chaining
         """
         parents = depends_on or self._last_added
@@ -515,9 +523,11 @@ class TaskGraphBuilder:
         """Add a task that depends on the previously added task(s).
 
         Args:
+
             task: Task to add that depends on last added tasks
 
         Returns:
+
             Self for method chaining
         """
         if not self._last_added:
@@ -529,10 +539,12 @@ class TaskGraphBuilder:
         """Add a failure callback for a specific task.
 
         Args:
+
             parent_task_id: Task ID that triggers the callback on failure
             callback_task: Task to execute on failure
 
         Returns:
+
             Self for method chaining
         """
         if parent_task_id not in self._tasks:

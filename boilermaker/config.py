@@ -30,10 +30,10 @@ class Config(BaseSettings):
 
         # Direct configuration
         config = Config(
-        ...     service_bus_namespace_url="https://myapp.servicebus.windows.net/",
-        ...     service_bus_queue_name="tasks",
-        ...     azure_credential_include_msi=True
-        ... )
+            service_bus_namespace_url="https://myapp.servicebus.windows.net/",
+            service_bus_queue_name="tasks",
+            azure_credential_include_msi=True
+        )
     """
 
     azure_credential_include_msi: bool = False
@@ -54,8 +54,8 @@ class Config(BaseSettings):
 
         Note:
 
-            - Local development: Excludes MSI to prevent 169.254.169.254 timeouts
-            - Deployed environments: Includes MSI for automatic authentication
+        - Local development (`azure_credential_include_msi`): Excludes MSI to prevent 169.254.169.254 timeouts
+        - Deployed environments: Includes MSI for automatic authentication
         """
         if self.service_bus_credential:
             return self.service_bus_credential
