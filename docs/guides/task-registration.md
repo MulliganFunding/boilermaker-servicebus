@@ -4,7 +4,7 @@ Register async functions as background tasks using the `@app.task()` decorator o
 
 ## Basic Registration
 
-```python
+```py
 from boilermaker import Boilermaker
 from boilermaker.config import Config
 from boilermaker.service_bus import AzureServiceBus
@@ -24,7 +24,7 @@ async def send_email(state, recipient: str, subject: str, body: str):
 
 ## Registration with Retry Policy
 
-```python
+```py
 from boilermaker import retries
 
 # Exponential backoff policy
@@ -46,11 +46,11 @@ Task functions must:
 
 - Be `async` functions
 - Accept `state` as the first parameter
-- Use JSON-serializable parameters (str, int, float, bool, dict, list, None)
+- Use JSON-serializable parameters **only**
 
 ## Example
 
-```python
+```py
 @app.task()
 async def send_notification(state, user_id: int, message: str, channel: str = "email"):
     """Send notification to user."""

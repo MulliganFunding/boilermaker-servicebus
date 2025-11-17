@@ -19,7 +19,7 @@ export SERVICE_BUS_QUEUE_NAME="your-queue-name"
 
 Create `app.py`:
 
-```python
+```py
 import asyncio
 import os
 from boilermaker import Boilermaker, retries
@@ -62,7 +62,7 @@ async def process_payment(state, user_id: int, amount: float):
 
 Run your app to schedule some tasks:
 
-```python
+```py
 async def schedule_tasks():
     """Schedule some background tasks."""
     # Schedule individual tasks
@@ -84,7 +84,7 @@ python app.py
 
 Create `worker.py` to process the queued tasks:
 
-```python
+```py
 import asyncio
 from app import app  # Import your configured app
 
@@ -117,7 +117,7 @@ Chain tasks using callbacks.
     - Task args and kwargs must be specified up-front: `Task.si()` creates an _immutable_ signature, binding args and kwargs to a background task before publishing it.
     - Results are not automatically passed between tasks.
 
-```python
+```py
 from boilermaker.task import Task
 
 @app.task()
@@ -162,7 +162,7 @@ Explore these core concepts and features:
 ## Common Patterns
 
 === "Add Retry Logic"
-    ```python
+    ```py
     @app.task(policy=retries.RetryPolicy(
         max_tries=3,
         delay=30,
@@ -176,7 +176,7 @@ Explore these core concepts and features:
     ```
 
 === "Handle Failures"
-    ```python
+    ```py
     from boilermaker.failure import TaskFailureResult
 
     @app.task()
@@ -199,7 +199,7 @@ Explore these core concepts and features:
     ```
 
 === "Testing Tasks"
-    ```python
+    ```py
     import pytest
     from unittest.mock import AsyncMock
 

@@ -32,7 +32,7 @@ Before installing Boilermaker, ensure you have:
 
 Test your installation:
 
-```python
+```py
 import boilermaker
 print(f"Boilermaker version: {boilermaker.__version__}")
 ```

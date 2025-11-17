@@ -1,8 +1,8 @@
 """
-Example of TaskGraph workflows with the boilermaker library.
+Example of TaskGraph workflows using TaskGraphBuilder.
 
-This example demonstrates how to create complex workflows using TaskGraphs,
-which allow for DAG-based task dependencies instead of simple linear chains.
+This example demonstrates how to create complex workflows using TaskGraphBuilder,
+which provides a simple, readable way to define DAG-based task dependencies.
 """
 
 import asyncio
@@ -47,32 +47,46 @@ async def cleanup_temp_files(state):
     return {"cleanup_completed": True}
 
 
+async def handle_fetch_error(state):
+    """Handle fetch data errors."""
+    print("Handling fetch error - trying backup source")
+    return {"fallback_attempted": True}
+
+
+async def handle_processing_error(state):
+    """Handle data processing errors."""
+    print("Processing failed - sending alert to administrators")
+    return {"alert_sent": True}
+
+
 async def main():
     """Demonstrate TaskGraph usage."""
 
     # Set up the application (you'd configure these with real values)
-    service_bus_client = AzureServiceBus.from_config({
-        "connection_string": "your-connection-string",
-        "queue_name": "your-queue"
-    })
+    service_bus_client = AzureServiceBus.from_config(
+        {"connection_string": "your-connection-string", "queue_name": "your-queue"}
+    )
 
     storage_client = BlobClientStorage(
         az_storage_url="https://yourstorage.blob.core.windows.net",
         container_name="task-results",
-        credentials=DefaultAzureCredential()
+        credentials=DefaultAzureCredential(),
     )
 
-    app = Boilermaker(
-        state={},
-        service_bus_client=service_bus_client,
-        results_storage=storage_client
-    )
+    app = Boilermaker(state={}, service_bus_client=service_bus_client, results_storage=storage_client)
 
     # Register task functions
-    app.register_many_async([fetch_data, process_data, save_results, send_notification, cleanup_temp_files])
-
-    # Create a TaskGraph workflow
-    graph = app.create_graph()
+    app.register_many_async(
+        [
+            fetch_data,
+            process_data,
+            save_results,
+            send_notification,
+            cleanup_temp_files,
+            handle_fetch_error,
+            handle_processing_error,
+        ]
+    )
 
     # Create tasks
     fetch_task = app.create_task(fetch_data, "https://api.example.com/data")
@@ -81,19 +95,23 @@ async def main():
     notify_task = app.create_task(send_notification, "placeholder_id")
     cleanup_task = app.create_task(cleanup_temp_files)
 
-    # Build the graph dependencies
-    # fetch_data (root)
-    graph.add_task(fetch_task)
+    # Error handling tasks
+    fetch_error_task = app.create_task(handle_fetch_error)
+    process_error_task = app.create_task(handle_processing_error)
 
-    # process_data depends on fetch_data
-    graph.add_task(process_task, parent_ids=[fetch_task.task_id])
+    # Build workflow using TaskGraphBuilder with failure handling
+    from boilermaker.task import TaskGraphBuilder
 
-    # save_results depends on process_data
-    graph.add_task(save_task, parent_ids=[process_task.task_id])
-
-    # Both notification and cleanup depend on save_results
-    graph.add_task(notify_task, parent_ids=[save_task.task_id])
-    graph.add_task(cleanup_task, parent_ids=[save_task.task_id])
+    graph = (
+        TaskGraphBuilder()
+        .add(fetch_task)  # Start with fetch_data
+        .on_failure(fetch_task.task_id, fetch_error_task)  # Handle fetch failures
+        .then(process_task)  # process_data depends on fetch_data
+        .on_failure(process_task.task_id, process_error_task)  # Handle processing failures
+        .then(save_task)  # save_results depends on process_data
+        .parallel([notify_task, cleanup_task])  # Both depend on save_results, run in parallel
+        .build()
+    )
 
     # Publish the graph - this will start the workflow
     await app.publish_graph(graph)

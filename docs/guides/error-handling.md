@@ -1,12 +1,12 @@
-# Error Handling
+# Error Handling and Retries
 
 Handle task failures with retries, callbacks, and dead letter queues.
 
-## Retry Policies
+## Retrying Tasks
 
 Configure retry behavior when registering tasks:
 
-```python
+```py
 from boilermaker import retries
 
 # Exponential backoff
@@ -28,61 +28,47 @@ async def no_retry_task(state, payment_id: str):
     pass
 ```
 
-## Exception Handling in Tasks
+### Retry Modes
 
-Use `RetryException` to trigger retries:
+```py
+# Fixed delay (same each time)
+retries.RetryMode.Fixed
 
-```python
+# Linear backoff (increases steadily)
+retries.RetryMode.Linear
+
+# Exponential backoff (doubles each time)
+retries.RetryMode.Exponential
+```
+
+### Triggering Retries
+
+Tasks only retry when they raise `RetryException`:
+
+```py
 from boilermaker.retries import RetryException
 
-@app.task(policy=retries.RetryPolicy.default())
-async def resilient_task(state, data: dict):
-    """Task with error handling."""
+async def api_task(state, endpoint: str):
     try:
-        # Your task logic
-        result = await some_operation(data)
-        return result
-    except TemporaryError as e:
-        # Retry for temporary errors
-        raise RetryException(f"Temporary error: {e}")
-    except PermanentError as e:
-        # Don't retry, log error
-        state.errors.append(str(e))
-        return {"status": "failed", "error": str(e)}
+        response = await state.http_client.get(endpoint)
+        return response.json()
+    except ConnectionError:
+        # This will trigger retry
+        raise RetryException("Connection failed, will retry")
+    except ValidationError:
+        # This won't retry - permanent failure
+        raise  # This won't retry
+
 ```
 
-## Message Lock Renewal for Long Tasks
-
-For long-running tasks that may exceed the Azure Service Bus message lock duration, renew the lock periodically:
-
-```python
-@app.task()
-async def long_running_task(state, data_file: str):
-    """Process large dataset with lock renewal."""
-    items = await load_large_dataset(data_file)
-
-    for i, item in enumerate(items):
-        await process_item(item)
-
-        # Renew lock every 100 items to prevent timeout
-        if i % 100 == 0:
-            await state.app.renew_message_lock()
-
-    return f"Processed {len(items)} items"
-```
-
-!!! note "More information"
-    Use message lock renewal for tasks that take longer than the message-lease duration for your queue.
-
-    Consult the [Azure documentation](https://learn.microsoft.com/en-us/azure/service-bus-messaging/message-transfers-locks-settlement#peeklock) for more information.
-
-## Success/Failure Callbacks
+## Failure Callbacks
 
 Chain tasks for error handling workflows.
 
-**Note: Results are not automatically passed between tasks.**
+!!! note "Results not propagated
+    **Results are not automatically passed between tasks.**
 
-```python
+```py
 from boilermaker.task import Task
 
 @app.task()
@@ -129,7 +115,7 @@ await app.apply_async_task(main_task)
 
 Configure dead letter behavior:
 
-```python
+```py
 @app.task(
     policy=retries.RetryPolicy(max_tries=3),
     should_dead_letter=True  # Send failed messages to dead letter queue
@@ -145,3 +131,28 @@ async def optional_task(state, data: dict):
     """Task where failures can be ignored."""
     pass
 ```
+
+## Message Lock Renewal for Long Tasks
+
+For long-running tasks that may exceed the Azure Service Bus message lock duration, renew the lock periodically:
+
+```py
+@app.task()
+async def long_running_task(state, data_file: str):
+    """Process large dataset with lock renewal."""
+    items = await load_large_dataset(data_file)
+
+    for i, item in enumerate(items):
+        await process_item(item)
+
+        # Renew lock every 100 items to prevent timeout
+        if i % 100 == 0:
+            await state.app.renew_message_lock()
+
+    return f"Processed {len(items)} items"
+```
+
+!!! note "More information"
+    Use message lock renewal for tasks that take longer than the message-lease duration for your queue.
+
+    Consult the [Azure documentation](https://learn.microsoft.com/en-us/azure/service-bus-messaging/message-transfers-locks-settlement#peeklock) for more information.
