@@ -507,7 +507,7 @@ class Boilermaker:
         """
         task = await MessageActions.task_decoder(msg, receiver)
         if task is None:
-            # Message could not be decoded so it was dead-lettered or abandoned
+            # Message could not be decoded so it was dead-lettered
             return None
 
         async with tracing.start_span_from_parent_event_async(

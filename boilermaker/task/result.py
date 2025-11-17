@@ -18,9 +18,7 @@ class TaskStatus(enum.StrEnum):
     Retry = "retry"
     RetriesExhausted = "retries_exhausted"
     Deadlettered = "deadlettered"
-    # In case we want to explicitly abandon a message.
-    # We do not currently offer this functionality aside from shutdown.
-    Abandoned = "abandoned"
+
 
     @classmethod
     def default(cls) -> "TaskStatus":

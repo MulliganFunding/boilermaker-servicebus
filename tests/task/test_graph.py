@@ -1160,56 +1160,22 @@ def test_task_graph_builder_multiple_failure_callbacks():
 
 
 def test_task_graph_builder_add_success_fail_branch():
-    """Test add_success_fail_branch() method."""
-    builder = task.TaskGraphBuilder()
-    condition_task = task.Task.default("condition_task")
-    success_task = task.Task.default("success_task")
-    failure_task = task.Task.default("failure_task")
-
-    # Add condition task and branch
-    builder.add(condition_task)
-    result = builder.add_success_fail_branch(success_task, failure_task)
-
-    # Should return self for chaining
-    assert result is builder
-
-    # Success task should be added as regular dependency
-    assert builder._dependencies[success_task.task_id] == {condition_task.task_id}
-
-    # Failure task should be added as failure callback
-    assert condition_task.task_id in builder._failure_callbacks
-    assert failure_task in builder._failure_callbacks[condition_task.task_id]
-
-
-def test_task_graph_builder_add_success_fail_branch_explicit_condition():
     """Test add_success_fail_branch() with explicit condition_task_id."""
     builder = task.TaskGraphBuilder()
     task_a = task.Task.default("task_a")
-    task_b = task.Task.default("task_b")
     success_task = task.Task.default("success_task")
     failure_task = task.Task.default("failure_task")
 
     # Add multiple tasks
     builder.add(task_a)
-    builder.add(task_b)  # This becomes _last_added
 
     # Branch from task_a explicitly (not _last_added)
-    builder.add_success_fail_branch(success_task, failure_task, branching_task_id=task_a.task_id)
+    builder.add_success_fail_branch(task_a.task_id, success_task, failure_task)
 
     # Success task should depend on task_a (not task_b)
     assert builder._dependencies[success_task.task_id] == {task_a.task_id}
     assert task_a.task_id in builder._failure_callbacks
     assert failure_task in builder._failure_callbacks[task_a.task_id]
-
-
-def test_task_graph_builder_add_success_fail_branch_no_previous_task():
-    """Test add_success_fail_branch() raises error when no previous tasks."""
-    builder = task.TaskGraphBuilder()
-    success_task = task.Task.default("success_task")
-    failure_task = task.Task.default("failure_task")
-
-    with pytest.raises(ValueError, match="No task to branch from"):
-        builder.add_success_fail_branch(success_task, failure_task)
 
 
 def test_task_graph_builder_build_empty():

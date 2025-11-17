@@ -10,7 +10,6 @@ def test_task_status_enum():
     assert task.TaskStatus.Failure == "failure"
     assert task.TaskStatus.Retry == "retry"
     assert task.TaskStatus.Deadlettered == "deadlettered"
-    assert task.TaskStatus.Abandoned == "abandoned"
 
 
 def test_task_result_slim():

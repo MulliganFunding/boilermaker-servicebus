@@ -578,20 +578,18 @@ class TaskGraphBuilder:
         return self
 
     def add_success_fail_branch(
-        self, success_task: Task, failure_task: Task, branching_task_id: TaskId | None = None
+        self,
+        branching_task_id: TaskId,
+        success_task: Task,
+        failure_task: Task,
     ) -> "TaskGraphBuilder":
         """Add success and failure branches for a task.
 
         Args:
+            branching_task_id: TaskId to branch from
             success_task: Task to run on success
             failure_task: Task to run on failure
-            condition_task_id: Task to branch from (defaults to last added)
         """
-        if branching_task_id is None:
-            if not self._last_added:
-                raise ValueError("No task to branch from")
-            branching_task_id = self._last_added[0]
-
         self.add(success_task, depends_on=[branching_task_id])
         self.on_failure(branching_task_id, failure_task)
         return self
