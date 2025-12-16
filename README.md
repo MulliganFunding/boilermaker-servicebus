@@ -79,7 +79,7 @@ export SERVICE_BUS_QUEUE_NAME="your-queue-name"
 - **[Retry Policies](https://mulliganfunding.github.io/boilermaker-servicebus/guides/error-handling/)** - Error handling and retries
 - **[Task Graphs](https://mulliganfunding.github.io/boilermaker-servicebus/guides/task-graphs/)** - Task Graphs
 - **[Task Registration](https://mulliganfunding.github.io/boilermaker-servicebus/guides/task-registration/)** - Task Registration
-- **[API Reference](https://mulliganfunding.github.io/boilermaker-servicebus/reference/app/)** - Complete API docs
+- **[API Reference](https://mulliganfunding.github.io/boilermaker-servicebus/api-reference/app/)** - Complete API docs
 
 ## Requirements
 
