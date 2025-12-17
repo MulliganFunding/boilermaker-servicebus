@@ -76,8 +76,10 @@ export SERVICE_BUS_QUEUE_NAME="your-queue-name"
 📖 **[Complete Documentation](https://mulliganfunding.github.io/boilermaker-servicebus/)**
 - **[Getting Started](https://mulliganfunding.github.io/boilermaker-servicebus/)** - Installation and basic usage
 - **[Callbacks & Chains](https://mulliganfunding.github.io/boilermaker-servicebus/guides/callbacks-chains/)** - Task workflows
-- **[Retry Policies](https://mulliganfunding.github.io/boilermaker-servicebus/guides/retry-policies/)** - Error handling and retries
-- **[API Reference](https://mulliganfunding.github.io/boilermaker-servicebus/reference/boilermaker/)** - Complete API docs
+- **[Retry Policies](https://mulliganfunding.github.io/boilermaker-servicebus/guides/error-handling/)** - Error handling and retries
+- **[Task Graphs](https://mulliganfunding.github.io/boilermaker-servicebus/guides/task-graphs/)** - Task Graphs
+- **[Task Registration](https://mulliganfunding.github.io/boilermaker-servicebus/guides/task-registration/)** - Task Registration
+- **[API Reference](https://mulliganfunding.github.io/boilermaker-servicebus/api-reference/app/)** - Complete API docs
 
 ## Requirements
 
