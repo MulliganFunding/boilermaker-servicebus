@@ -1058,7 +1058,7 @@ def test_task_graph_builder_then_without_previous_task():
         builder.then(task_a)
 
 
-# ~~~~ §8.3 — _resolve_deps() type widening ~~~~ #
+# ~~~~ §8.3 — _resolve_dependencies() type widening ~~~~ #
 
 
 def test_add_depends_on_task_object():
@@ -1094,7 +1094,7 @@ def test_add_depends_on_task_chain():
     task_d = task.Task.default("task_d")
 
     chain_abc = task.TaskChain(task_a, task_b, task_c)
-    # Register each task in the chain so _resolve_deps can find them
+    # Register each task in the chain so _resolve_dependencies can find them
     builder.add(task_a, depends_on=None)
     builder.add(task_b, depends_on=None)
     builder.add(task_c, depends_on=None)
@@ -1106,7 +1106,7 @@ def test_add_depends_on_task_chain():
 
 
 def test_add_depends_on_mixed_types():
-    """_resolve_deps handles Task objects and str TaskId in the same list."""
+    """_resolve_dependencies handles Task objects and str TaskId in the same list."""
     builder = task.TaskGraphBuilder()
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
@@ -1404,7 +1404,7 @@ def test_task_graph_builder_method_chaining():
 def test_task_graph_builder_cycle_detection_during_build():
     """Test that the builder raises early when a dependency is not yet registered.
 
-    With _resolve_deps() validation, forward references are rejected at add() time,
+    With _resolve_dependencies() validation, forward references are rejected at add() time,
     which prevents cycles from being formed through the builder API.
     """
     builder = task.TaskGraphBuilder()
@@ -1412,7 +1412,7 @@ def test_task_graph_builder_cycle_detection_during_build():
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
 
-    # task_b hasn't been added yet — _resolve_deps raises immediately
+    # task_b hasn't been added yet — _resolve_dependencies raises immediately
     with pytest.raises(ValueError, match="not found in this graph"):
         builder.add(task_a, depends_on=[task_b.task_id])
 

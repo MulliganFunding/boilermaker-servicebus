@@ -459,6 +459,7 @@ class _LastAddedSentinel:
         return "LAST_ADDED"
 
 
+LastAddedSingleton: typing.TypeAlias = _LastAddedSentinel
 LAST_ADDED = _LastAddedSentinel()
 
 
@@ -541,7 +542,7 @@ class TaskGraphBuilder:
         self._failure_callbacks: dict[TaskId, set[Task]] = {}
         self._last_added: list[TaskId] = []  # Track recently added tasks for chaining
 
-    def _resolve_deps(
+    def _resolve_dependencies(
         self,
         depends_on: list[Task | TaskId | TaskChain],
     ) -> list[TaskId]:
@@ -602,7 +603,7 @@ class TaskGraphBuilder:
         self,
         task: Task,
         *,
-        depends_on: list[Task | TaskId | TaskChain] | None | _LastAddedSentinel = LAST_ADDED,
+        depends_on: list[Task | TaskId | TaskChain] | None | LastAddedSingleton = LAST_ADDED,
         on_failure: Task | None = None,
     ) -> "TaskGraphBuilder":
         """Add a task with optional explicit dependencies.
@@ -626,7 +627,7 @@ class TaskGraphBuilder:
             # Because `_LastAddedSentinel` is a singleton type used to indicate the default
             # We have to help the type checker understand that depends_on is not the sentinel.
             depends = typing.cast(list[Task | TaskId | TaskChain], depends_on)
-            parent_ids = self._resolve_deps(depends)
+            parent_ids = self._resolve_dependencies(depends)
         self._register_task(task, parent_ids=parent_ids, on_failure=on_failure)
         self._last_added = [task.task_id]
         return self
@@ -634,7 +635,7 @@ class TaskGraphBuilder:
     def parallel(
         self,
         *tasks: Task,
-        depends_on: list[Task | TaskId | TaskChain] | None | _LastAddedSentinel = LAST_ADDED,
+        depends_on: list[Task | TaskId | TaskChain] | None | LastAddedSingleton = LAST_ADDED,
         on_failure: Task | None = None,
     ) -> "TaskGraphBuilder":
         """Add multiple tasks to run in parallel.
@@ -661,7 +662,7 @@ class TaskGraphBuilder:
             shared_parents = []
         else:
             depends = typing.cast(list[Task | TaskId | TaskChain], depends_on)
-            shared_parents = self._resolve_deps(depends)
+            shared_parents = self._resolve_dependencies(depends)
 
         for t in tasks:
             self._register_task(t, parent_ids=shared_parents, on_failure=on_failure)
@@ -673,7 +674,7 @@ class TaskGraphBuilder:
         self,
         chain: "TaskChain",
         *,
-        depends_on: list[Task | TaskId | TaskChain] | None | _LastAddedSentinel = LAST_ADDED,
+        depends_on: list[Task | TaskId | TaskChain] | None | LastAddedSingleton = LAST_ADDED,
     ) -> "TaskGraphBuilder":
         """Embed a TaskChain into the graph as a composable unit.
 
@@ -700,7 +701,7 @@ class TaskGraphBuilder:
             first_task_parents = list(self._last_added)
         else:
             depends = typing.cast(list[Task | TaskId | TaskChain], depends_on)
-            first_task_parents = self._resolve_deps(depends)
+            first_task_parents = self._resolve_dependencies(depends)
 
         for i, chain_task in enumerate(chain._tasks):
             parent_ids = first_task_parents if i == 0 else [chain._tasks[i - 1].task_id]
@@ -771,10 +772,7 @@ class TaskGraphBuilder:
         # Add all tasks with their dependencies
         for task_id, task in self._tasks.items():
             dependencies = list(self._dependencies.get(task_id, set()))
-            if dependencies:
-                tg.add_task(task, parent_ids=dependencies)
-            else:
-                tg.add_task(task)
+            tg.add_task(task, parent_ids=dependencies)
 
         # Add failure callbacks
         for parent_task_id, callback_tasks in self._failure_callbacks.items():
