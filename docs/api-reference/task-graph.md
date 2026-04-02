@@ -104,7 +104,7 @@ graph = (
     .build()
 )
 
-# Independent chains with fan-in join (previously impossible)
+# Independent chains with fan-in join
 chain_abc = TaskChain(task_a, task_b, task_c)
 chain_de  = TaskChain(task_d, task_e)
 

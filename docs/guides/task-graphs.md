@@ -101,8 +101,6 @@ The `TaskChain` class lets you build sequential sub-graphs independently and the
 them in a `TaskGraphBuilder`. The key is `depends_on=None`, which marks a chain as a root
 (no parents) while **accumulating** its last into the cursor rather than replacing it.
 
-This pattern was previously impossible with the old API.
-
 ```py
 from boilermaker.task import TaskChain, TaskGraphBuilder
 

@@ -162,8 +162,6 @@ async def example_diamond(app: Boilermaker) -> None:
 async def example_independent_chains_join(app: Boilermaker) -> None:
     """Pattern 5 — Independent chains with fan-in join.
 
-    This pattern was previously impossible with the old API.
-
     Graph:
         fetch → process → save ─┐
                                   ├→ aggregate
