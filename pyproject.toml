@@ -38,6 +38,8 @@ dev = [
     "ty>=0.0.27",
 ]
 
+[project.optional-dependencies]
+repl = ["ipython"]
 
 [build-system]
 requires = ["setuptools", "versioningit"]

@@ -47,3 +47,7 @@ docs-build *args:
 # Serve documentation locally with auto-reload
 docs-serve:
     uv run mkdocs serve
+
+# Run an ipython repl
+repl:
+    uv run --extra repl ipython

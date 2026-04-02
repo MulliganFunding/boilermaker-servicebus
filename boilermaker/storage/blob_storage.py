@@ -73,6 +73,9 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         # Load all TaskResultSlim instances associated with this graph
         # We don't want to load *all* return values into memory. Just the statuses.
         async for blob in self.list_blobs(prefix=graph_dir):
+            # DO NOT REDOWNLOAD GRAPH
+            if blob.name == graph_path:
+                continue
             tr = TaskResultSlim.model_validate_json(await self.download_blob(blob.name))
             tr.etag = blob.etag
             if tr.graph_id == graph_id:
