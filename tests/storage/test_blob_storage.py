@@ -220,16 +220,13 @@ async def test_store_graph_success(mock_azureblob, blob_storage, sample_task_gra
 
     result = await blob_storage.store_graph(sample_task_graph)
     assert result == sample_task_graph
-    container_client.acquire_lease.assert_called_once()
 
     # Verify upload_blob was called with correct parameters
     # Expect 1) acquire lease, 2) upload graph, 3) upload task one result
-    assert len(container_client.mock_calls) == 4
-    lease_call, upload_graph_call, task_result_upload_call, release_lease_call = container_client.mock_calls
-    assert lease_call[0] == "acquire_lease"
+    assert len(container_client.mock_calls) == 2
+    upload_graph_call, task_result_upload_call = container_client.mock_calls
     assert upload_graph_call[0] == "upload_blob"
     assert task_result_upload_call[0] == "upload_blob"
-    assert release_lease_call[0] == "acquire_lease().release"
 
     # Check filenames
     expected_graph_name = f"task-results/{sample_task_graph.storage_path}"

@@ -1,4 +1,3 @@
-import datetime
 import logging
 import traceback
 from functools import partial
@@ -13,7 +12,6 @@ from azure.core.exceptions import (
     ResourceNotFoundError,
 )
 from azure.identity.aio import DefaultAzureCredential
-from azure.storage.blob import ImmutabilityPolicy
 
 from boilermaker.exc import BoilermakerStorageError
 from boilermaker.storage import StorageInterface
@@ -80,17 +78,12 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             if tr.graph_id == graph_id:
                 graph.results[tr.task_id] = tr
             else:
-                logger.warning(
-                    f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!"
-                )
+                logger.warning(f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!")
         return graph
 
     async def store_graph(self, graph: TaskGraph) -> TaskGraph:
         """
         Stores a TaskGraph to Azure Blob Storage and stores all children as pending tasks as well.
-
-        We use a lease on the container to make sure *only* one task is writing! This means
-        that we don't have to worry about concurrent writes causing data corruption.
 
         We expect the *written graph* to be **immutable** (see the ImmutabilityPolicy below).
 
@@ -99,35 +92,21 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         """
         lease = None
         async with self.get_blob_service_client() as blob_service_client:
-            container_client = blob_service_client.get_container_client(
-                self.container_name
-            )
-            lease = await container_client.acquire_lease()
-            upload_kwargs = {
-                "lease": lease,
-                "blob_type": "BlockBlob",
-                "immutability_policy": ImmutabilityPolicy(
-                    expiry_time=datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(hours=4),
-                    policy_mode="LOCKED",
-                ),
-            }
-
+            container_client = blob_service_client.get_container_client(self.container_name)
             # Store the graph itself first
             fname = f"{self.task_result_prefix}/{graph.storage_path}"
             try:
                 _result = await container_client.upload_blob(
                     fname,
                     graph.model_dump_json(),
-                    **upload_kwargs,
+                    blob_type="BlockBlob",
                 )
             except (
                 ResourceNotFoundError,
                 HttpResponseError,
                 ResourceExistsError,
             ) as exc:
-                logger.error(
-                    f"Error occurred while storing TaskGraph {graph.graph_id}: {exc}"
-                )
+                logger.error(f"Error occurred while storing TaskGraph {graph.graph_id}: {exc}")
                 raise BoilermakerStorageError(
                     f"Failed to store TaskGraph {graph.graph_id}",
                     task_id=None,
@@ -139,15 +118,15 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             pending_result = None
             try:
                 async with create_task_group() as tg:
+                    # don't let any tasks that get ahead accidentally clobber us
                     for pending_result in graph.generate_pending_results():
-                        fname_pr = (
-                            f"{self.task_result_prefix}/{pending_result.storage_path}"
-                        )
+                        fname_pr = f"{self.task_result_prefix}/{pending_result.storage_path}"
+
                         uploader = partial(
                             container_client.upload_blob,
                             fname_pr,
                             pending_result.model_dump_json(),
-                            **upload_kwargs,
+                            blob_type="BlockBlob",
                         )
                         tg.start_soon(uploader)
             except* Exception as excgroup:
