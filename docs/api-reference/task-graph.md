@@ -24,7 +24,7 @@ parents.
     members:
       - __init__
       - head
-      - tail
+      - last
 
 ## TaskGraphBuilder
 
@@ -112,7 +112,7 @@ graph = (
     TaskGraphBuilder()
     .add_chain(chain_abc, depends_on=None)  # root; cursor accumulates
     .add_chain(chain_de,  depends_on=None)  # root; cursor accumulates
-    .then(task_f)                           # depends on both chain tails
+    .then(task_f)                           # depends on both chain lasts
     .build()
 )
 

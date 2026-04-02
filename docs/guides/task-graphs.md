@@ -99,7 +99,7 @@ graph = (
 
 The `TaskChain` class lets you build sequential sub-graphs independently and then compose
 them in a `TaskGraphBuilder`. The key is `depends_on=None`, which marks a chain as a root
-(no parents) while **accumulating** its tail into the cursor rather than replacing it.
+(no parents) while **accumulating** its last into the cursor rather than replacing it.
 
 This pattern was previously impossible with the old API.
 
@@ -125,10 +125,10 @@ graph = (
 ```
 
 !!! note "Cursor accumulation"
-    `add_chain(chain, depends_on=None)` **appends** the chain's tail to the cursor
+    `add_chain(chain, depends_on=None)` **appends** the chain's last to the cursor
     instead of replacing it. This is what makes the fan-in join possible. Using
     `add(task, depends_on=None)` instead **replaces** the cursor, which would lose
-    the reference to the previous chain's tail.
+    the reference to the previous chain's last.
 
 You can also be fully explicit using `depends_on` with `TaskChain` objects directly:
 
@@ -137,7 +137,7 @@ graph = (
     TaskGraphBuilder()
     .add_chain(chain_abc, depends_on=None)
     .add_chain(chain_de,  depends_on=None)
-    .add(task_f, depends_on=[chain_abc, chain_de])  # TaskChain resolves to its .tail
+    .add(task_f, depends_on=[chain_abc, chain_de])  # TaskChain resolves to its .last
     .build()
 )
 ```
@@ -214,8 +214,8 @@ that omit `depends_on` implicitly depend on the cursor:
 | `add(task)` | `[task]` |
 | `then(task)` | `[task]` |
 | `parallel(t1, t2, t3)` | `[t1, t2, t3]` |
-| `add_chain(chain)` | `[chain.tail]` |
-| `add_chain(chain, depends_on=None)` | `existing_cursor + [chain.tail]` ← accumulates |
+| `add_chain(chain)` | `[chain.last]` |
+| `add_chain(chain, depends_on=None)` | `existing_cursor + [chain.last]` ← accumulates |
 | `add(task, depends_on=None)` | `[task]` ← replaces (use `add_chain` for accumulation) |
 
 ## Storage Setup

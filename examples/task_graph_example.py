@@ -181,9 +181,9 @@ async def example_independent_chains_join(app: Boilermaker) -> None:
 
     graph = (
         TaskGraphBuilder()
-        .add_chain(pipeline_chain, depends_on=None)      # root; cursor = [save_task]
+        .add_chain(pipeline_chain, depends_on=None)  # root; cursor = [save_task]
         .add_chain(notification_chain, depends_on=None)  # root; cursor = [save_task, cleanup_task]
-        .then(agg_task)                                   # depends on BOTH chain tails
+        .then(agg_task)  # depends on BOTH chain lasts
         .build()
     )
     await app.publish_graph(graph)

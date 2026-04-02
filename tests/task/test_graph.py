@@ -1083,7 +1083,7 @@ def test_add_depends_on_task_id_string():
 
 
 def test_add_depends_on_task_chain():
-    """depends_on=[chain_abc] (TaskChain) resolves to chain_abc.tail.task_id."""
+    """depends_on=[chain_abc] (TaskChain) resolves to chain_abc.last.task_id."""
     builder = task.TaskGraphBuilder()
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
@@ -1098,7 +1098,7 @@ def test_add_depends_on_task_chain():
 
     builder.add(task_d, depends_on=[chain_abc])
 
-    # Should resolve to tail (task_c)
+    # Should resolve to last (task_c)
     assert builder._dependencies[task_d.task_id] == {task_c.task_id}
 
 
@@ -1815,21 +1815,21 @@ def test_task_chain_requires_at_least_one_task():
 
 
 def test_task_chain_single_task():
-    """For a single-task chain, head and tail must both reference that task."""
+    """For a single-task chain, head and last must both reference that task."""
     task_a = task.Task.default("task_a")
     chain = task.TaskChain(task_a)
     assert chain.head is task_a
-    assert chain.tail is task_a
+    assert chain.last is task_a
 
 
-def test_task_chain_head_and_tail():
-    """head must be the first task and tail must be the last task in the chain."""
+def test_task_chain_head_and_last():
+    """head must be the first task and last must be the last task in the chain."""
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
     task_c = task.Task.default("task_c")
     chain = task.TaskChain(task_a, task_b, task_c)
     assert chain.head is task_a
-    assert chain.tail is task_c
+    assert chain.last is task_c
 
 
 def test_task_chain_preserves_task_order():
@@ -2025,7 +2025,7 @@ def test_add_chain_sequential_multi_task():
 
 
 def test_add_chain_replaces_cursor():
-    """Cursor after sequential add_chain is only [tail.task_id]."""
+    """Cursor after sequential add_chain is only [last.task_id]."""
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
     task_c = task.Task.default("task_c")
@@ -2071,7 +2071,7 @@ def test_add_chain_root_no_dependency():
 
 
 def test_add_chain_root_accumulates_cursor():
-    """Two depends_on=None add_chain calls → _last_added = [tail1, tail2]."""
+    """Two depends_on=None add_chain calls → _last_added = [last1, last2]."""
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
     task_c = task.Task.default("task_c")
@@ -2109,7 +2109,7 @@ def test_fan_in_from_two_independent_chains():
     # edges maps parent → children, so task_f appears in edges of task_c and task_e
     assert task_f.task_id in graph.edges[task_c.task_id]
     assert task_f.task_id in graph.edges[task_e.task_id]
-    # task_f should be the only child of both tails
+    # task_f should be the only child of both lasts
     assert graph.edges[task_c.task_id] == {task_f.task_id}
     assert graph.edges[task_e.task_id] == {task_f.task_id}
 
@@ -2119,7 +2119,7 @@ def test_fan_in_from_two_independent_chains():
 
 
 def test_add_chain_explicit_depends_on_replaces_cursor():
-    """Explicit depends_on=[...] replaces cursor with only [tail.task_id]."""
+    """Explicit depends_on=[...] replaces cursor with only [last.task_id]."""
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
     task_c = task.Task.default("task_c")
@@ -2162,7 +2162,7 @@ def test_add_chain_duplicate_task_raises():
 
 
 def test_add_chain_first_on_empty_builder():
-    """add_chain(chain) as first call → head has no parents; cursor = [tail.task_id]."""
+    """add_chain(chain) as first call → head has no parents; cursor = [last.task_id]."""
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
     task_c = task.Task.default("task_c")
@@ -2172,7 +2172,7 @@ def test_add_chain_first_on_empty_builder():
 
     # head has no parents (empty builder, uses LAST_ADDED which resolves to [])
     assert builder._dependencies[task_a.task_id] == set()
-    # cursor is only the tail
+    # cursor is only the last
     assert builder._last_added == [task_c.task_id]
 
 
@@ -2269,7 +2269,7 @@ def test_sequential_chain_with_inline_on_failure():
 
 
 def test_explicit_depends_on_with_chain_objects():
-    """TaskChain objects in depends_on resolve to chain.tail.task_id."""
+    """TaskChain objects in depends_on resolve to chain.last.task_id."""
     task_a = task.Task.default("fn_a")
     task_b = task.Task.default("fn_b")
     task_c = task.Task.default("fn_c")
@@ -2278,11 +2278,11 @@ def test_explicit_depends_on_with_chain_objects():
     graph = (
         task.TaskGraphBuilder()
         .add_chain(chain_ab, depends_on=None)
-        .add(task_c, depends_on=None)      # independent root
-        .add(task_d, depends_on=[chain_ab, task_c])  # waits for chain tail AND task_c
+        .add(task_c, depends_on=None)  # independent root
+        .add(task_d, depends_on=[chain_ab, task_c])  # waits for chain last AND task_c
         .build()
     )
-    assert task_d.task_id in graph.edges[task_b.task_id]  # chain resolved to tail
+    assert task_d.task_id in graph.edges[task_b.task_id]  # chain resolved to last
     assert task_d.task_id in graph.edges[task_c.task_id]
 
 
@@ -2307,7 +2307,7 @@ def test_complex_parallel_fan_in_with_failure_handlers():
         .then(aggregate, on_failure=cleanup)
         .build()
     )
-    # aggregate depends on both chain tails
+    # aggregate depends on both chain lasts
     assert aggregate.task_id in graph.edges[ingest.task_id]
     assert aggregate.task_id in graph.edges[enrich.task_id]
     # ingest chain internal deps

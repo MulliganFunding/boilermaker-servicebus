@@ -466,7 +466,7 @@ class TaskChain:
     """An ordered sequence of tasks forming a composable workflow unit.
 
     TaskChain groups tasks that always execute sequentially (A → B → C). The
-    chain exposes its first task (head) and last task (tail) so it can be
+    chain exposes its first task (head) and last task (last) so it can be
     wired into a TaskGraphBuilder with explicit dependency references.
 
     TaskChain is a value object — it has no builder methods, no cursor, and no
@@ -482,7 +482,7 @@ class TaskChain:
 
     Properties:
         head: The first task in the chain (entry point).
-        tail: The last task in the chain (exit point). Use in depends_on
+        last: The last task in the chain (exit point). Use in depends_on
               to express "wait for this entire chain to complete".
     """
 
@@ -498,7 +498,7 @@ class TaskChain:
         return self._tasks[0]
 
     @property
-    def tail(self) -> Task:
+    def last(self) -> Task:
         """The last task in the chain. Use in depends_on to wait for this chain."""
         return self._tasks[-1]
 
@@ -548,7 +548,7 @@ class TaskGraphBuilder:
         """Resolve a mixed depends_on list to a flat list of TaskId strings.
 
         Resolution rules (per element):
-            TaskChain → chain.tail.task_id
+            TaskChain → chain.last.task_id
             Task      → task.task_id
             TaskId    → used as-is
 
@@ -558,7 +558,7 @@ class TaskGraphBuilder:
         resolved = []
         for dep in depends_on:
             if isinstance(dep, TaskChain):
-                dep_id = dep.tail.task_id
+                dep_id = dep.last.task_id
             elif isinstance(dep, Task):
                 dep_id = dep.task_id
             else:
@@ -676,13 +676,13 @@ class TaskGraphBuilder:
 
         Cursor behavior:
             depends_on=LAST_ADDED (default): chain.head depends on current cursor.
-                Cursor is REPLACED with [chain.tail.task_id].
+                Cursor is REPLACED with [chain.last.task_id].
             depends_on=None: chain.head is an independent root (no parents).
-                Cursor ACCUMULATES — chain.tail is APPENDED to existing cursor.
+                Cursor ACCUMULATES — chain.last is APPENDED to existing cursor.
                 This enables fan-in: two add_chain(depends_on=None) calls followed
                 by .then(join) creates a task that waits for BOTH chains.
             depends_on=[...]: chain.head depends on resolved deps.
-                Cursor is REPLACED with [chain.tail.task_id].
+                Cursor is REPLACED with [chain.last.task_id].
 
         Args:
             chain: TaskChain to embed
@@ -705,9 +705,9 @@ class TaskGraphBuilder:
 
         # ACCUMULATE cursor for independent roots, REPLACE for all others
         if depends_on is None:
-            self._last_added = self._last_added + [chain.tail.task_id]
+            self._last_added = self._last_added + [chain.last.task_id]
         else:
-            self._last_added = [chain.tail.task_id]
+            self._last_added = [chain.last.task_id]
 
         return self
 
