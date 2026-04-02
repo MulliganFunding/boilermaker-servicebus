@@ -330,6 +330,7 @@ class TaskGraph(BaseModel):
                 # Check if parent has failed status in results
                 if parent_id in self.results and self.results[parent_id].status.failed:
                     yield self.fail_children[task_id]
+                    break  # Prevent double-yield when multiple parents have failed
 
     def get_result(self, task_id: TaskId) -> TaskResultSlim | TaskResult | None:
         """Get the result of a completed task."""

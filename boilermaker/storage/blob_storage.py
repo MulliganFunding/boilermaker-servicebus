@@ -171,6 +171,12 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             await self.upload_blob(
                 fname, task_result.model_dump_json(), tags=blob_tags, overwrite=True, **concurrency_kwargs
             )
+        # SAFETY: This catch assumes aio_azure_clients_toolbox raises AzureBlobError
+        # (wrapping HTTP 412 Precondition Failed) when an ETag mismatch occurs.
+        # This is the primary guard against concurrent double-scheduling of downstream
+        # tasks. Verified against aio-azure-clients-toolbox v1.0.4 (see uv.lock):
+        # get_blob_client() catches all HttpResponseError (including 412) and re-raises
+        # as AzureBlobError. If the library behavior changes, this guard will silently break.
         except AzureBlobError as exc:
             raise BoilermakerStorageError(
                 f"Failed to store TaskResult {task_result.task_id}",

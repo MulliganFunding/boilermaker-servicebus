@@ -203,13 +203,20 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             (graph.generate_ready_tasks(), graph.generate_failure_ready_tasks())
         ):
             # Write that the task was *scheduled* back to Blob Storage with blob etag and then publish the task!
-            result = graph.schedule_task(ready_task.task_id)
             try:
+                result = graph.schedule_task(ready_task.task_id)
                 await self.storage_interface.store_task_result(result, etag=result.etag)
             except exc.BoilermakerStorageError:
                 logger.error(
                     f"Failed to store scheduled status for task {ready_task.task_id} in graph {graph_id}. "
                     "Not publishing the task to avoid double-scheduling.",
+                    exc_info=True,
+                )
+                continue
+            except ValueError:
+                logger.error(
+                    f"schedule_task raised ValueError for task {ready_task.task_id} in graph {graph_id}. "
+                    "Skipping to avoid double-scheduling.",
                     exc_info=True,
                 )
                 continue

@@ -300,6 +300,49 @@ async def test_store_graph_with_resource_error(
 
 
 # Edge cases and additional tests
+async def test_store_task_result_raises_storage_error_on_etag_mismatch(
+    blob_storage, sample_task_result
+):
+    """
+    Verifies that store_task_result raises BoilermakerStorageError when the
+    underlying blob client raises AzureBlobError (e.g., HTTP 412 ETag mismatch).
+    This is the primary guard against concurrent double-scheduling of downstream tasks.
+
+    The concurrency path (etag != None) is exercised explicitly so that the
+    concurrency_kwargs are populated before the upload attempt.
+    """
+    with patch.object(
+        blob_storage, "upload_blob", new_callable=AsyncMock
+    ) as mock_upload:
+        error = AzureBlobError(
+            MagicMock(
+                **{
+                    "message": "The condition specified using HTTP conditional header(s) is not met.",
+                    "status_code": 412,
+                    "reason": "Precondition Failed",
+                }
+            )
+        )
+        mock_upload.side_effect = error
+
+        with pytest.raises(BoilermakerStorageError) as exc_info:
+            # Pass a non-empty etag to exercise the ETag concurrency guard code path
+            await blob_storage.store_task_result(
+                sample_task_result, etag='"0x8DBBAF4B8A6017C"'
+            )
+
+        assert "Failed to store TaskResult" in str(exc_info.value)
+        assert exc_info.value.task_id == sample_task_result.task_id
+        assert exc_info.value.graph_id == sample_task_result.graph_id
+        assert exc_info.value.status_code == 412
+        assert exc_info.value.reason == "Precondition Failed"
+
+        # Confirm etag and if_match were forwarded to upload_blob
+        call_kwargs = mock_upload.call_args[1]
+        assert "etag" in call_kwargs
+        assert "if_match" in call_kwargs
+
+
 async def test_store_task_result_without_graph_id(blob_storage, sample_task):
     """Test storing TaskResult without graph_id."""
     task_result = TaskResult(

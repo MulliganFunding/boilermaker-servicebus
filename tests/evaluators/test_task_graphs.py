@@ -1,10 +1,10 @@
 import itertools
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from boilermaker import exc, retries
 from boilermaker.evaluators import TaskGraphEvaluator
-from boilermaker.task import Task, TaskResult, TaskResultSlim, TaskStatus
+from boilermaker.task import Task, TaskGraph, TaskResult, TaskResultSlim, TaskStatus
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -562,3 +562,223 @@ async def test_continue_graph_no_ready_tasks(evaluator_context):
 
     # Should not publish any tasks since no new tasks are ready
     assert len(published_tasks) == 0
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# BMO-8: Double-yield in generate_failure_ready_tasks
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+async def test_bmo8_generate_failure_ready_tasks_no_double_yield(app):
+    """BMO-8: A shared failure callback with two failed parents must be yielded exactly once."""
+
+    async def task_a(state):
+        return "A"
+
+    async def task_b(state):
+        return "B"
+
+    async def fail_cb(state):
+        return "failure handled"
+
+    app.register_many_async([task_a, task_b, fail_cb])
+
+    a = app.create_task(task_a)
+    b = app.create_task(task_b)
+    f = app.create_task(fail_cb)
+
+    graph = TaskGraph()
+    graph.add_task(a)
+    graph.add_task(b)
+    # Shared failure callback registered on both A and B
+    graph.add_failure_callback(a.task_id, f)
+    graph.add_failure_callback(b.task_id, f)
+
+    # Initialize pending results
+    list(graph.generate_pending_results())
+
+    # Mark both A and B as failed
+    graph.add_result(TaskResult(task_id=a.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+    graph.add_result(TaskResult(task_id=b.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+
+    # The shared failure callback should only appear once
+    failure_ready = list(graph.generate_failure_ready_tasks())
+    assert len(failure_ready) == 1, (
+        f"Expected exactly 1 failure-ready task, got {len(failure_ready)}. "
+        "Double-yield bug: same callback yielded once per failed parent."
+    )
+    assert failure_ready[0].task_id == f.task_id
+
+
+async def test_bmo8_continue_graph_shared_failure_callback_no_raise(evaluator_context, app):
+    """BMO-8: continue_graph must not raise when a shared failure callback has two failed parents."""
+
+    async def task_a(state):
+        return "A"
+
+    async def task_b(state):
+        return "B"
+
+    async def shared_fail_cb(state):
+        return "shared failure handled"
+
+    app.register_many_async([task_a, task_b, shared_fail_cb])
+
+    a = app.create_task(task_a)
+    b = app.create_task(task_b)
+    f = app.create_task(shared_fail_cb)
+
+    graph = TaskGraph()
+    graph.add_task(a)
+    graph.add_task(b)
+    graph.add_failure_callback(a.task_id, f)
+    graph.add_failure_callback(b.task_id, f)
+
+    list(graph.generate_pending_results())
+
+    # Both parents failed
+    graph.add_result(TaskResult(task_id=a.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+    graph.add_result(TaskResult(task_id=b.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+
+    evaluator_context.graph = graph
+    evaluator_context.mock_storage.load_graph.return_value = graph
+
+    # Build the completed_task_result as if A just finished (failed)
+    completed = TaskResult(task_id=a.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure)
+
+    # Should not raise even though both parents are failed
+    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+
+    # The shared failure callback must have been dispatched exactly once
+    published = evaluator_context.get_scheduled_messages()
+    assert len(published) == 1, f"Expected F dispatched exactly once, got {len(published)}"
+    assert published[0].task.task_id == f.task_id
+
+    assert ready_count == 1
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# BMO-11: schedule_task ValueError outside try/except
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+async def test_bmo11_schedule_task_value_error_does_not_propagate(evaluator_context):
+    """BMO-11: ValueError from schedule_task must be caught; continue_graph must return without raising."""
+    # Build a mock graph whose schedule_task always raises ValueError.
+    # We use a MagicMock(spec=TaskGraph) so we bypass Pydantic's __setattr__ restriction.
+    real_graph = evaluator_context.graph
+    ok_task = evaluator_context.ok_task
+
+    mock_graph = MagicMock(spec=TaskGraph)
+    mock_graph.graph_id = real_graph.graph_id
+    # Sanity check: status must match the completed result's status
+    mock_graph.get_status.return_value = TaskStatus.Success
+    # generate_ready_tasks yields the ok_task (so schedule_task gets called)
+    mock_graph.generate_ready_tasks.return_value = iter([ok_task])
+    mock_graph.generate_failure_ready_tasks.return_value = iter([])
+    # schedule_task always raises ValueError
+    mock_graph.schedule_task.side_effect = ValueError("task is not pending")
+
+    evaluator_context.mock_storage.load_graph.return_value = mock_graph
+
+    completed = TaskResult(
+        task_id=ok_task.task_id,
+        graph_id=real_graph.graph_id,
+        status=TaskStatus.Success,
+        result="OK",
+    )
+
+    # Should not raise
+    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+
+    # No tasks should have been published (all were skipped due to ValueError)
+    published = evaluator_context.get_scheduled_messages()
+    assert len(published) == 0, "No tasks should be published when schedule_task raises ValueError"
+    assert ready_count == 0
+
+
+async def test_bmo11_message_settled_even_when_schedule_task_raises(evaluator_context, mock_storage):
+    """BMO-11: message_handler must settle its message even if schedule_task raises ValueError inside continue_graph."""
+    evaluator_context.prep_task_to_succeed()
+
+    real_graph = evaluator_context.graph
+    ok_task = evaluator_context.ok_task
+
+    # Build a mock graph whose schedule_task always raises ValueError
+    mock_graph = MagicMock(spec=TaskGraph)
+    mock_graph.graph_id = real_graph.graph_id
+    mock_graph.get_status.return_value = TaskStatus.Success
+    mock_graph.generate_ready_tasks.return_value = iter([ok_task])
+    mock_graph.generate_failure_ready_tasks.return_value = iter([])
+    mock_graph.schedule_task.side_effect = ValueError("not pending")
+    evaluator_context.mock_storage.load_graph.return_value = mock_graph
+
+    # Run the full evaluator (message_handler path)
+    result = await evaluator_context()
+
+    # Task itself should have succeeded
+    assert result.status == TaskStatus.Success
+
+    # The message must have been settled (complete_message called, not stuck)
+    evaluator_context.assert_msg_settled()
+
+
+async def test_bmo11_other_tasks_dispatched_when_one_raises_value_error(evaluator_context, app):
+    """BMO-11: When schedule_task raises ValueError for one task, remaining tasks in batch are still dispatched."""
+
+    async def sibling_a(state):
+        return "A"
+
+    async def sibling_b(state):
+        return "B"
+
+    async def root_task(state):
+        return "root"
+
+    app.register_many_async([sibling_a, sibling_b, root_task])
+
+    root = app.create_task(root_task)
+    sa = app.create_task(sibling_a)
+    sb = app.create_task(sibling_b)
+
+    graph = TaskGraph()
+    graph.add_task(root)
+    graph.add_task(sa, parent_ids=[root.task_id])
+    graph.add_task(sb, parent_ids=[root.task_id])
+
+    list(graph.generate_pending_results())
+
+    # Root succeeded
+    graph.add_result(TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    # Build a mock graph wrapping the real one so we can selectively raise ValueError for sibling_a
+    mock_graph = MagicMock(spec=TaskGraph)
+    mock_graph.graph_id = graph.graph_id
+    mock_graph.get_status.return_value = TaskStatus.Success
+    # Both siblings are ready
+    mock_graph.generate_ready_tasks.return_value = iter([sa, sb])
+    mock_graph.generate_failure_ready_tasks.return_value = iter([])
+
+    call_count = {"n": 0}
+
+    def selective_schedule_task(task_id):
+        call_count["n"] += 1
+        if task_id == sa.task_id:
+            raise ValueError("already scheduled")
+        # For sibling_b, return a minimal scheduled result
+        return graph.schedule_task(task_id)
+
+    mock_graph.schedule_task.side_effect = selective_schedule_task
+    evaluator_context.mock_storage.load_graph.return_value = mock_graph
+
+    completed = TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success)
+    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+
+    published = evaluator_context.get_scheduled_messages()
+    published_ids = {msg.task.task_id for msg in published}
+
+    # sibling_b should still be dispatched
+    assert sb.task_id in published_ids, "sibling_b should be dispatched even though sibling_a raised ValueError"
+    # sibling_a should NOT have been dispatched
+    assert sa.task_id not in published_ids, "sibling_a should NOT be dispatched after ValueError"
+    assert ready_count == 1
