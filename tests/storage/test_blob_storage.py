@@ -212,6 +212,39 @@ async def test_load_graph_returns_none_when_no_content(blob_storage):
         assert result is None
 
 
+async def test_load_graph_skips_graph_blob_in_list_results(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+    sample_task,
+    sample_task_result_slim,
+):
+    """Regression: graph.json in list_blobs must not be parsed as TaskResultSlim."""
+    sample_task_graph.add_task(sample_task)
+    sample_task_result_slim.graph_id = sample_task.graph_id
+
+    graph_json = sample_task_graph.model_dump_json()
+    task_result_json = sample_task_result_slim.model_dump_json()
+    graph_path = f"task-results/{sample_task_graph.storage_path}"
+    task_result_path = f"task-results/{sample_task_result_slim.storage_path}"
+
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(None, side_effect=[graph_json, task_result_json])
+    set_return.list_blobs_returns(
+        [
+            BlobProperties(name=graph_path, last_modified="2023-01-01T00:00:00Z"),
+            BlobProperties(name=task_result_path, last_modified="2023-01-01T00:00:00Z"),
+        ]
+    )
+
+    result = await blob_storage.load_graph(sample_task_graph.graph_id)
+
+    assert result is not None
+    assert result.graph_id == sample_task_graph.graph_id
+    assert sample_task_result_slim.task_id in result.results
+    assert result.results[sample_task_result_slim.task_id].task_id == sample_task_result_slim.task_id
+
+
 # Tests for store_graph method
 async def test_store_graph_success(mock_azureblob, blob_storage, sample_task_graph):
     """Test successful storage of a TaskGraph."""
