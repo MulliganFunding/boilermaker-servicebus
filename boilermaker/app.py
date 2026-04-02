@@ -12,7 +12,7 @@ import typing
 import weakref
 from functools import wraps
 
-from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender  # type: ignore
+from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender
 from anyio import create_task_group, open_signal_receiver
 from anyio.abc import CancelScope
 from azure.servicebus import ServiceBusReceivedMessage

@@ -20,8 +20,7 @@ from azure.identity.aio import DefaultAzureCredential
 from boilermaker import Boilermaker
 from boilermaker.service_bus import AzureServiceBus
 from boilermaker.storage import BlobClientStorage
-from boilermaker.task import LAST_ADDED, TaskChain, TaskGraphBuilder
-
+from boilermaker.task import Task, TaskChain, TaskGraphBuilder
 
 # ---------------------------------------------------------------------------
 # Task functions
@@ -92,7 +91,9 @@ async def handle_aggregation_error(state):
 
 async def example_sequential(app: Boilermaker) -> None:
     """Pattern 1 — Sequential: fetch → process → save."""
-    fetch_task = app.create_task(fetch_data, "https://api.example.com/data")
+    # Create a Task with an immutable signature (si) so that the args are baked in
+    fetch_task = Task.si(fetch_data, "https://api.example.com/data")
+    # Alterantively, we can use the Boilermaker app to create the same
     process_task = app.create_task(process_data, {"data": "placeholder", "size": 0})
     save_task = app.create_task(save_results, {"processed": False})
 

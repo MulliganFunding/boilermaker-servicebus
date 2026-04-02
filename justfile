@@ -29,7 +29,7 @@ check:
 # Run mypy checks
 check-types:
     #!/bin/bash -eux
-    uv run mypy boilermaker
+    uv run ty check boilermaker
 
 # Run all tests locally
 test *args:

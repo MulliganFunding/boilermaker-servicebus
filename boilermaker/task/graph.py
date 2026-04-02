@@ -543,7 +543,7 @@ class TaskGraphBuilder:
 
     def _resolve_deps(
         self,
-        depends_on: list["Task | TaskId | TaskChain"],
+        depends_on: list[Task | TaskId | TaskChain],
     ) -> list[TaskId]:
         """Resolve a mixed depends_on list to a flat list of TaskId strings.
 
@@ -602,7 +602,7 @@ class TaskGraphBuilder:
         self,
         task: Task,
         *,
-        depends_on: "list[Task | TaskId | TaskChain] | None | type[LAST_ADDED]" = LAST_ADDED,
+        depends_on: list[Task | TaskId | TaskChain] | None | _LastAddedSentinel = LAST_ADDED,
         on_failure: Task | None = None,
     ) -> "TaskGraphBuilder":
         """Add a task with optional explicit dependencies.
@@ -623,7 +623,10 @@ class TaskGraphBuilder:
         elif depends_on is None:
             parent_ids = []
         else:
-            parent_ids = self._resolve_deps(depends_on)
+            # Because `_LastAddedSentinel` is a singleton type used to indicate the default
+            # We have to help the type checker understand that depends_on is not the sentinel.
+            depends = typing.cast(list[Task | TaskId | TaskChain], depends_on)
+            parent_ids = self._resolve_deps(depends)
         self._register_task(task, parent_ids=parent_ids, on_failure=on_failure)
         self._last_added = [task.task_id]
         return self
@@ -631,7 +634,7 @@ class TaskGraphBuilder:
     def parallel(
         self,
         *tasks: Task,
-        depends_on: "list[Task | TaskId | TaskChain] | None | type[LAST_ADDED]" = LAST_ADDED,
+        depends_on: list[Task | TaskId | TaskChain] | None | _LastAddedSentinel = LAST_ADDED,
         on_failure: Task | None = None,
     ) -> "TaskGraphBuilder":
         """Add multiple tasks to run in parallel.
@@ -654,7 +657,8 @@ class TaskGraphBuilder:
         elif depends_on is None:
             shared_parents = []
         else:
-            shared_parents = self._resolve_deps(depends_on)
+            depends = typing.cast(list[Task | TaskId | TaskChain], depends_on)
+            shared_parents = self._resolve_deps(depends)
 
         for t in tasks:
             self._register_task(t, parent_ids=shared_parents, on_failure=on_failure)
@@ -666,7 +670,7 @@ class TaskGraphBuilder:
         self,
         chain: "TaskChain",
         *,
-        depends_on: "list[Task | TaskId | TaskChain] | None | type[LAST_ADDED]" = LAST_ADDED,
+        depends_on: list[Task | TaskId | TaskChain] | None | _LastAddedSentinel = LAST_ADDED,
     ) -> "TaskGraphBuilder":
         """Embed a TaskChain into the graph as a composable unit.
 
@@ -692,7 +696,8 @@ class TaskGraphBuilder:
         elif depends_on is LAST_ADDED:
             first_task_parents = list(self._last_added)
         else:
-            first_task_parents = self._resolve_deps(depends_on)
+            depends = typing.cast(list[Task | TaskId | TaskChain], depends_on)
+            first_task_parents = self._resolve_deps(depends)
 
         for i, chain_task in enumerate(chain._tasks):
             parent_ids = first_task_parents if i == 0 else [chain._tasks[i - 1].task_id]
