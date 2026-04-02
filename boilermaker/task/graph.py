@@ -652,6 +652,9 @@ class TaskGraphBuilder:
 
             Self for method chaining
         """
+        if len(tasks) == 0:
+            raise ValueError("parallel requires at least one task.")
+
         if depends_on is LAST_ADDED:
             shared_parents = list(self._last_added)
         elif depends_on is None:
@@ -705,7 +708,7 @@ class TaskGraphBuilder:
 
         # ACCUMULATE cursor for independent roots, REPLACE for all others
         if depends_on is None:
-            self._last_added = self._last_added + [chain.last.task_id]
+            self._last_added.append(chain.last.task_id)
         else:
             self._last_added = [chain.last.task_id]
 

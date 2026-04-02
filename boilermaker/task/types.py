@@ -7,7 +7,7 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-# Enforce the followign rule: anything Callable but it must have a __name__ attribute!
+# Enforce the following rule: anything Callable but it must have a __name__ attribute!
 # functools.partials by default do not have a __name__ attribute. This offers a warning for users.
 class NamedAwaitable(Protocol[P, R]):
     __name__: str

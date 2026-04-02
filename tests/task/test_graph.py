@@ -988,6 +988,9 @@ def test_task_graph_builder_parallel():
     task_c = task.Task.default("task_c")
     tasks = [task_a, task_b, task_c]
 
+    with pytest.raises(ValueError, match="parallel requires at least one task"):
+        builder.parallel()
+
     # Add parallel tasks (variadic)
     result = builder.parallel(task_a, task_b, task_c)
 
