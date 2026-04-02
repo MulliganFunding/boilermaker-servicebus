@@ -1236,15 +1236,15 @@ def test_then_delegates_to_add():
     assert builder1._last_added == builder2._last_added
 
 
-def test_task_graph_builder_chain():
-    """Test chain() convenience method."""
+def test_task_graph_builder_sequence():
+    """Test sequence() convenience method."""
     builder = task.TaskGraphBuilder()
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
     task_c = task.Task.default("task_c")
 
     # Chain tasks
-    result = builder.chain(task_a, task_b, task_c)
+    result = builder.sequence(task_a, task_b, task_c)
 
     # Should return self for chaining
     assert result is builder
@@ -1258,10 +1258,10 @@ def test_task_graph_builder_chain():
     assert builder._last_added == [task_c.task_id]
 
 
-def test_task_graph_builder_chain_empty():
-    """Test chain() with no tasks."""
+def test_task_graph_builder_sequence_empty():
+    """Test sequence() with no tasks."""
     builder = task.TaskGraphBuilder()
-    result = builder.chain()
+    result = builder.sequence()
 
     # Should return self and do nothing
     assert result is builder

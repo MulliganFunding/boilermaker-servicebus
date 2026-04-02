@@ -748,11 +748,11 @@ class TaskGraphBuilder:
 
         return self.add(task, depends_on=LAST_ADDED, on_failure=on_failure)
 
-    def chain(self, *tasks: Task) -> "TaskGraphBuilder":
-        """Convenience method to chain tasks in sequence: A -> B -> C -> ...
+    def sequence(self, *tasks: Task) -> "TaskGraphBuilder":
+        """Convenience method to run tasks in sequence: A -> B -> C -> ...
 
         Args:
-            *tasks: Tasks to chain in order
+            *tasks: Tasks to run in order
 
         Returns:
             Self for method chaining
