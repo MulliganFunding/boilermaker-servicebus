@@ -4,12 +4,11 @@ import typing
 from azure.servicebus.aio import ServiceBusReceiver
 
 from boilermaker.storage.base import StorageInterface
-from boilermaker.task import Task
+from boilermaker.task import Task, TaskHandler
 
 from .common import (
     MessageActions,
     TaskEvaluatorBase,
-    TaskHandler,
     TaskHandlerRegistry,
     TaskPublisher,
 )

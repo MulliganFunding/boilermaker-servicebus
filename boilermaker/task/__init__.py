@@ -2,6 +2,7 @@ from .graph import LAST_ADDED, TaskChain, TaskGraph, TaskGraphBuilder
 from .result import TaskResult, TaskResultSlim, TaskStatus
 from .task import Task
 from .task_id import GraphId, TaskId
+from .types import TaskHandler
 
 __all__ = [
     "LAST_ADDED",
@@ -14,4 +15,5 @@ __all__ = [
     "Task",
     "TaskId",
     "GraphId",
+    "TaskHandler",
 ]

@@ -7,8 +7,7 @@ from boilermaker.exc import BoilermakerUnregisteredFunction
 from boilermaker.failure import TaskFailureResult
 from boilermaker.retries import RetryException
 from boilermaker.task import Task, TaskResult, TaskStatus
-
-from .common import TaskHandler
+from boilermaker.task.types import TaskHandler
 
 logger = logging.getLogger("boilermaker.app")
 

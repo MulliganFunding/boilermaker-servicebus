@@ -163,7 +163,7 @@ class Boilermaker:
             raise ValueError(f"Function must be async: {fn_name}")
 
         task = Task.default(fn_name, **options)
-        self.function_registry[fn_name] = fn
+        self.function_registry[fn_name] = typing.cast(TaskHandler, fn)  # why must cast here
         self.task_registry[fn_name] = task
         logger.info(f"Registered background function fn={fn_name}")
         return self
