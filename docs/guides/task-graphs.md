@@ -178,10 +178,10 @@ graph = (
 ### Shared failure handler with `TaskChain`
 
 If you want a **single error handler that triggers if any task in a sequence fails**, use
-`TaskChain(on_failure=handler)`. The handler is registered on **each** task in the chain:
+`TaskChain(on_any_failure=handler)`. The handler is registered on **each** task in the chain:
 
 ```py
-pipeline = TaskChain(task_a, task_b, task_c, on_failure=pipeline_error_handler)
+pipeline = TaskChain(task_a, task_b, task_c, on_any_failure=pipeline_error_handler)
 
 graph = TaskGraphBuilder().add_chain(pipeline).build()
 ```
@@ -192,8 +192,8 @@ Whichever task fails first, `pipeline_error_handler` runs. Subsequent tasks in t
 ### Complex example: parallel chains with failure handling
 
 ```py
-ingest_chain  = TaskChain(validate_task, ingest_task,  on_failure=ingest_error_handler)
-process_chain = TaskChain(transform_task, enrich_task, on_failure=process_error_handler)
+ingest_chain  = TaskChain(validate_task, ingest_task,  on_any_failure=ingest_error_handler)
+process_chain = TaskChain(transform_task, enrich_task, on_any_failure=process_error_handler)
 
 graph = (
     TaskGraphBuilder()

@@ -222,7 +222,7 @@ async def example_taskchain_shared_failure(app: Boilermaker) -> None:
     save_task = app.create_task(save_results, {"processed": False})
     process_error_task = app.create_task(handle_processing_error)
 
-    pipeline = TaskChain(fetch_task, process_task, save_task, on_failure=process_error_task)
+    pipeline = TaskChain(fetch_task, process_task, save_task, on_any_failure=process_error_task)
 
     graph = TaskGraphBuilder().add_chain(pipeline).build()
     await app.publish_graph(graph)

@@ -1849,8 +1849,8 @@ def test_task_chain_on_failure_stored():
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
     handler = task.Task.default("handler")
-    chain = task.TaskChain(task_a, task_b, on_failure=handler)
-    assert chain._on_failure is handler
+    chain = task.TaskChain(task_a, task_b, on_any_failure=handler)
+    assert chain.on_any_failure is handler
 
 
 def test_task_chain_no_failure_handler():
@@ -1858,7 +1858,7 @@ def test_task_chain_no_failure_handler():
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
     chain = task.TaskChain(task_a, task_b)
-    assert chain._on_failure is None
+    assert chain.on_any_failure is None
 
 
 # ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
@@ -2144,7 +2144,7 @@ def test_add_chain_on_failure_registered_on_each_task():
     task_c = task.Task.default("task_c")
     handler = task.Task.default("handler")
 
-    chain = task.TaskChain(task_a, task_b, task_c, on_failure=handler)
+    chain = task.TaskChain(task_a, task_b, task_c, on_any_failure=handler)
     builder = task.TaskGraphBuilder()
     builder.add_chain(chain, depends_on=None)
 
@@ -2300,8 +2300,8 @@ def test_complex_parallel_fan_in_with_failure_handlers():
     aggregate = task.Task.default("aggregate")
     cleanup = task.Task.default("cleanup")
 
-    ingest_chain = task.TaskChain(validate, ingest, on_failure=ingest_err)
-    process_chain = task.TaskChain(transform, enrich, on_failure=process_err)
+    ingest_chain = task.TaskChain(validate, ingest, on_any_failure=ingest_err)
+    process_chain = task.TaskChain(transform, enrich, on_any_failure=process_err)
 
     graph = (
         task.TaskGraphBuilder()

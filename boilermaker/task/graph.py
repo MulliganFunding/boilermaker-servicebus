@@ -487,11 +487,18 @@ class TaskChain:
               to express "wait for this entire chain to complete".
     """
 
-    def __init__(self, *tasks: Task, on_failure: Task | None = None) -> None:
+    def __init__(self, *tasks: Task, on_any_failure: Task | None = None) -> None:
         if len(tasks) == 0:
             raise ValueError("TaskChain requires at least one task.")
         self._tasks: list[Task] = list(tasks)
-        self._on_failure: Task | None = on_failure
+        self.on_any_failure: Task | None = on_any_failure
+
+    def __len__(self) -> int:
+        return len(self._tasks)
+
+    def __iter__(self):
+        """Iterate over the tasks in the chain in order."""
+        return iter(self._tasks)
 
     @property
     def head(self) -> Task:
@@ -703,9 +710,15 @@ class TaskGraphBuilder:
             depends = typing.cast(list[Task | TaskId | TaskChain], depends_on)
             first_task_parents = self._resolve_dependencies(depends)
 
-        for i, chain_task in enumerate(chain._tasks):
-            parent_ids = first_task_parents if i == 0 else [chain._tasks[i - 1].task_id]
-            self._register_task(chain_task, parent_ids=parent_ids, on_failure=chain._on_failure)
+        chain_parent = None
+        for task in chain:
+            if chain_parent is None:
+                parent_task_ids = first_task_parents
+            else:
+                parent_task_ids = [chain_parent.task_id]
+
+            self._register_task(task, parent_ids=parent_task_ids, on_failure=chain.on_any_failure)
+            chain_parent = task
 
         # ACCUMULATE cursor for independent roots, REPLACE for all others
         if depends_on is None:

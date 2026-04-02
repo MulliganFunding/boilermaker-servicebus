@@ -117,6 +117,6 @@ graph = (
 )
 
 # TaskChain with shared failure handler
-pipeline = TaskChain(task_a, task_b, task_c, on_failure=error_handler)
+pipeline = TaskChain(task_a, task_b, task_c, on_any_failure=error_handler)
 graph = TaskGraphBuilder().add_chain(pipeline).build()
 ```
