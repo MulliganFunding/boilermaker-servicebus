@@ -8,7 +8,7 @@ resolution-markers = [
 
 [[package]]
 name = "aio-azure-clients-toolbox"
-version = "1.0.4"
+version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -22,9 +22,9 @@ dependencies = [
     { name = "azure-servicebus" },
     { name = "azure-storage-blob" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bc/ae/0c384e807fac48406b6a29795e95a5f149c74ca197c03f1966af2fe48481/aio_azure_clients_toolbox-1.0.4.tar.gz", hash = "sha256:2f9752c5fadda2d64fa80791186f22a6265be897175cd349168202cd881e3ca2", size = 46914, upload-time = "2025-10-14T16:05:57.107Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/64/39/ba2eb096f2335e4180483fb675e6d52556212a4bfd5b1f19d0704d32ab7a/aio_azure_clients_toolbox-1.1.0.tar.gz", hash = "sha256:8bb36893cd1efa2fff761e7214ccfb51b4a2ccc4514ff96fde631662c2b42f46", size = 47413, upload-time = "2026-04-03T19:04:38.614Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/ee/f82dce0cba021e2f1d9ffb22dbe499be347f7b53f7b9e3e02d903b9d799f/aio_azure_clients_toolbox-1.0.4-py3-none-any.whl", hash = "sha256:ad9f23613598c0119185ae99ddb2a7490cfc334aef4367745c502fd85013a166", size = 53195, upload-time = "2025-10-14T16:05:55.535Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/dc/2c5e4d58a5a47f55593f5a9f80141fd9d5cb0a6465ff11c8ad5be3d0ceb1/aio_azure_clients_toolbox-1.1.0-py3-none-any.whl", hash = "sha256:6e4cda155943c94b7d274d32d1116b275f268638f5c81cd42fb26c4e289c9958", size = 53635, upload-time = "2026-04-03T19:04:37.132Z" },
 ]
 
 [[package]]
@@ -387,7 +387,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aio-azure-clients-toolbox", specifier = ">=1.0.4" },
+    { name = "aio-azure-clients-toolbox", specifier = ">=1.1.0" },
     { name = "anyio", specifier = ">=4.11.0" },
     { name = "azure-core-tracing-opentelemetry", specifier = ">=1.0.0b12" },
     { name = "azure-identity", specifier = ">=1.25.0" },

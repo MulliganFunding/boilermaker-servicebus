@@ -361,6 +361,7 @@ class Boilermaker:
                 results: list[int] = await self.service_bus_client.send_message(
                     task.model_dump_json(),
                     delay=delay,
+                    unique_msg_id=str(task.task_id),
                 )
                 if results and len(results) == 1:
                     sequence_number = results[0]
