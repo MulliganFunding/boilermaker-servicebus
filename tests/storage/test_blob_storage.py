@@ -408,7 +408,7 @@ async def test_store_task_result_raises_storage_error_on_etag_mismatch(
         # Confirm etag and if_match were forwarded to upload_blob
         call_kwargs = mock_upload.call_args[1]
         assert "etag" in call_kwargs
-        assert "if_match" in call_kwargs
+        assert "if_tags_match_condition" in call_kwargs
 
 
 async def test_store_task_result_without_graph_id(blob_storage, sample_task):
