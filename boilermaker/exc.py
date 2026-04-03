@@ -1,6 +1,22 @@
 from azure.servicebus.exceptions import ServiceBusError
 
 
+class BoilermakerError(Exception):
+    """Base class for Boilermaker-specific exceptions."""
+
+    pass
+
+
+class ContinueGraphError(BoilermakerError):
+    """Raised when continue_graph cannot load the graph after retries.
+
+    Signals message_handler that settlement must be suppressed so that
+    Service Bus will redeliver the message and downstream dispatch can be retried.
+    """
+
+    pass
+
+
 class BoilermakerAppException(Exception):
     def __init__(self, message: str, errors: list):
         super().__init__(message + str(errors))

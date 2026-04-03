@@ -332,6 +332,38 @@ class TaskGraph(BaseModel):
                     yield self.fail_children[task_id]
                     break  # Prevent double-yield when multiple parents have failed
 
+    def generate_scheduled_tasks(self) -> Generator[Task]:
+        """Yield tasks already in Scheduled status whose scheduling conditions are still met.
+
+        Used by ``continue_graph`` for crash-recovery: if a prior invocation wrote
+        a task to ``Scheduled`` in blob storage but crashed before publishing the
+        Service Bus message, this method identifies it on redelivery so that
+        ``continue_graph`` can re-publish it without a second blob write.
+
+        Conditions:
+          - Regular child tasks: all antecedents must have succeeded
+            (same predicate as ``generate_ready_tasks``).
+          - Failure callback tasks: at least one triggering parent must have a
+            failed status (same predicate as ``generate_failure_ready_tasks``).
+        """
+        # Regular children already in Scheduled status
+        for task_id, task in self.children.items():
+            result = self.results.get(task_id)
+            if result is not None and result.status == TaskStatus.Scheduled:
+                if self.all_antecedents_succeeded(task_id):
+                    yield task
+
+        # Failure callback children already in Scheduled status
+        for task_id, task in self.fail_children.items():
+            result = self.results.get(task_id)
+            if result is not None and result.status == TaskStatus.Scheduled:
+                # At least one triggering parent must have a failed status
+                for parent_id, fail_child_ids in self.fail_edges.items():
+                    if task_id in fail_child_ids:
+                        if parent_id in self.results and self.results[parent_id].status.failed:
+                            yield task
+                            break  # Prevent double-yield when multiple parents have failed
+
     def get_result(self, task_id: TaskId) -> TaskResultSlim | TaskResult | None:
         """Get the result of a completed task."""
         return self.results.get(task_id)

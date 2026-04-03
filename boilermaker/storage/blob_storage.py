@@ -12,6 +12,7 @@ from azure.core.exceptions import (
     ResourceNotFoundError,
 )
 from azure.identity.aio import DefaultAzureCredential
+from pydantic import ValidationError
 
 from boilermaker.exc import BoilermakerStorageError
 from boilermaker.storage import StorageInterface
@@ -48,7 +49,8 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         Returns:
             The loaded TaskGraph instance, or None if not found.
         Raises:
-            ValidationError: If TaskGraph or TaskResultSlim data cannot be validated.
+            BoilermakerStorageError: If the blob cannot be loaded or if TaskGraph/TaskResultSlim
+                data cannot be validated.
         """
         if not graph_id:
             raise ValueError("`graph_id` must be provided to load a TaskGraph.")
@@ -68,7 +70,13 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         if graph_contents is None:
             return None
 
-        graph = TaskGraph.model_validate_json(graph_contents)
+        try:
+            graph = TaskGraph.model_validate_json(graph_contents)
+        except ValidationError as e:
+            raise BoilermakerStorageError(
+                f"Failed to deserialize graph {graph_id}: {e}",
+                status_code=None,
+            ) from e
 
         # Load all TaskResultSlim instances associated with this graph
         # We don't want to load *all* return values into memory. Just the statuses.
@@ -76,7 +84,13 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             # DO NOT REDOWNLOAD GRAPH
             if blob.name == graph_path:
                 continue
-            tr = TaskResultSlim.model_validate_json(await self.download_blob(blob.name))
+            try:
+                tr = TaskResultSlim.model_validate_json(await self.download_blob(blob.name))
+            except ValidationError as e:
+                raise BoilermakerStorageError(
+                    f"Failed to deserialize task result in graph {graph_id}: {e}",
+                    status_code=None,
+                ) from e
             tr.etag = blob.etag
             if tr.graph_id == graph_id:
                 graph.results[tr.task_id] = tr

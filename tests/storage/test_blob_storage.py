@@ -212,6 +212,74 @@ async def test_load_graph_returns_none_when_no_content(blob_storage):
         assert result is None
 
 
+async def test_load_graph_validation_error_on_graph_json_raises_storage_error(
+    blob_storage,
+):
+    """BMO-10: ValidationError from model_validate_json on the graph blob must be wrapped
+    as BoilermakerStorageError so the continue_graph retry loop can catch it.
+
+    Corrupt / schema-mismatched graph blobs raise pydantic.ValidationError inside
+    load_graph.  Before the fix, that error escaped as a raw ValidationError bypassing
+    the `except BoilermakerStorageError` in continue_graph's retry loop.  After the fix,
+    load_graph wraps it so callers only need to handle BoilermakerStorageError.
+    """
+    from pydantic import ValidationError
+
+    with (
+        patch.object(
+            blob_storage, "download_blob", new_callable=AsyncMock
+        ) as mock_download,
+        patch(
+            "boilermaker.storage.blob_storage.TaskGraph.model_validate_json",
+            side_effect=ValidationError.from_exception_data(
+                "TaskGraph", [], input_type="json"
+            ),
+        ),
+    ):
+        mock_download.return_value = '{"corrupt": "data"}'
+
+        with pytest.raises(BoilermakerStorageError) as exc_info:
+            await blob_storage.load_graph(GraphId("test-graph"))
+
+        assert "Failed to deserialize graph" in str(exc_info.value)
+        assert "test-graph" in str(exc_info.value)
+
+
+async def test_load_graph_validation_error_on_task_result_json_raises_storage_error(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+):
+    """BMO-10: ValidationError from model_validate_json on a TaskResultSlim blob must be
+    wrapped as BoilermakerStorageError — same contract as for the graph blob itself.
+    """
+    from pydantic import ValidationError
+
+    graph_json = sample_task_graph.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(None, side_effect=[graph_json, '{"corrupt": "data"}'])
+    set_return.list_blobs_returns(
+        [
+            BlobProperties(
+                name=f"task-results/{sample_task_graph.graph_id}/task-result.json",
+                last_modified="2023-01-01T00:00:00Z",
+            ),
+        ]
+    )
+
+    with patch(
+        "boilermaker.storage.blob_storage.TaskResultSlim.model_validate_json",
+        side_effect=ValidationError.from_exception_data(
+            "TaskResultSlim", [], input_type="json"
+        ),
+    ):
+        with pytest.raises(BoilermakerStorageError) as exc_info:
+            await blob_storage.load_graph(sample_task_graph.graph_id)
+
+    assert "Failed to deserialize task result" in str(exc_info.value)
+    assert str(sample_task_graph.graph_id) in str(exc_info.value)
+
+
 async def test_load_graph_skips_graph_blob_in_list_results(
     mock_azureblob,
     blob_storage,
