@@ -176,10 +176,10 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             "graph_id": task_result.graph_id or "none",
             "status": task_result.status,
         }
-        concurrency_kwargs: dict[str, str | int] = {}
+        concurrency_kwargs: dict[str, str | int | MatchConditions] = {}
         if etag:
             concurrency_kwargs["etag"] = etag
-            concurrency_kwargs["if_tags_match_condition"] = MatchConditions.IfNotModified.value
+            concurrency_kwargs["match_condition"] = MatchConditions.IfNotModified
 
         try:
             await self.upload_blob(
