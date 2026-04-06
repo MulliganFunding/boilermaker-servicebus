@@ -330,6 +330,39 @@ class TaskGraph(BaseModel):
                 # Check if parent has failed status in results
                 if parent_id in self.results and self.results[parent_id].status.failed:
                     yield self.fail_children[task_id]
+                    break  # Prevent double-yield when multiple parents have failed
+
+    def generate_scheduled_tasks(self) -> Generator[Task]:
+        """Yield tasks already in Scheduled status whose scheduling conditions are still met.
+
+        Used by ``continue_graph`` for crash-recovery: if a prior invocation wrote
+        a task to ``Scheduled`` in blob storage but crashed before publishing the
+        Service Bus message, this method identifies it on redelivery so that
+        ``continue_graph`` can re-publish it without a second blob write.
+
+        Conditions:
+          - Regular child tasks: all antecedents must have succeeded
+            (same predicate as ``generate_ready_tasks``).
+          - Failure callback tasks: at least one triggering parent must have a
+            failed status (same predicate as ``generate_failure_ready_tasks``).
+        """
+        # Regular children already in Scheduled status
+        for task_id, task in self.children.items():
+            result = self.results.get(task_id)
+            if result is not None and result.status == TaskStatus.Scheduled:
+                if self.all_antecedents_succeeded(task_id):
+                    yield task
+
+        # Failure callback children already in Scheduled status
+        for task_id, task in self.fail_children.items():
+            result = self.results.get(task_id)
+            if result is not None and result.status == TaskStatus.Scheduled:
+                # At least one triggering parent must have a failed status
+                for parent_id, fail_child_ids in self.fail_edges.items():
+                    if task_id in fail_child_ids:
+                        if parent_id in self.results and self.results[parent_id].status.failed:
+                            yield task
+                            break  # Prevent double-yield when multiple parents have failed
 
     def get_result(self, task_id: TaskId) -> TaskResultSlim | TaskResult | None:
         """Get the result of a completed task."""
@@ -445,6 +478,72 @@ class TaskGraph(BaseModel):
         return reachable
 
 
+class _LastAddedSentinel:
+    """Sentinel type for depends_on=LAST_ADDED — means "depend on the last task(s) added"."""
+
+    _instance = None
+
+    def __new__(cls) -> "_LastAddedSentinel":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "LAST_ADDED"
+
+
+LastAddedSingleton: typing.TypeAlias = _LastAddedSentinel
+LAST_ADDED = _LastAddedSentinel()
+
+
+class TaskChain:
+    """An ordered sequence of tasks forming a composable workflow unit.
+
+    TaskChain groups tasks that always execute sequentially (A → B → C). The
+    chain exposes its first task (head) and last task (last) so it can be
+    wired into a TaskGraphBuilder with explicit dependency references.
+
+    TaskChain is a value object — it has no builder methods, no cursor, and no
+    graph state. Its sole purpose is to be passed to TaskGraphBuilder.add_chain().
+
+    Args:
+        *tasks: One or more Task objects to chain in order.
+        on_failure: Optional Task to run if ANY task in the chain fails.
+            Registered on every task in the chain when embedded via add_chain().
+
+    Raises:
+        ValueError: If zero tasks are provided.
+
+    Properties:
+        head: The first task in the chain (entry point).
+        last: The last task in the chain (exit point). Use in depends_on
+              to express "wait for this entire chain to complete".
+    """
+
+    def __init__(self, *tasks: Task, on_any_failure: Task | None = None) -> None:
+        if len(tasks) == 0:
+            raise ValueError("TaskChain requires at least one task.")
+        self._tasks: list[Task] = list(tasks)
+        self.on_any_failure: Task | None = on_any_failure
+
+    def __len__(self) -> int:
+        return len(self._tasks)
+
+    def __iter__(self):
+        """Iterate over the tasks in the chain in order."""
+        return iter(self._tasks)
+
+    @property
+    def head(self) -> Task:
+        """The first task in the chain. Execution begins here."""
+        return self._tasks[0]
+
+    @property
+    def last(self) -> Task:
+        """The last task in the chain. Use in depends_on to wait for this chain."""
+        return self._tasks[-1]
+
+
 class TaskGraphBuilder:
     """
     Builder class for constructing TaskGraph instances with flexible dependency management.
@@ -461,7 +560,7 @@ class TaskGraphBuilder:
         builder = TaskGraphBuilder().add(taskA).then(taskB).then(taskC)
 
         # Parallel execution: A, B, C all run in parallel
-        builder = TaskGraphBuilder().parallel([taskA, taskB, taskC])
+        builder = TaskGraphBuilder().parallel(taskA, taskB, taskC)
 
         # Complex dependencies: D depends on A and B, but C runs independently
         builder = (TaskGraphBuilder()
@@ -470,11 +569,10 @@ class TaskGraphBuilder:
             .add(taskC)
             .add(taskD, depends_on=[taskA.task_id, taskB.task_id]))
 
-        # With failure handling
+        # With failure handling (inline on_failure= kwarg)
         builder = (TaskGraphBuilder()
-            .add(taskA)
-            .then(taskB)
-            .on_failure(taskA.task_id, error_handler))
+            .add(taskA, on_failure=error_handler)
+            .then(taskB))
 
     """
 
@@ -484,83 +582,210 @@ class TaskGraphBuilder:
         self._failure_callbacks: dict[TaskId, set[Task]] = {}
         self._last_added: list[TaskId] = []  # Track recently added tasks for chaining
 
-    def add(self, task: Task, depends_on: list[TaskId] | None = None) -> "TaskGraphBuilder":
+    def _resolve_dependencies(
+        self,
+        depends_on: list[Task | TaskId | TaskChain],
+    ) -> list[TaskId]:
+        """Resolve a mixed depends_on list to a flat list of TaskId strings.
+
+        Resolution rules (per element):
+            TaskChain → chain.last.task_id
+            Task      → task.task_id
+            TaskId    → used as-is
+
+        Raises:
+            ValueError: If any resolved TaskId is not found in self._tasks.
+        """
+        resolved = []
+        for dep in depends_on:
+            if isinstance(dep, TaskChain):
+                dep_id = dep.last.task_id
+            elif isinstance(dep, Task):
+                dep_id = dep.task_id
+            else:
+                dep_id = dep  # TaskId string
+            if dep_id not in self._tasks:
+                raise ValueError(
+                    f"Task {dep_id!r} referenced in depends_on was not found in this graph. "
+                    f"Add it with .add() before referencing it as a dependency."
+                )
+            resolved.append(dep_id)
+        return resolved
+
+    def _register_task(
+        self,
+        task: Task,
+        parent_ids: list[TaskId],
+        on_failure: Task | None = None,
+    ) -> None:
+        """Register a task into internal storage without touching _last_added.
+
+        Args:
+            task: Task to register
+            parent_ids: List of resolved parent TaskId strings
+            on_failure: Optional failure callback task
+
+        Raises:
+            ValueError: If task.task_id already exists in self._tasks.
+        """
+        if task.task_id in self._tasks:
+            raise ValueError(
+                f"Task {task.task_id!r} (function_name={task.function_name!r}) has already been "
+                f"added to this graph. Each task instance can only appear once. Create a new Task "
+                f"with Task.si(...) if you need the same function to run again."
+            )
+        self._tasks[task.task_id] = task
+        self._dependencies[task.task_id] = set(parent_ids)
+        if on_failure is not None:
+            self._failure_callbacks.setdefault(task.task_id, set()).add(on_failure)
+
+    def add(
+        self,
+        task: Task,
+        *,
+        depends_on: list[Task | TaskId | TaskChain] | None | LastAddedSingleton = LAST_ADDED,
+        on_failure: Task | None = None,
+    ) -> "TaskGraphBuilder":
         """Add a task with optional explicit dependencies.
 
         Args:
             task: Task to add
-            depends_on: Optional list of task IDs this task depends on (will run after self._last_added if None)
+            depends_on: Controls parent resolution:
+                - Omitted / LAST_ADDED: depend on the last task(s) added (cursor-following)
+                - None: root task with no parents
+                - list[Task | TaskId | TaskChain]: explicit parent list
+            on_failure: Optional task to run if this task fails
 
         Returns:
             Self for method chaining
         """
-        self._tasks[task.task_id] = task
-        self._dependencies[task.task_id] = set(depends_on or self._last_added)
+        if depends_on is LAST_ADDED:
+            parent_ids = list(self._last_added)
+        elif depends_on is None:
+            parent_ids = []
+        else:
+            # Because `_LastAddedSentinel` is a singleton type used to indicate the default
+            # We have to help the type checker understand that depends_on is not the sentinel.
+            depends = typing.cast(list[Task | TaskId | TaskChain], depends_on)
+            parent_ids = self._resolve_dependencies(depends)
+        self._register_task(task, parent_ids=parent_ids, on_failure=on_failure)
         self._last_added = [task.task_id]
         return self
 
-    def parallel(self, tasks: list[Task], depends_on: list[TaskId] | None = None) -> "TaskGraphBuilder":
+    def parallel(
+        self,
+        *tasks: Task,
+        depends_on: list[Task | TaskId | TaskChain] | None | LastAddedSingleton = LAST_ADDED,
+        on_failure: Task | None = None,
+    ) -> "TaskGraphBuilder":
         """Add multiple tasks to run in parallel.
 
         Args:
 
-            tasks: List of tasks to run in parallel
-            depends_on: Optional list of task IDs all these tasks depend on
+            *tasks: Tasks to run in parallel (variadic)
+            depends_on: Controls parent resolution:
+                - Omitted / LAST_ADDED: depend on the last task(s) added (cursor-following)
+                - None: root tasks with no parents
+                - list[Task | TaskId | TaskChain]: explicit parent list
+            on_failure: Optional task to run if any of these tasks fail
 
         Returns:
 
             Self for method chaining
         """
-        parents = depends_on or self._last_added
-        for task in tasks:
-            self._tasks[task.task_id] = task
-            self._dependencies[task.task_id] = set(parents)
+        if len(tasks) == 0:
+            raise ValueError("parallel requires at least one task.")
+
+        if depends_on is LAST_ADDED:
+            shared_parents = list(self._last_added)
+        elif depends_on is None:
+            shared_parents = []
+        else:
+            depends = typing.cast(list[Task | TaskId | TaskChain], depends_on)
+            shared_parents = self._resolve_dependencies(depends)
+
+        for t in tasks:
+            self._register_task(t, parent_ids=shared_parents, on_failure=on_failure)
 
         self._last_added = [t.task_id for t in tasks]
         return self
 
-    def then(self, task: Task) -> "TaskGraphBuilder":
+    def add_chain(
+        self,
+        chain: "TaskChain",
+        *,
+        depends_on: list[Task | TaskId | TaskChain] | None | LastAddedSingleton = LAST_ADDED,
+    ) -> "TaskGraphBuilder":
+        """Embed a TaskChain into the graph as a composable unit.
+
+        Cursor behavior:
+            depends_on=LAST_ADDED (default): chain.head depends on current cursor.
+                Cursor is REPLACED with [chain.last.task_id].
+            depends_on=None: chain.head is an independent root (no parents).
+                Cursor ACCUMULATES — chain.last is APPENDED to existing cursor.
+                This enables fan-in: two add_chain(depends_on=None) calls followed
+                by .then(join) creates a task that waits for BOTH chains.
+            depends_on=[...]: chain.head depends on resolved deps.
+                Cursor is REPLACED with [chain.last.task_id].
+
+        Args:
+            chain: TaskChain to embed
+            depends_on: Controls parent resolution for the chain's head task
+
+        Returns:
+            Self for method chaining
+        """
+        if depends_on is None:
+            first_task_parents: list[TaskId] = []
+        elif depends_on is LAST_ADDED:
+            first_task_parents = list(self._last_added)
+        else:
+            depends = typing.cast(list[Task | TaskId | TaskChain], depends_on)
+            first_task_parents = self._resolve_dependencies(depends)
+
+        chain_parent = None
+        for task in chain:
+            if chain_parent is None:
+                parent_task_ids = first_task_parents
+            else:
+                parent_task_ids = [chain_parent.task_id]
+
+            self._register_task(task, parent_ids=parent_task_ids, on_failure=chain.on_any_failure)
+            chain_parent = task
+
+        # ACCUMULATE cursor for independent roots, REPLACE for all others
+        if depends_on is None:
+            self._last_added.append(chain.last.task_id)
+        else:
+            self._last_added = [chain.last.task_id]
+
+        return self
+
+    def then(self, task: Task, *, on_failure: Task | None = None) -> "TaskGraphBuilder":
         """Add a task that depends on the previously added task(s).
 
         Args:
 
             task: Task to add that depends on last added tasks
+            on_failure: Optional task to run if this task fails
 
         Returns:
 
             Self for method chaining
         """
         if not self._last_added:
-            raise ValueError("No previous tasks to depend on. Use add() first.")
+            raise ValueError(
+                "No tasks have been added yet. Call .add() or .add_chain() first, "
+                "then use .then() to continue the chain."
+            )
 
-        return self.add(task, depends_on=self._last_added)
+        return self.add(task, depends_on=LAST_ADDED, on_failure=on_failure)
 
-    def on_failure(self, parent_task_id: TaskId, callback_task: Task) -> "TaskGraphBuilder":
-        """Add a failure callback for a specific task.
-
-        Args:
-
-            parent_task_id: Task ID that triggers the callback on failure
-            callback_task: Task to execute on failure
-
-        Returns:
-
-            Self for method chaining
-        """
-        if parent_task_id not in self._tasks:
-            raise ValueError(f"Parent task {parent_task_id} not found. Add it first.")
-
-        if parent_task_id not in self._failure_callbacks:
-            self._failure_callbacks[parent_task_id] = set()
-
-        self._failure_callbacks[parent_task_id].add(callback_task)
-        return self
-
-    def chain(self, *tasks: Task) -> "TaskGraphBuilder":
-        """Convenience method to chain tasks in sequence: A -> B -> C -> ...
+    def sequence(self, *tasks: Task) -> "TaskGraphBuilder":
+        """Convenience method to run tasks in sequence: A -> B -> C -> ...
 
         Args:
-            *tasks: Tasks to chain in order
+            *tasks: Tasks to run in order
 
         Returns:
             Self for method chaining
@@ -577,23 +802,6 @@ class TaskGraphBuilder:
 
         return self
 
-    def add_success_fail_branch(
-        self,
-        branching_task_id: TaskId,
-        success_task: Task,
-        failure_task: Task,
-    ) -> "TaskGraphBuilder":
-        """Add success and failure branches for a task.
-
-        Args:
-            branching_task_id: TaskId to branch from
-            success_task: Task to run on success
-            failure_task: Task to run on failure
-        """
-        self.add(success_task, depends_on=[branching_task_id])
-        self.on_failure(branching_task_id, failure_task)
-        return self
-
     def build(self) -> TaskGraph:
         """Build and return the final TaskGraph.
 
@@ -604,16 +812,13 @@ class TaskGraphBuilder:
             ValueError: If the graph would contain cycles
         """
         if not self._tasks:
-            raise ValueError("Cannot build empty graph. Add at least one task.")
+            raise ValueError("Cannot build an empty graph. Add at least one task before calling build().")
 
         tg = TaskGraph()
         # Add all tasks with their dependencies
         for task_id, task in self._tasks.items():
             dependencies = list(self._dependencies.get(task_id, set()))
-            if dependencies:
-                tg.add_task(task, parent_ids=dependencies)
-            else:
-                tg.add_task(task)
+            tg.add_task(task, parent_ids=dependencies)
 
         # Add failure callbacks
         for parent_task_id, callback_tasks in self._failure_callbacks.items():

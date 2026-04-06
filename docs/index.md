@@ -101,6 +101,11 @@ if __name__ == "__main__":
     asyncio.run(publish_tasks())
 ```
 
+!!! note "Duplicate Detection"
+    - Boilermaker publishes each message with `unique_msg_id` set to the task id.
+    - Azure Service Bus only enforces this when duplicate detection is enabled on the queue/topic. See [Duplicate detection](https://learn.microsoft.com/en-us/azure/service-bus-messaging/duplicate-detection).
+    - Publishing the same task id again within the duplicate detection window is rejected by Service Bus, causing publish to fail.
+
 ### Running Workers
 
 In a separate process, run the worker to process tasks:

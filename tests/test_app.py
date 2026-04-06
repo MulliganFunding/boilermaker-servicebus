@@ -501,6 +501,12 @@ async def test_publish_task_sets_sequence_number(app, mockservicebus):
     assert await app.publish_task(task) is task
     assert mockservicebus._sender.send_message.call_count == 1
 
+    # Requirement to pass unique_msg_id to send_message so that ServiceBus can dedupe / idempotently
+    # schedule the message
+    call = mockservicebus._sender.send_message.call_args
+    assert call.kwargs["unique_msg_id"] == str(task.task_id)
+    assert call.args[0] == task.model_dump_json()
+
 
 async def test_publish_task_error_handling(app, mockservicebus):
     """Test that publish_task raises an error when publishing fails."""

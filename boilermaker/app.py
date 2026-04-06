@@ -12,7 +12,7 @@ import typing
 import weakref
 from functools import wraps
 
-from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender  # type: ignore
+from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender
 from anyio import create_task_group, open_signal_receiver
 from anyio.abc import CancelScope
 from azure.servicebus import ServiceBusReceivedMessage
@@ -163,7 +163,7 @@ class Boilermaker:
             raise ValueError(f"Function must be async: {fn_name}")
 
         task = Task.default(fn_name, **options)
-        self.function_registry[fn_name] = fn
+        self.function_registry[fn_name] = typing.cast(TaskHandler, fn)  # why must cast here
         self.task_registry[fn_name] = task
         logger.info(f"Registered background function fn={fn_name}")
         return self
@@ -361,6 +361,7 @@ class Boilermaker:
                 results: list[int] = await self.service_bus_client.send_message(
                     task.model_dump_json(),
                     delay=delay,
+                    unique_msg_id=str(task.task_id),
                 )
                 if results and len(results) == 1:
                     sequence_number = results[0]

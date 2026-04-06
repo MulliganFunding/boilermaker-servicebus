@@ -1,10 +1,10 @@
 import itertools
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from boilermaker import exc, retries
 from boilermaker.evaluators import TaskGraphEvaluator
-from boilermaker.task import Task, TaskResult, TaskResultSlim, TaskStatus
+from boilermaker.task import Task, TaskGraph, TaskResult, TaskResultSlim, TaskStatus
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -504,16 +504,30 @@ async def test_continue_graph_no_graph_id(evaluator_context):
 
 
 async def test_graph_workflow_exception_handling(evaluator_context):
-    """Test that graph workflow exceptions don't fail the original task."""
-    # Mock storage.load_graph to raise an exception
-    evaluator_context.mock_storage.load_graph.side_effect = Exception("Storage error")
+    """Test that a transient load_graph exception suppresses message settlement for redelivery."""
+    from unittest.mock import patch
 
-    async with evaluator_context.with_regular_assertions(
-        compare_result="OK",
-        compare_status=TaskStatus.Success,
-    ):
-        # Should still succeed despite the graph load error
-        pass
+    # Mock storage.load_graph to raise a transient BoilermakerStorageError (the exception
+    # type that load_graph actually raises in production when a non-404 storage error occurs).
+    evaluator_context.mock_storage.load_graph.side_effect = exc.BoilermakerStorageError("Storage error")
+
+    # Patch asyncio.sleep so retry backoff doesn't slow the test
+    with patch("asyncio.sleep"):
+        result = await evaluator_context()
+
+    # Task itself should have succeeded
+    assert result.status == TaskStatus.Success
+    assert result.result == "OK"
+
+    # load_graph was retried _LOAD_GRAPH_RETRY_POLICY.max_tries times before giving up
+    from boilermaker.evaluators.task_graph import _LOAD_GRAPH_RETRY_POLICY
+
+    assert evaluator_context.mock_storage.load_graph.call_count == _LOAD_GRAPH_RETRY_POLICY.max_tries
+
+    # Message must NOT be settled — suppress settlement to allow Service Bus redelivery
+    assert len(evaluator_context.mockservicebus._receiver.method_calls) == 0, (
+        "Message should NOT be settled when load_graph raises (transient error path)"
+    )
 
 
 async def test_continue_graph_graph_not_found(evaluator_context):
@@ -525,9 +539,11 @@ async def test_continue_graph_graph_not_found(evaluator_context):
         result=42,
     )
 
-    evaluator_context.mock_storage.load_graph.return_value = None
+    evaluator_context.mock_storage.load_graph.side_effect = exc.BoilermakerStorageError(
+        "Not found", status_code=404
+    )
 
-    # Should not raise errors, just log and return
+    # Should not raise errors, just log CRITICAL and return None
     result = await evaluator_context.evaluator.continue_graph(result)
     assert result is None
     evaluator_context.mock_storage.load_graph.assert_called_with("missing-graph")
@@ -562,3 +578,592 @@ async def test_continue_graph_no_ready_tasks(evaluator_context):
 
     # Should not publish any tasks since no new tasks are ready
     assert len(published_tasks) == 0
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# BMO-8: Double-yield in generate_failure_ready_tasks
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+async def test_bmo8_generate_failure_ready_tasks_no_double_yield(app):
+    """BMO-8: A shared failure callback with two failed parents must be yielded exactly once."""
+
+    async def task_a(state):
+        return "A"
+
+    async def task_b(state):
+        return "B"
+
+    async def fail_cb(state):
+        return "failure handled"
+
+    app.register_many_async([task_a, task_b, fail_cb])
+
+    a = app.create_task(task_a)
+    b = app.create_task(task_b)
+    f = app.create_task(fail_cb)
+
+    graph = TaskGraph()
+    graph.add_task(a)
+    graph.add_task(b)
+    # Shared failure callback registered on both A and B
+    graph.add_failure_callback(a.task_id, f)
+    graph.add_failure_callback(b.task_id, f)
+
+    # Initialize pending results
+    list(graph.generate_pending_results())
+
+    # Mark both A and B as failed
+    graph.add_result(TaskResult(task_id=a.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+    graph.add_result(TaskResult(task_id=b.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+
+    # The shared failure callback should only appear once
+    failure_ready = list(graph.generate_failure_ready_tasks())
+    assert len(failure_ready) == 1, (
+        f"Expected exactly 1 failure-ready task, got {len(failure_ready)}. "
+        "Double-yield bug: same callback yielded once per failed parent."
+    )
+    assert failure_ready[0].task_id == f.task_id
+
+
+async def test_bmo8_continue_graph_shared_failure_callback_no_raise(evaluator_context, app):
+    """BMO-8: continue_graph must not raise when a shared failure callback has two failed parents."""
+
+    async def task_a(state):
+        return "A"
+
+    async def task_b(state):
+        return "B"
+
+    async def shared_fail_cb(state):
+        return "shared failure handled"
+
+    app.register_many_async([task_a, task_b, shared_fail_cb])
+
+    a = app.create_task(task_a)
+    b = app.create_task(task_b)
+    f = app.create_task(shared_fail_cb)
+
+    graph = TaskGraph()
+    graph.add_task(a)
+    graph.add_task(b)
+    graph.add_failure_callback(a.task_id, f)
+    graph.add_failure_callback(b.task_id, f)
+
+    list(graph.generate_pending_results())
+
+    # Both parents failed
+    graph.add_result(TaskResult(task_id=a.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+    graph.add_result(TaskResult(task_id=b.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+
+    evaluator_context.graph = graph
+    evaluator_context.mock_storage.load_graph.return_value = graph
+
+    # Build the completed_task_result as if A just finished (failed)
+    completed = TaskResult(task_id=a.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure)
+
+    # Should not raise even though both parents are failed
+    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+
+    # The shared failure callback must have been dispatched exactly once
+    published = evaluator_context.get_scheduled_messages()
+    assert len(published) == 1, f"Expected F dispatched exactly once, got {len(published)}"
+    assert published[0].task.task_id == f.task_id
+
+    assert ready_count == 1
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# BMO-11: schedule_task ValueError outside try/except
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+async def test_bmo11_schedule_task_value_error_does_not_propagate(evaluator_context):
+    """BMO-11: ValueError from schedule_task must be caught; continue_graph must return without raising."""
+    # Build a mock graph whose schedule_task always raises ValueError.
+    # We use a MagicMock(spec=TaskGraph) so we bypass Pydantic's __setattr__ restriction.
+    real_graph = evaluator_context.graph
+    ok_task = evaluator_context.ok_task
+
+    mock_graph = MagicMock(spec=TaskGraph)
+    mock_graph.graph_id = real_graph.graph_id
+    # Sanity check: status must match the completed result's status
+    mock_graph.get_status.return_value = TaskStatus.Success
+    # generate_ready_tasks yields the ok_task (so schedule_task gets called)
+    mock_graph.generate_ready_tasks.return_value = iter([ok_task])
+    mock_graph.generate_failure_ready_tasks.return_value = iter([])
+    # schedule_task always raises ValueError
+    mock_graph.schedule_task.side_effect = ValueError("task is not pending")
+
+    evaluator_context.mock_storage.load_graph.return_value = mock_graph
+
+    completed = TaskResult(
+        task_id=ok_task.task_id,
+        graph_id=real_graph.graph_id,
+        status=TaskStatus.Success,
+        result="OK",
+    )
+
+    # Should not raise
+    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+
+    # No tasks should have been published (all were skipped due to ValueError)
+    published = evaluator_context.get_scheduled_messages()
+    assert len(published) == 0, "No tasks should be published when schedule_task raises ValueError"
+    assert ready_count == 0
+
+
+async def test_bmo11_message_settled_even_when_schedule_task_raises(evaluator_context, mock_storage):
+    """BMO-11: message_handler must settle its message even if schedule_task raises ValueError inside continue_graph."""
+    evaluator_context.prep_task_to_succeed()
+
+    real_graph = evaluator_context.graph
+    ok_task = evaluator_context.ok_task
+
+    # Build a mock graph whose schedule_task always raises ValueError
+    mock_graph = MagicMock(spec=TaskGraph)
+    mock_graph.graph_id = real_graph.graph_id
+    mock_graph.get_status.return_value = TaskStatus.Success
+    mock_graph.generate_ready_tasks.return_value = iter([ok_task])
+    mock_graph.generate_failure_ready_tasks.return_value = iter([])
+    mock_graph.schedule_task.side_effect = ValueError("not pending")
+    evaluator_context.mock_storage.load_graph.return_value = mock_graph
+
+    # Run the full evaluator (message_handler path)
+    result = await evaluator_context()
+
+    # Task itself should have succeeded
+    assert result.status == TaskStatus.Success
+
+    # The message must have been settled (complete_message called, not stuck)
+    evaluator_context.assert_msg_settled()
+
+
+async def test_bmo11_other_tasks_dispatched_when_one_raises_value_error(evaluator_context, app):
+    """BMO-11: When schedule_task raises ValueError for one task, remaining tasks in batch are still dispatched."""
+
+    async def sibling_a(state):
+        return "A"
+
+    async def sibling_b(state):
+        return "B"
+
+    async def root_task(state):
+        return "root"
+
+    app.register_many_async([sibling_a, sibling_b, root_task])
+
+    root = app.create_task(root_task)
+    sa = app.create_task(sibling_a)
+    sb = app.create_task(sibling_b)
+
+    graph = TaskGraph()
+    graph.add_task(root)
+    graph.add_task(sa, parent_ids=[root.task_id])
+    graph.add_task(sb, parent_ids=[root.task_id])
+
+    list(graph.generate_pending_results())
+
+    # Root succeeded
+    graph.add_result(TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    # Build a mock graph wrapping the real one so we can selectively raise ValueError for sibling_a
+    mock_graph = MagicMock(spec=TaskGraph)
+    mock_graph.graph_id = graph.graph_id
+    mock_graph.get_status.return_value = TaskStatus.Success
+    # Both siblings are ready
+    mock_graph.generate_ready_tasks.return_value = iter([sa, sb])
+    mock_graph.generate_failure_ready_tasks.return_value = iter([])
+
+    call_count = {"n": 0}
+
+    def selective_schedule_task(task_id):
+        call_count["n"] += 1
+        if task_id == sa.task_id:
+            raise ValueError("already scheduled")
+        # For sibling_b, return a minimal scheduled result
+        return graph.schedule_task(task_id)
+
+    mock_graph.schedule_task.side_effect = selective_schedule_task
+    evaluator_context.mock_storage.load_graph.return_value = mock_graph
+
+    completed = TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success)
+    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+
+    published = evaluator_context.get_scheduled_messages()
+    published_ids = {msg.task.task_id for msg in published}
+
+    # sibling_b should still be dispatched
+    assert sb.task_id in published_ids, "sibling_b should be dispatched even though sibling_a raised ValueError"
+    # sibling_a should NOT have been dispatched
+    assert sa.task_id not in published_ids, "sibling_a should NOT be dispatched after ValueError"
+    assert ready_count == 1
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# BMO-10: load_graph failure must not settle message
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+async def test_bmo10_load_graph_storage_error_no_settlement(evaluator_context, mock_storage):
+    """BMO-10: Transient load_graph failure must suppress message settlement and not publish any tasks."""
+    from unittest.mock import patch
+
+    from boilermaker.evaluators.task_graph import _LOAD_GRAPH_RETRY_POLICY
+
+    # Simulate a transient storage error on every attempt
+    mock_storage.load_graph.side_effect = exc.BoilermakerStorageError("503 Service Unavailable")
+
+    # Patch asyncio.sleep so retry backoff doesn't slow the test
+    with patch("asyncio.sleep"):
+        result = await evaluator_context()
+
+    # Task itself succeeded
+    assert result.status == TaskStatus.Success
+    assert result.result == "OK"
+
+    # load_graph was retried the configured number of times
+    assert mock_storage.load_graph.call_count == _LOAD_GRAPH_RETRY_POLICY.max_tries
+
+    # Message must NOT be settled — allow Service Bus redelivery
+    assert len(evaluator_context.mockservicebus._receiver.method_calls) == 0, (
+        "Message must not be settled when load_graph raises a transient error"
+    )
+
+    # No downstream tasks must be published
+    assert evaluator_context.get_scheduled_messages() == [], (
+        "task_publisher must not be called when load_graph fails"
+    )
+
+
+async def test_bmo10_load_graph_not_found_settles_and_logs_critical(evaluator_context, mock_storage, caplog):
+    """BMO-10: Permanent load_graph failure (404 BoilermakerStorageError) must settle message and log CRITICAL.
+
+    In production, the underlying library raises AzureBlobError (wrapping the HTTP 404 response)
+    which load_graph re-raises as BoilermakerStorageError(status_code=404).  load_graph never
+    returns None for a missing blob; this test reflects the actual production code path.
+    """
+    import logging
+
+    mock_storage.load_graph.side_effect = exc.BoilermakerStorageError("Not found", status_code=404)
+
+    with caplog.at_level(logging.CRITICAL, logger="boilermaker.app"):
+        result = await evaluator_context()
+
+    # Task itself succeeded
+    assert result.status == TaskStatus.Success
+
+    # Message MUST be settled — redelivery won't help when the graph blob is gone
+    evaluator_context.assert_msg_settled()
+
+    # A CRITICAL log entry must be emitted
+    critical_msgs = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert critical_msgs, (
+        "A CRITICAL log must be emitted when load_graph raises BoilermakerStorageError(status_code=404)"
+    )
+
+
+async def test_bmo10_no_publish_when_load_graph_fails(evaluator_context, mock_storage):
+    """BMO-10: task_publisher must never be called when load_graph raises."""
+    from unittest.mock import patch
+
+    mock_storage.load_graph.side_effect = exc.BoilermakerStorageError("Transient error")
+
+    with patch("asyncio.sleep"):
+        await evaluator_context()
+
+    assert evaluator_context.get_scheduled_messages() == [], (
+        "task_publisher must not be called when load_graph raises"
+    )
+
+
+async def test_bmo10_non404_storage_error_retried_raises_continue_graph_error_no_settlement(
+    evaluator_context, mock_storage
+):
+    """BMO-10: A non-404 BoilermakerStorageError (e.g. 503) must be retried and eventually
+    raise ContinueGraphError, leaving the message unsettled for Service Bus redelivery.
+
+    This distinguishes the transient case (status_code=503) from the permanent 404 case.
+    """
+    from unittest.mock import patch
+
+    from boilermaker.evaluators.task_graph import _LOAD_GRAPH_RETRY_POLICY
+
+    # Simulate a 503 (transient) storage error on every attempt
+    mock_storage.load_graph.side_effect = exc.BoilermakerStorageError(
+        "503 Service Unavailable", status_code=503
+    )
+
+    with patch("asyncio.sleep"):
+        result = await evaluator_context()
+
+    # Task itself succeeded
+    assert result.status == TaskStatus.Success
+    assert result.result == "OK"
+
+    # load_graph must have been retried the full number of times
+    assert mock_storage.load_graph.call_count == _LOAD_GRAPH_RETRY_POLICY.max_tries, (
+        f"Expected {_LOAD_GRAPH_RETRY_POLICY.max_tries} load_graph attempts, "
+        f"got {mock_storage.load_graph.call_count}"
+    )
+
+    # Message must NOT be settled — Service Bus should redeliver
+    assert len(evaluator_context.mockservicebus._receiver.method_calls) == 0, (
+        "Message must not be settled when load_graph raises a transient 503 error"
+    )
+
+    # No downstream tasks published
+    assert evaluator_context.get_scheduled_messages() == [], (
+        "task_publisher must not be called when load_graph raises 503"
+    )
+
+
+async def test_bmo10_retries_exhausted_continue_graph_error_does_not_propagate(
+    retries_exhausted_scenario, mock_storage
+):
+    """BMO-10: ContinueGraphError from continue_graph on the RetriesExhausted path must not propagate.
+
+    The message is already deadlettered before continue_graph is called, so
+    suppressing settlement is not possible.  The correct behaviour is to log
+    and return the RetriesExhausted result gracefully without raising.
+    """
+    from unittest.mock import patch
+
+    from boilermaker.evaluators.task_graph import _LOAD_GRAPH_RETRY_POLICY
+
+    # Make load_graph raise a transient storage error on every attempt so that
+    # continue_graph exhausts its retry policy and raises ContinueGraphError.
+    mock_storage.load_graph.side_effect = exc.BoilermakerStorageError("503 Service Unavailable")
+
+    # Patch asyncio.sleep so retry backoff does not slow the test
+    with patch("asyncio.sleep"):
+        result = await retries_exhausted_scenario()
+
+    # ContinueGraphError must NOT propagate — message_handler must return cleanly
+    assert result is not None, "message_handler must return a result, not raise ContinueGraphError"
+    assert result.status == TaskStatus.RetriesExhausted, (
+        f"Expected RetriesExhausted status, got {result.status}"
+    )
+
+    # load_graph should have been attempted (and exhausted the retry policy)
+    assert mock_storage.load_graph.call_count == _LOAD_GRAPH_RETRY_POLICY.max_tries, (
+        f"Expected {_LOAD_GRAPH_RETRY_POLICY.max_tries} load_graph attempts, "
+        f"got {mock_storage.load_graph.call_count}"
+    )
+
+    # The message must have been settled (deadlettered) before continue_graph was called
+    retries_exhausted_scenario.assert_msg_dead_lettered()
+
+
+async def test_bmo10_validation_error_in_load_graph_raises_continue_graph_error(
+    evaluator_context, mock_storage
+):
+    """BMO-10: ValidationError raised by load_graph must be wrapped as BoilermakerStorageError,
+    enter the retry loop, exhaust retries, and surface as ContinueGraphError — not as a raw
+    ValidationError that bypasses message_handler's except clause.
+
+    This guards against the regression introduced when `except Exception` was narrowed to
+    `except BoilermakerStorageError` in continue_graph: pydantic.ValidationError (raised when
+    a corrupt blob fails model_validate_json) is not a BoilermakerStorageError, so it would
+    escape the retry loop.  The fix is to wrap it inside load_graph before raising.
+    """
+    from unittest.mock import patch
+
+    from boilermaker.evaluators.task_graph import _LOAD_GRAPH_RETRY_POLICY
+
+    # Simulate corrupt blob contents that fail Pydantic validation.
+    # After the fix, load_graph wraps ValidationError → BoilermakerStorageError, so the
+    # retry loop catches it and eventually raises ContinueGraphError.
+    mock_storage.load_graph.side_effect = exc.BoilermakerStorageError(
+        "Failed to deserialize graph: validation error"
+    )
+
+    with patch("asyncio.sleep"):
+        result = await evaluator_context()
+
+    # Task itself succeeded
+    assert result.status == TaskStatus.Success
+    assert result.result == "OK"
+
+    # load_graph must have been retried the full configured number of times
+    assert mock_storage.load_graph.call_count == _LOAD_GRAPH_RETRY_POLICY.max_tries, (
+        f"Expected {_LOAD_GRAPH_RETRY_POLICY.max_tries} load_graph attempts, "
+        f"got {mock_storage.load_graph.call_count}"
+    )
+
+    # Message must NOT be settled — allow Service Bus redelivery
+    assert len(evaluator_context.mockservicebus._receiver.method_calls) == 0, (
+        "Message must not be settled when load_graph raises (wrapping ValidationError)"
+    )
+
+    # No downstream tasks must be published
+    assert evaluator_context.get_scheduled_messages() == [], (
+        "task_publisher must not be called when load_graph raises"
+    )
+
+
+
+# BMO-9: continue_graph liveness gap — Scheduled re-publish
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+async def test_bmo9_crash_recover_regular_child(evaluator_context, app):
+    """BMO-9: A regular child task already in Scheduled status must be re-published on redelivery."""
+
+    async def downstream(state):
+        return "downstream done"
+
+    app.register_async(downstream)
+    downstream_task = app.create_task(downstream)
+
+    graph = evaluator_context.graph
+    graph.add_task(downstream_task, parent_ids=[evaluator_context.ok_task.task_id])
+
+    # Generate pending results so results map is populated
+    list(graph.generate_pending_results())
+
+    # Simulate crash-after-store-before-publish: downstream is already Scheduled in blob
+    graph.results[downstream_task.task_id].status = TaskStatus.Scheduled
+
+    # ok_task succeeded (trigger for downstream)
+    graph.add_result(
+        TaskResult(
+            task_id=evaluator_context.ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+        )
+    )
+
+    evaluator_context.mock_storage.load_graph.return_value = graph
+
+    completed = TaskResult(
+        task_id=evaluator_context.ok_task.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Success,
+    )
+    await evaluator_context.evaluator.continue_graph(completed)
+
+    published_ids = {msg.task.task_id for msg in evaluator_context.get_scheduled_messages()}
+    assert downstream_task.task_id in published_ids, (
+        "Already-Scheduled downstream task must be re-published on redelivery (crash recovery)"
+    )
+
+
+async def test_bmo9_no_double_blob_write(evaluator_context, app):
+    """BMO-9: Re-running continue_graph with an already-Scheduled downstream task must NOT call store_task_result."""
+
+    async def downstream(state):
+        return "done"
+
+    app.register_async(downstream)
+    downstream_task = app.create_task(downstream)
+
+    graph = evaluator_context.graph
+    graph.add_task(downstream_task, parent_ids=[evaluator_context.ok_task.task_id])
+    list(graph.generate_pending_results())
+
+    # Downstream already Scheduled (crash-after-store)
+    graph.results[downstream_task.task_id].status = TaskStatus.Scheduled
+    graph.add_result(
+        TaskResult(
+            task_id=evaluator_context.ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+        )
+    )
+
+    evaluator_context.mock_storage.load_graph.return_value = graph
+
+    # Reset store_task_result call count so we only see calls from this continue_graph invocation
+    evaluator_context.mock_storage.store_task_result.reset_mock()
+
+    completed = TaskResult(
+        task_id=evaluator_context.ok_task.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Success,
+    )
+    await evaluator_context.evaluator.continue_graph(completed)
+
+    # store_task_result must NOT have been called for the already-Scheduled task
+    stored_ids = {
+        call.args[0].task_id
+        for call in evaluator_context.mock_storage.store_task_result.call_args_list
+        if call.args
+    }
+    assert downstream_task.task_id not in stored_ids, (
+        "store_task_result must not be called again for an already-Scheduled task (no double blob write)"
+    )
+
+
+async def test_bmo9_is_complete_false_while_scheduled(evaluator_context, app):
+    """BMO-9 / BMO-17: graph.is_complete() must return False when a task is in Scheduled status."""
+
+    async def downstream(state):
+        return "done"
+
+    app.register_async(downstream)
+    downstream_task = app.create_task(downstream)
+
+    graph = evaluator_context.graph
+    graph.add_task(downstream_task, parent_ids=[evaluator_context.ok_task.task_id])
+    list(graph.generate_pending_results())
+
+    # Set downstream to Scheduled (not a terminal state)
+    graph.results[downstream_task.task_id].status = TaskStatus.Scheduled
+    graph.add_result(
+        TaskResult(
+            task_id=evaluator_context.ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+        )
+    )
+
+    assert not graph.is_complete(), (
+        "graph.is_complete() must return False when a task is in Scheduled status "
+        "(Scheduled is not a terminal state)"
+    )
+
+
+async def test_bmo9_crash_recover_failure_callback(evaluator_context, app):
+    """BMO-9: A failure callback task already in Scheduled status must be re-published on redelivery.
+
+    This covers the critical case flagged by @distributed-systems-expert:
+    fail_children must be included in the second pass, not just regular children.
+    """
+
+    async def fail_cb(state):
+        return "failure handled"
+
+    app.register_async(fail_cb)
+    fail_task = app.create_task(fail_cb)
+
+    graph = evaluator_context.graph
+    graph.add_failure_callback(evaluator_context.ok_task.task_id, fail_task)
+    list(graph.generate_pending_results())
+
+    # ok_task has failed (trigger for the failure callback)
+    graph.add_result(
+        TaskResult(
+            task_id=evaluator_context.ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Failure,
+        )
+    )
+
+    # Simulate crash-after-store-before-publish: fail_task is already Scheduled in blob
+    graph.results[fail_task.task_id].status = TaskStatus.Scheduled
+
+    evaluator_context.mock_storage.load_graph.return_value = graph
+
+    completed = TaskResult(
+        task_id=evaluator_context.ok_task.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Failure,
+    )
+    await evaluator_context.evaluator.continue_graph(completed)
+
+    published_ids = {msg.task.task_id for msg in evaluator_context.get_scheduled_messages()}
+    assert fail_task.task_id in published_ids, (
+        "Already-Scheduled failure callback task must be re-published on redelivery "
+        "(crash recovery for fail_children — critical case from @distributed-systems-expert review)"
+    )

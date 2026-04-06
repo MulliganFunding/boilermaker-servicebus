@@ -1,10 +1,11 @@
+import asyncio
 import itertools
 import logging
 import typing
 
 from azure.servicebus.aio import ServiceBusReceiver
 
-from boilermaker import exc
+from boilermaker import exc, retries
 from boilermaker.storage import StorageInterface
 from boilermaker.task import Task, TaskResult, TaskStatus
 
@@ -13,9 +14,24 @@ from .eval import eval_task
 
 logger = logging.getLogger("boilermaker.app")
 
+# Retry policy used when load_graph raises a transient exception.
+# Up to 3 attempts total (initial + 2 retries) with exponential backoff.
+_LOAD_GRAPH_RETRY_POLICY = retries.RetryPolicy(
+    max_tries=3,
+    delay=1,
+    delay_max=16,
+    retry_mode=retries.RetryMode.Exponential,
+)
+
 
 class TaskGraphEvaluator(TaskEvaluatorBase):
-    """Evaluator for tasks that are part of a TaskGraph workflow."""
+    """Evaluator for tasks that are part of a TaskGraph workflow.
+
+    At-least-once delivery contract: any task in ``Scheduled`` status may be
+    published more than once.  Workers must tolerate at-least-once delivery.
+    Re-publication on Service Bus redelivery is the intentional recovery
+    mechanism for the store-before-publish crash gap in ``continue_graph``.
+    """
 
     def __init__(
         self,
@@ -114,8 +130,17 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 result=None,
             )
             await self.storage_interface.store_task_result(task_result)
-            # Publish failure tasks which may be ready now
-            await self.continue_graph(task_result)
+            # Publish failure tasks which may be ready now.
+            # The message is already deadlettered at this point, so suppressing settlement
+            # is not possible — log and return gracefully if continue_graph fails.
+            try:
+                await self.continue_graph(task_result)
+            except exc.ContinueGraphError:
+                logger.error(
+                    f"continue_graph failed after retries exhausted for task {self.task.task_id}; "
+                    "failure callbacks may not be dispatched (message already deadlettered)",
+                    exc_info=True,
+                )
             return task_result
 
         # Actually invoke the task here
@@ -128,7 +153,17 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         await self.storage_interface.store_task_result(result)
 
         if result.status.finished:
-            await self.continue_graph(result)
+            try:
+                await self.continue_graph(result)
+            except exc.ContinueGraphError:
+                # Transient load_graph failure — do NOT settle the message.
+                # Allow Service Bus redelivery so downstream dispatch can be retried.
+                logger.error(
+                    f"continue_graph failed for task {self.task.task_id}; "
+                    "suppressing message settlement to allow redelivery",
+                    exc_info=True,
+                )
+                return result
         elif result.status == TaskStatus.Retry:
             # Retry requested: republish the same task with delay
             delay = self.task.get_next_delay()
@@ -171,20 +206,81 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         Continue evaluating TaskGraph workflow after a task completes successfully.
 
         We always reload the graph from storage to get the latest state.
+
+        Transient ``load_graph`` failures (``BoilermakerStorageError`` with a
+        non-404 status code) are retried with exponential backoff up to
+        ``_LOAD_GRAPH_RETRY_POLICY.max_tries`` attempts.  If all attempts fail,
+        ``ContinueGraphError`` is raised so that ``message_handler`` can suppress
+        message settlement and allow Service Bus redelivery.
+
+        Permanent failures (``BoilermakerStorageError`` with ``status_code=404``)
+        are logged at CRITICAL severity and ``None`` is returned.  Settling the
+        message is correct in this case because redelivery will not help — the
+        graph blob is gone and downstream tasks cannot be dispatched.
+
+        Note: in practice ``load_graph`` never returns ``None`` for a missing
+        blob; the underlying library re-raises all ``HttpResponseError``s
+        (including 404) as ``AzureBlobError``, which ``load_graph`` wraps as
+        ``BoilermakerStorageError(status_code=404)``.  The ``if not graph`` guard
+        below is retained as a defensive fallback only.
+
+        At-least-once delivery: any task already in ``Scheduled`` status is
+        re-published without a second blob write (second pass below).  This is
+        the crash-recovery path for the store-before-publish gap.
         """
         graph_id = completed_task_result.graph_id
         if not graph_id:
             return None
 
-        try:
-            # Reload graph with latest results
-            graph = await self.storage_interface.load_graph(graph_id)
-        except Exception:
-            logger.error(f"Exception in continue_graph for graph {graph_id}", exc_info=True)
-            return None
+        # Attempt to load the graph, retrying on transient errors.
+        last_exc: Exception | None = None
+        for attempt in range(_LOAD_GRAPH_RETRY_POLICY.max_tries):
+            try:
+                graph = await self.storage_interface.load_graph(graph_id)
+                break  # success
+            except exc.BoilermakerStorageError as e:
+                if getattr(e, "status_code", None) == 404:
+                    # Permanent: graph blob does not exist. Redelivery will not help.
+                    logger.critical(
+                        f"Graph {graph_id} not found in storage (404); downstream tasks will not be dispatched. "
+                        "This graph may have been deleted.",
+                        exc_info=True,
+                    )
+                    return None
+                # Transient error — will retry or raise ContinueGraphError after max_tries
+                last_exc = e
+                if attempt < _LOAD_GRAPH_RETRY_POLICY.max_tries - 1:
+                    delay = _LOAD_GRAPH_RETRY_POLICY.get_delay_interval(attempt)
+                    logger.warning(
+                        f"load_graph failed for graph {graph_id} "
+                        f"(attempt {attempt + 1}/{_LOAD_GRAPH_RETRY_POLICY.max_tries}); "
+                        f"retrying in {delay}s",
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        f"load_graph failed for graph {graph_id} after "
+                        f"{_LOAD_GRAPH_RETRY_POLICY.max_tries} attempts; "
+                        "raising ContinueGraphError to suppress message settlement",
+                        exc_info=True,
+                    )
+                    raise exc.ContinueGraphError(
+                        f"load_graph failed for graph {graph_id} after "
+                        f"{_LOAD_GRAPH_RETRY_POLICY.max_tries} attempts"
+                    ) from last_exc
+        else:
+            # Should only be reached if max_tries == 0 (not expected).
+            raise exc.ContinueGraphError(f"load_graph not attempted for graph {graph_id}")
 
         if not graph:
-            logger.error(f"Graph {graph_id} not found after task completion")
+            # Permanent failure: graph blob does not exist.  Redelivery will not help.
+            # Settling the upstream message is intentional here.
+            logger.critical(
+                f"Graph {graph_id} not found after task completion — "
+                "downstream tasks will never be dispatched. "
+                "This is a permanent data loss; redelivery will not recover it."
+            )
             return None
 
         # Sanity check: did we load the result that was *just* stored?
@@ -197,19 +293,31 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             )
             return None
 
+        # Snapshot tasks already in Scheduled status BEFORE the first pass.
+        # The second pass uses this snapshot so that tasks freshly scheduled
+        # in the first pass are not double-published.
+        already_scheduled_tasks = list(graph.generate_scheduled_tasks())
+
         # Find and publish newly ready tasks
         ready_count = 0
         for ready_task in itertools.chain.from_iterable(
             (graph.generate_ready_tasks(), graph.generate_failure_ready_tasks())
         ):
             # Write that the task was *scheduled* back to Blob Storage with blob etag and then publish the task!
-            result = graph.schedule_task(ready_task.task_id)
             try:
+                result = graph.schedule_task(ready_task.task_id)
                 await self.storage_interface.store_task_result(result, etag=result.etag)
             except exc.BoilermakerStorageError:
                 logger.error(
                     f"Failed to store scheduled status for task {ready_task.task_id} in graph {graph_id}. "
                     "Not publishing the task to avoid double-scheduling.",
+                    exc_info=True,
+                )
+                continue
+            except ValueError:
+                logger.error(
+                    f"schedule_task raised ValueError for task {ready_task.task_id} in graph {graph_id}. "
+                    "Skipping to avoid double-scheduling.",
                     exc_info=True,
                 )
                 continue
@@ -222,5 +330,30 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             logger.info(
                 f"No new tasks ready in graph {graph_id} after task {completed_task_result.task_id}"
             )
+
+        # Second pass: re-publish tasks that were ALREADY in Scheduled status when the
+        # graph was loaded (crash-recovery).
+        #
+        # If a previous invocation of continue_graph wrote Scheduled to blob storage
+        # (store_task_result) but crashed before publishing the Service Bus message
+        # (publish_task), the task blob shows Scheduled but there is no SB message.
+        # generate_ready_tasks() skips Scheduled tasks (is_not_started == False), so
+        # without this pass the task would never be dispatched.
+        #
+        # We snapshot already-scheduled tasks BEFORE the first pass so that tasks
+        # scheduled in the first pass are not double-published here.
+        #
+        # On Service Bus redelivery, we detect these orphaned-Scheduled tasks here and
+        # re-publish them without a second blob write (the blob is already correct).
+        #
+        # NOTE: Workers must tolerate at-least-once delivery.  A task in Scheduled
+        # status may be published more than once.  This is the intentional recovery
+        # mechanism for the store-before-publish crash gap.
+        for scheduled_task in already_scheduled_tasks:
+            logger.info(
+                f"Re-publishing already-scheduled task {scheduled_task.task_id} "
+                f"in graph {graph_id} (crash recovery: blob written but message not published)"
+            )
+            await self.publish_task(scheduled_task)
 
         return ready_count

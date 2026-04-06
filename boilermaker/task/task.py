@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from boilermaker import retries, tracing
 
 from .task_id import GraphId, ident_field, TaskId
+from .types import TaskHandler
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +258,7 @@ class Task(BaseModel):
     @classmethod
     def si(
         cls,
-        fn: typing.Callable,
+        fn: TaskHandler,
         *fn_args,
         should_dead_letter: bool = True,
         acks_late: bool = True,

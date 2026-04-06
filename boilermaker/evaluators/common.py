@@ -3,7 +3,7 @@ import logging
 import traceback
 import typing
 from abc import abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from functools import cached_property
 from json.decoder import JSONDecodeError
 
@@ -21,14 +21,12 @@ from pydantic import ValidationError
 from boilermaker import exc, sample
 from boilermaker.storage import StorageInterface
 from boilermaker.task import Task, TaskResult, TaskStatus
+from boilermaker.task import types as task_types
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
 logger = logging.getLogger("boilermaker.app")
 
-
-# Common Types used when evaluating tasks
-TaskHandler: typing.TypeAlias = Callable[..., Awaitable[typing.Any]]
-TaskHandlerRegistry: typing.TypeAlias = dict[str, TaskHandler]
+TaskHandlerRegistry: typing.TypeAlias = dict[str, task_types.TaskHandler]
 
 
 class TaskPublisher(typing.Protocol):

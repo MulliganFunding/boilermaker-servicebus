@@ -21,3 +21,4 @@ unittest.junit.xml
 site/
 todo*.md
 tmp/
+.bmo/
