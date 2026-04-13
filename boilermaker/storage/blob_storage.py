@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from boilermaker.exc import BoilermakerStorageError
 from boilermaker.storage import StorageInterface
-from boilermaker.task import GraphId, TaskGraph, TaskId, TaskResult, TaskResultSlim, task_id
+from boilermaker.task import GraphId, TaskGraph, TaskId, TaskResult, TaskResultSlim
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,12 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             graph_id: The GraphId the task belongs to.
         """
         fname = f"{self.task_result_prefix}/{graph_id}/{task_id}.json"
+        blob_etag = None
         try:
+            # We need to make sure we load the etag
+            async with self.get_blob_client(fname) as blob_client:
+                blob_properties = await blob_client.get_blob_properties()
+                blob_etag = blob_properties.etag if blob_properties and blob_properties.etag is not None else None
             contents = await self.download_blob(fname)
         except AzureBlobError as exc:
             if exc.status_code == 404:
@@ -191,7 +196,9 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         if contents is None:
             return None
         try:
-            return TaskResultSlim.model_validate_json(contents)
+            result = TaskResultSlim.model_validate_json(contents)
+            result.etag = blob_etag
+            return result
         except ValidationError as e:
             raise BoilermakerStorageError(
                 f"Failed to deserialize task result {task_id}: {e}",
