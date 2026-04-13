@@ -45,6 +45,14 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         if storage_interface is None:
             raise ValueError("Storage interface is required for TaskGraphEvaluator")
 
+        if task.acks_early:
+            logger.warning(
+                f"Task {task.task_id} ({task.function_name}) uses acks_early=True in a "
+                "TaskGraph context. If the worker crashes after message settlement but before "
+                "the task result is written, this task will be permanently stuck in Started "
+                "status with no recovery path. Use acks_late=True (the default) for graph tasks."
+            )
+
         super().__init__(
             receiver,
             task,
@@ -60,6 +68,51 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
     async def message_handler(self) -> TaskResult:
         """Individual message handler"""
         message_settled = False
+
+        # Idempotent redelivery guard — if this task already reached a terminal state
+        # (e.g. a prior execution succeeded before the SB lock expired and redelivered), skip
+        # re-execution entirely.  Writing Started on top of Success/Failure would regress the
+        # blob status and corrupt graph state.
+        if self.task.graph_id:
+            try:
+                _existing = await self.storage_interface.load_task_result(self.task.task_id, self.task.graph_id)
+            except exc.BoilermakerStorageError:
+                # Transient read failure — proceed normally; do NOT skip execution on a read
+                # error, as that would permanently stall the graph.
+                logger.warning(
+                    f"Failed to read current status for task {self.task.task_id} before "
+                    "writing Started; proceeding with execution",
+                    exc_info=True,
+                )
+                _existing = None
+
+            if _existing is not None and _existing.status.finished:
+                logger.info(
+                    f"Task {self.task.task_id} already in terminal state {_existing.status!r} "
+                    "(SB redelivery); skipping re-execution"
+                )
+                _terminal_result = TaskResult(
+                    task_id=self.task.task_id,
+                    graph_id=self.task.graph_id,
+                    status=_existing.status,
+                )
+                try:
+                    await self.continue_graph(_terminal_result)
+                except exc.ContinueGraphError:
+                    logger.error(
+                        f"continue_graph failed on redelivery for task {self.task.task_id}; "
+                        "suppressing settlement to allow redelivery",
+                        exc_info=True,
+                    )
+                    return _terminal_result
+                try:
+                    await self.complete_message()
+                except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                    logger.warning(
+                        f"Failed to complete message on redelivery for task {self.task.task_id}; SB will redeliver",
+                        exc_info=True,
+                    )
+                return _terminal_result
 
         start_result = TaskResult(
             task_id=self.task.task_id,
@@ -78,9 +131,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 await self.complete_message()
                 message_settled = True
             except exc.BoilermakerTaskLeaseLost:
-                logger.error(
-                    f"Lost message lease when trying to complete early for task {self.task.function_name}"
-                )
+                logger.error(f"Lost message lease when trying to complete early for task {self.task.function_name}")
                 return TaskResult(
                     task_id=self.task.task_id,
                     graph_id=self.task.graph_id,
@@ -104,8 +155,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     message_settled = True
                 except exc.BoilermakerTaskLeaseLost:
                     logger.error(
-                        f"Lost message lease when trying to deadletter/complete "
-                        f" for task {self.task.function_name}"
+                        f"Lost message lease when trying to deadletter/complete  for task {self.task.function_name}"
                     )
                     return TaskResult(
                         task_id=self.task.task_id,
@@ -266,8 +316,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                         exc_info=True,
                     )
                     raise exc.ContinueGraphError(
-                        f"load_graph failed for graph {graph_id} after "
-                        f"{_LOAD_GRAPH_RETRY_POLICY.max_tries} attempts"
+                        f"load_graph failed for graph {graph_id} after {_LOAD_GRAPH_RETRY_POLICY.max_tries} attempts"
                     ) from last_exc
         else:
             # Should only be reached if max_tries == 0 (not expected).
@@ -289,9 +338,12 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             logger.error(
                 f"Task status mismatch in continue_graph for graph {graph_id}: "
                 f"expected {completed_task_result.task_id} to be {completed_task_result.status}, "
-                f"but got {loaded_task_status}"
+                f"but got {loaded_task_status}. Suppressing settlement to allow redelivery."
             )
-            return None
+            raise exc.ContinueGraphError(
+                f"Status mismatch for task {completed_task_result.task_id} in graph {graph_id}: "
+                f"expected {completed_task_result.status}, got {loaded_task_status}"
+            )
 
         # Snapshot tasks already in Scheduled status BEFORE the first pass.
         # The second pass uses this snapshot so that tasks freshly scheduled
@@ -322,14 +374,19 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 )
                 continue
 
-            ready_count += 1
-            await self.publish_task(ready_task)
-            logger.info(f"Publishing ready task {ready_task.task_id} in graph {graph_id} total={ready_count}")
+            try:
+                await self.publish_task(ready_task)
+                ready_count += 1
+                logger.info(f"Publishing ready task {ready_task.task_id} in graph {graph_id} total={ready_count}")
+            except Exception:
+                logger.error(
+                    f"Failed to publish ready task {ready_task.task_id} in graph {graph_id}; "
+                    "task is in Scheduled status in blob and will be recovered by crash-recovery pass on redelivery.",
+                    exc_info=True,
+                )
 
         if ready_count == 0:
-            logger.info(
-                f"No new tasks ready in graph {graph_id} after task {completed_task_result.task_id}"
-            )
+            logger.info(f"No new tasks ready in graph {graph_id} after task {completed_task_result.task_id}")
 
         # Second pass: re-publish tasks that were ALREADY in Scheduled status when the
         # graph was loaded (crash-recovery).

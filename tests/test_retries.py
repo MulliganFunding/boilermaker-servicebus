@@ -36,9 +36,33 @@ def test_policy_fixed(attempts, default):
     assert default.get_delay_interval(attempts) == default.delay
 
 
-@pytest.mark.parametrize("attempts", ATTEMPTS)
-def test_policy_linear(attempts, linear):
-    assert linear.get_delay_interval(attempts) == linear.delay * attempts
+def test_policy_linear_first_retry_is_not_zero(linear):
+    """First retry (attempts_so_far=0) must return delay, not 0.
+
+    This is the regression case: the original formula `delay * attempts_so_far`
+    produced 0 on the first retry. The correct formula is `delay * (attempts_so_far + 1)`.
+    """
+    assert linear.get_delay_interval(0) == linear.delay * 1
+
+
+def test_policy_linear_second_retry(linear):
+    assert linear.get_delay_interval(1) == linear.delay * 2
+
+
+def test_policy_linear_third_retry(linear):
+    assert linear.get_delay_interval(2) == linear.delay * 3
+
+
+def test_policy_linear_caps_at_delay_max():
+    """Delay is capped at delay_max regardless of attempts_so_far."""
+    # With delay=30 and delay_max=60, attempts_so_far=10 gives 30*11=330 — cap kicks in.
+    policy = retries.RetryPolicy(
+        max_tries=20,
+        delay=30,
+        delay_max=60,
+        retry_mode=retries.RetryMode.Linear,
+    )
+    assert policy.get_delay_interval(10) == policy.delay_max
 
 
 @pytest.mark.parametrize("attempts", ATTEMPTS)

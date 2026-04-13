@@ -1,4 +1,5 @@
 import itertools
+import logging
 import typing
 from collections import defaultdict
 from collections.abc import Generator
@@ -9,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from .result import TaskResult, TaskResultSlim, TaskStatus
 from .task import Task
 from .task_id import GraphId, ident_field, TaskId
+
+logger = logging.getLogger("boilermaker.app")
 
 
 class TaskGraph(BaseModel):
@@ -171,7 +174,9 @@ class TaskGraph(BaseModel):
                     if not self.edges[parent_id]:  # Remove empty set
                         del self.edges[parent_id]
                 del self.children[task.task_id]
-                raise ValueError(f"Adding task {task.task_id} with parent {parent_id} would create a cycle in the DAG")
+                raise ValueError(
+                    f"Adding task {task.task_id} with parents {parent_ids} would create a cycle in the DAG"
+                )
 
         # If we leave `on_success` and `on_failure` it's potentially confusing for both callers
         # and our own evaluation. It also has the potential to create cycles inadvertently, so we
@@ -294,12 +299,14 @@ class TaskGraph(BaseModel):
     def generate_ready_tasks(self) -> Generator[Task]:
         """Get a list of tasks that are ready to be executed (not started and all antecedents succeeded)."""
         for task_id in self.children.keys():
-            # Task is ready if:
-            # 1. It has no result yet (never started) OR it has Pending status
-            # 2. All its antecedents have succeeded
             task_result = self.results.get(task_id)
-            is_not_started = task_result is None or task_result.status == TaskStatus.Pending
-            if is_not_started and self.task_is_ready(task_id):
+            if task_result is None:
+                logger.warning(
+                    f"Task {task_id} has no result blob in graph {self.graph_id}; "
+                    "skipping. This may indicate a partial store_graph failure."
+                )
+                continue
+            if task_result.status == TaskStatus.Pending and self.task_is_ready(task_id):
                 yield self.children[task_id]
 
     def generate_failure_ready_tasks(self) -> Generator[Task]:

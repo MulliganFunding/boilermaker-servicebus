@@ -28,6 +28,7 @@ def mock_credentials():
     """Mock Azure credentials for testing."""
     return MagicMock(spec=DefaultAzureCredential)
 
+
 @pytest.fixture
 def blob_storage(mock_credentials):
     """Create a BlobClientStorage instance for testing."""
@@ -72,9 +73,7 @@ def sample_task_result_slim(sample_task):
 
 
 # Tests for store_task_result method
-async def test_store_task_result_success(
-    mock_azureblob, blob_storage, sample_task_result
-):
+async def test_store_task_result_success(mock_azureblob, blob_storage, sample_task_result):
     """Test successful storage of a TaskResult."""
     _container_client, mockblobc, _ = mock_azureblob
     mockblobc.upload_blob.return_value = {"status": "success"}
@@ -96,13 +95,9 @@ async def test_store_task_result_success(
     assert tags["status"] == sample_task_result.status.value
 
 
-async def test_store_task_result_with_azure_blob_error(
-    blob_storage, sample_task_result
-):
+async def test_store_task_result_with_azure_blob_error(blob_storage, sample_task_result):
     """Test error handling when Azure blob storage fails."""
-    with patch.object(
-        blob_storage, "upload_blob", new_callable=AsyncMock
-    ) as mock_upload:
+    with patch.object(blob_storage, "upload_blob", new_callable=AsyncMock) as mock_upload:
         error = AzureBlobError(
             MagicMock(
                 **{
@@ -174,9 +169,7 @@ async def test_load_graph_success(
 
 async def test_load_graph_not_found(blob_storage):
     """Test loading a non-existent TaskGraph."""
-    with patch.object(
-        blob_storage, "download_blob", new_callable=AsyncMock
-    ) as mock_download:
+    with patch.object(blob_storage, "download_blob", new_callable=AsyncMock) as mock_download:
         error = AzureBlobError(
             MagicMock(
                 **{
@@ -203,9 +196,7 @@ async def test_load_graph_empty_graph_id(blob_storage):
 
 async def test_load_graph_returns_none_when_no_content(blob_storage):
     """Test loading returns None when download_blob returns None."""
-    with patch.object(
-        blob_storage, "download_blob", new_callable=AsyncMock
-    ) as mock_download:
+    with patch.object(blob_storage, "download_blob", new_callable=AsyncMock) as mock_download:
         mock_download.return_value = None
 
         result = await blob_storage.load_graph(GraphId("test-graph"))
@@ -226,14 +217,10 @@ async def test_load_graph_validation_error_on_graph_json_raises_storage_error(
     from pydantic import ValidationError
 
     with (
-        patch.object(
-            blob_storage, "download_blob", new_callable=AsyncMock
-        ) as mock_download,
+        patch.object(blob_storage, "download_blob", new_callable=AsyncMock) as mock_download,
         patch(
             "boilermaker.storage.blob_storage.TaskGraph.model_validate_json",
-            side_effect=ValidationError.from_exception_data(
-                "TaskGraph", [], input_type="json"
-            ),
+            side_effect=ValidationError.from_exception_data("TaskGraph", [], input_type="json"),
         ),
     ):
         mock_download.return_value = '{"corrupt": "data"}'
@@ -269,9 +256,7 @@ async def test_load_graph_validation_error_on_task_result_json_raises_storage_er
 
     with patch(
         "boilermaker.storage.blob_storage.TaskResultSlim.model_validate_json",
-        side_effect=ValidationError.from_exception_data(
-            "TaskResultSlim", [], input_type="json"
-        ),
+        side_effect=ValidationError.from_exception_data("TaskResultSlim", [], input_type="json"),
     ):
         with pytest.raises(BoilermakerStorageError) as exc_info:
             await blob_storage.load_graph(sample_task_graph.graph_id)
@@ -345,9 +330,7 @@ async def test_store_graph_success(mock_azureblob, blob_storage, sample_task_gra
     assert pending_task_res.model_dump_json() == task_result_upload_call.args[1]
 
 
-async def test_store_graph_with_resource_error(
-    mock_azureblob, blob_storage, sample_task_graph
-):
+async def test_store_graph_with_resource_error(mock_azureblob, blob_storage, sample_task_graph):
     """Test error handling when storing TaskGraph fails."""
     container_client, mockblobc, _ = mock_azureblob
     error = ResourceExistsError("YOU FAILED")
@@ -368,9 +351,7 @@ async def test_store_graph_with_resource_error(
 
 
 # Edge cases and additional tests
-async def test_store_task_result_raises_storage_error_on_etag_mismatch(
-    blob_storage, sample_task_result
-):
+async def test_store_task_result_raises_storage_error_on_etag_mismatch(blob_storage, sample_task_result):
     """
     Verifies that store_task_result raises BoilermakerStorageError when the
     underlying blob client raises AzureBlobError (e.g., HTTP 412 ETag mismatch).
@@ -379,9 +360,7 @@ async def test_store_task_result_raises_storage_error_on_etag_mismatch(
     The concurrency path (etag != None) is exercised explicitly so that the
     concurrency_kwargs are populated before the upload attempt.
     """
-    with patch.object(
-        blob_storage, "upload_blob", new_callable=AsyncMock
-    ) as mock_upload:
+    with patch.object(blob_storage, "upload_blob", new_callable=AsyncMock) as mock_upload:
         error = AzureBlobError(
             MagicMock(
                 **{
@@ -395,9 +374,7 @@ async def test_store_task_result_raises_storage_error_on_etag_mismatch(
 
         with pytest.raises(BoilermakerStorageError) as exc_info:
             # Pass a non-empty etag to exercise the ETag concurrency guard code path
-            await blob_storage.store_task_result(
-                sample_task_result, etag='"0x8DBBAF4B8A6017C"'
-            )
+            await blob_storage.store_task_result(sample_task_result, etag='"0x8DBBAF4B8A6017C"')
 
         assert "Failed to store TaskResult" in str(exc_info.value)
         assert exc_info.value.task_id == sample_task_result.task_id
@@ -420,12 +397,40 @@ async def test_store_task_result_without_graph_id(blob_storage, sample_task):
         result="test result",
     )
 
-    with patch.object(
-        blob_storage, "upload_blob", new_callable=AsyncMock
-    ) as mock_upload:
+    with patch.object(blob_storage, "upload_blob", new_callable=AsyncMock) as mock_upload:
         await blob_storage.store_task_result(task_result)
 
         # Verify tags include 'none' for missing graph_id
         call_args = mock_upload.call_args
         tags = call_args[1]["tags"]
         assert tags["graph_id"] == "none"
+
+
+async def test_store_and_load_task_result_round_trip(mock_azureblob, blob_storage, sample_task_result):
+    """Round-trip test: load_task_result reads back what store_task_result wrote.
+
+    Both methods construct the blob path as
+    ``{task_result_prefix}/{graph_id}/{task_id}.json``.  This test pins that
+    contract so that a future refactor of either path-construction site
+    produces a failing test rather than silently disabling the idempotency guard.
+
+    Acceptance criterion from TDD section 7, load_task_result row.
+    """
+    _container_client, mockblobc, set_return = mock_azureblob
+    mockblobc.upload_blob.return_value = {"status": "success"}
+
+    # Write the result through store_task_result.
+    await blob_storage.store_task_result(sample_task_result)
+
+    # Capture the JSON that was actually written to blob storage.
+    assert mockblobc.upload_blob.call_count == 1
+    uploaded_json = mockblobc.upload_blob.call_args.args[0]
+
+    # Configure the download mock to return that same JSON so load_task_result
+    # reads exactly what store_task_result wrote.
+    set_return.download_blob_returns(uploaded_json)
+
+    loaded = await blob_storage.load_task_result(sample_task_result.task_id, sample_task_result.graph_id)
+
+    assert loaded is not None, "load_task_result returned None — blob path mismatch between store and load"
+    assert loaded.status == sample_task_result.status

@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from boilermaker.exc import BoilermakerStorageError
 from boilermaker.storage import StorageInterface
-from boilermaker.task import GraphId, TaskGraph, TaskResult, TaskResultSlim
+from boilermaker.task import GraphId, TaskGraph, TaskId, TaskResult, TaskResultSlim
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,40 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                 if lease is not None:
                     await lease.release()
         return graph
+
+    async def load_task_result(self, task_id: TaskId, graph_id: GraphId) -> TaskResultSlim | None:
+        """Load a single task result from Azure Blob Storage.
+
+        Returns None if the blob does not exist (404). Raises BoilermakerStorageError
+        for any other failure. Used by the idempotent redelivery guard in
+        TaskGraphEvaluator to check terminal status before writing Started.
+
+        Args:
+            task_id: The TaskId of the task result to load.
+            graph_id: The GraphId the task belongs to.
+        """
+        fname = f"{self.task_result_prefix}/{graph_id}/{task_id}.json"
+        try:
+            contents = await self.download_blob(fname)
+        except AzureBlobError as exc:
+            if exc.status_code == 404:
+                return None
+            raise BoilermakerStorageError(
+                f"Failed to load task result {task_id}",
+                task_id=task_id,
+                graph_id=graph_id,
+                status_code=exc.status_code,
+                reason=exc.reason,
+            ) from exc
+        if contents is None:
+            return None
+        try:
+            return TaskResultSlim.model_validate_json(contents)
+        except ValidationError as e:
+            raise BoilermakerStorageError(
+                f"Failed to deserialize task result {task_id}: {e}",
+                status_code=None,
+            ) from e
 
     async def store_task_result(self, task_result: TaskResult | TaskResultSlim, etag: str | None = None) -> None:
         """Stores a TaskResult to Azure Blob Storage.

@@ -138,7 +138,7 @@ class RetryPolicy(BaseModel):
             case RetryMode.Fixed:
                 return min(self.delay, self.delay_max)
             case RetryMode.Linear:
-                return min(self.delay * attempts_so_far, self.delay_max)
+                return min(self.delay * (attempts_so_far + 1), self.delay_max)
             case RetryMode.Exponential:
                 # Jitter is added so that a lot of work doesn't get bunched up at the
                 # end and eventually hurt throughput.

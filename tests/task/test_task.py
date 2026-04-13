@@ -106,7 +106,6 @@ def test_task_properties():
 
 def test_task_message_properties():
 
-
     t = task.Task.default("test_func")
 
     # Initially no message
@@ -173,7 +172,6 @@ def test_task_serialization():
     assert t2.function_name == "test_func"
     assert t2.payload == {"key": "value"}
     assert t2.task_id == t.task_id
-
 
 
 def test_task_diagnostic_id_when_no_message():

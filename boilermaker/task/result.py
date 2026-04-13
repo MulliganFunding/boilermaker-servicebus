@@ -19,7 +19,6 @@ class TaskStatus(enum.StrEnum):
     RetriesExhausted = "retries_exhausted"
     Deadlettered = "deadlettered"
 
-
     @classmethod
     def default(cls) -> "TaskStatus":
         """Get the default task status.

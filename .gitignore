@@ -22,3 +22,4 @@ site/
 todo*.md
 tmp/
 .bmo/
+.claude/

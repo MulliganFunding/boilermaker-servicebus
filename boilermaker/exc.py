@@ -33,9 +33,7 @@ class BoilermakerStorageError(Exception):
     def __getattr__(self, item):
         if self.details.get(item, None):
             return self.details[item]
-        raise AttributeError(
-            f"BoilermakerStorageError object has no attribute '{item}'"
-        )
+        raise AttributeError(f"BoilermakerStorageError object has no attribute '{item}'")
 
 
 class BoilermakerUnregisteredFunction(ValueError):
