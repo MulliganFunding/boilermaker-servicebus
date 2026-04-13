@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from boilermaker.exc import BoilermakerStorageError
 from boilermaker.storage import StorageInterface
-from boilermaker.task import GraphId, TaskGraph, TaskId, TaskResult, TaskResultSlim
+from boilermaker.task import GraphId, TaskGraph, TaskId, TaskResult, TaskResultSlim, task_id
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,10 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             except ValidationError as e:
                 raise BoilermakerStorageError(
                     f"Failed to deserialize task result in graph {graph_id}: {e}",
+                    name=blob.name,
+                    graph_id=graph_id,
                     status_code=None,
+                    reason="DeserializationError",
                 ) from e
             tr.etag = blob.etag
             if tr.graph_id == graph_id:
@@ -192,7 +195,10 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         except ValidationError as e:
             raise BoilermakerStorageError(
                 f"Failed to deserialize task result {task_id}: {e}",
+                task_id=task_id,
+                graph_id=graph_id,
                 status_code=None,
+                reason="DeserializationError",
             ) from e
 
     async def store_task_result(self, task_result: TaskResult | TaskResultSlim, etag: str | None = None) -> None:
