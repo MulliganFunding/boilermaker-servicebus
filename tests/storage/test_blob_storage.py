@@ -206,7 +206,7 @@ async def test_load_graph_returns_none_when_no_content(blob_storage):
 async def test_load_graph_validation_error_on_graph_json_raises_storage_error(
     blob_storage,
 ):
-    """BMO-10: ValidationError from model_validate_json on the graph blob must be wrapped
+    """ValidationError from model_validate_json on the graph blob must be wrapped
     as BoilermakerStorageError so the continue_graph retry loop can catch it.
 
     Corrupt / schema-mismatched graph blobs raise pydantic.ValidationError inside
@@ -237,7 +237,7 @@ async def test_load_graph_validation_error_on_task_result_json_raises_storage_er
     blob_storage,
     sample_task_graph,
 ):
-    """BMO-10: ValidationError from model_validate_json on a TaskResultSlim blob must be
+    """ValidationError from model_validate_json on a TaskResultSlim blob must be
     wrapped as BoilermakerStorageError — same contract as for the graph blob itself.
     """
     from pydantic import ValidationError

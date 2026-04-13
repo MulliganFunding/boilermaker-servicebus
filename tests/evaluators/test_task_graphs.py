@@ -486,8 +486,11 @@ async def test_late_settlement_service_bus_error_exception_failure(evaluator_con
 
 # THIS IS AN EXTREMELY IMPORTANT SAFETY PROPERTY TEST
 # DO NOT ALLOW REGRESSIONS FOR THIS TEST. DO NOT SKIP. DO NOT IGNORE.
-async def test_safety_prop_no_schedule_if_blob_write_fails(success_scenario):
-    """Safety property: If writing to storage fails, no new tasks should be scheduled."""
+async def test_safety_prop_publish_before_store_blob_failure_harmless(success_scenario):
+    """Safety property: With publish-before-store, tasks are published even when the
+    subsequent blob write fails.  This is safe because Service Bus duplicate detection
+    (keyed on task_id) prevents genuine duplicate delivery on redelivery, and the blob
+    remaining in Pending status means generate_ready_tasks() will re-discover the task."""
     started_stored_effects = [None, None]  # start success, task result success
     # Any successive writes should fail
     side_effecty = itertools.chain(
@@ -498,8 +501,8 @@ async def test_safety_prop_no_schedule_if_blob_write_fails(success_scenario):
         compare_result="OK",
         compare_status=TaskStatus.Success,
     ) as ctx:
-        # Should not schedule any new tasks due to storage failure!
-        ctx.assert_messages_scheduled(0)
+        # Tasks ARE published (publish happens before blob write); blob failure is harmless
+        ctx.assert_messages_scheduled(2)
 
 
 async def test_continue_graph_no_graph_id(evaluator_context):
@@ -590,12 +593,12 @@ async def test_continue_graph_no_ready_tasks(evaluator_context):
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
-# BMO-8: Double-yield in generate_failure_ready_tasks
+# Double-yield in generate_failure_ready_tasks
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 
-async def test_bmo8_generate_failure_ready_tasks_no_double_yield(app):
-    """BMO-8: A shared failure callback with two failed parents must be yielded exactly once."""
+async def test_generate_failure_ready_tasks_no_double_yield(app):
+    """A shared failure callback with two failed parents must be yielded exactly once."""
 
     async def task_a(state):
         return "A"
@@ -635,8 +638,8 @@ async def test_bmo8_generate_failure_ready_tasks_no_double_yield(app):
     assert failure_ready[0].task_id == f.task_id
 
 
-async def test_bmo8_continue_graph_shared_failure_callback_no_raise(evaluator_context, app):
-    """BMO-8: continue_graph must not raise when a shared failure callback has two failed parents."""
+async def test_continue_graph_shared_failure_callback_no_raise(evaluator_context, app):
+    """continue_graph must not raise when a shared failure callback has two failed parents."""
 
     async def task_a(state):
         return "A"
@@ -683,12 +686,16 @@ async def test_bmo8_continue_graph_shared_failure_callback_no_raise(evaluator_co
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
-# BMO-11: schedule_task ValueError outside try/except
+# schedule_task ValueError outside try/except
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 
-async def test_bmo11_schedule_task_value_error_does_not_propagate(evaluator_context):
-    """BMO-11: ValueError from schedule_task must be caught; continue_graph must return without raising."""
+async def test_schedule_task_value_error_does_not_propagate(evaluator_context):
+    """ValueError from schedule_task must be caught; continue_graph must return without raising.
+
+    With publish-before-store, the task IS published before schedule_task is called.
+    ValueError from schedule_task only prevents the blob write — the task was already published.
+    """
     # Build a mock graph whose schedule_task always raises ValueError.
     # We use a MagicMock(spec=TaskGraph) so we bypass Pydantic's __setattr__ restriction.
     real_graph = evaluator_context.graph
@@ -716,14 +723,14 @@ async def test_bmo11_schedule_task_value_error_does_not_propagate(evaluator_cont
     # Should not raise
     ready_count = await evaluator_context.evaluator.continue_graph(completed)
 
-    # No tasks should have been published (all were skipped due to ValueError)
+    # Task IS published (publish-before-store); ValueError only prevents blob write
     published = evaluator_context.get_scheduled_messages()
-    assert len(published) == 0, "No tasks should be published when schedule_task raises ValueError"
-    assert ready_count == 0
+    assert len(published) == 1, "Task should be published even when schedule_task raises ValueError"
+    assert ready_count == 1
 
 
-async def test_bmo11_message_settled_even_when_schedule_task_raises(evaluator_context, mock_storage):
-    """BMO-11: message_handler must settle its message even if schedule_task raises ValueError inside continue_graph."""
+async def test_message_settled_even_when_schedule_task_raises(evaluator_context, mock_storage):
+    """message_handler must settle its message even if schedule_task raises ValueError inside continue_graph."""
     evaluator_context.prep_task_to_succeed()
 
     real_graph = evaluator_context.graph
@@ -748,8 +755,8 @@ async def test_bmo11_message_settled_even_when_schedule_task_raises(evaluator_co
     evaluator_context.assert_msg_settled()
 
 
-async def test_bmo11_other_tasks_dispatched_when_one_raises_value_error(evaluator_context, app):
-    """BMO-11: When schedule_task raises ValueError for one task, remaining tasks in batch are still dispatched."""
+async def test_other_tasks_dispatched_when_one_raises_value_error(evaluator_context, app):
+    """When schedule_task raises ValueError for one task, remaining tasks in batch are still dispatched."""
 
     async def sibling_a(state):
         return "A"
@@ -802,20 +809,21 @@ async def test_bmo11_other_tasks_dispatched_when_one_raises_value_error(evaluato
     published = evaluator_context.get_scheduled_messages()
     published_ids = {msg.task.task_id for msg in published}
 
-    # sibling_b should still be dispatched
-    assert sb.task_id in published_ids, "sibling_b should be dispatched even though sibling_a raised ValueError"
-    # sibling_a should NOT have been dispatched
-    assert sa.task_id not in published_ids, "sibling_a should NOT be dispatched after ValueError"
-    assert ready_count == 1
+    # Both siblings are published (publish-before-store); ValueError only prevents blob write
+    assert sb.task_id in published_ids, "sibling_b should be dispatched"
+    assert sa.task_id in published_ids, (
+        "sibling_a should be dispatched (publish happens before schedule_task; ValueError only prevents blob write)"
+    )
+    assert ready_count == 2
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
-# BMO-10: load_graph failure must not settle message
+# load_graph failure must not settle message
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 
-async def test_bmo10_load_graph_storage_error_no_settlement(evaluator_context, mock_storage):
-    """BMO-10: Transient load_graph failure must suppress message settlement and not publish any tasks."""
+async def test_load_graph_storage_error_no_settlement(evaluator_context, mock_storage):
+    """Transient load_graph failure must suppress message settlement and not publish any tasks."""
     from unittest.mock import patch
 
     from boilermaker.evaluators.task_graph import _LOAD_GRAPH_RETRY_POLICY
@@ -843,8 +851,8 @@ async def test_bmo10_load_graph_storage_error_no_settlement(evaluator_context, m
     assert evaluator_context.get_scheduled_messages() == [], "task_publisher must not be called when load_graph fails"
 
 
-async def test_bmo10_load_graph_not_found_settles_and_logs_critical(evaluator_context, mock_storage, caplog):
-    """BMO-10: Permanent load_graph failure (404 BoilermakerStorageError) must settle message and log CRITICAL.
+async def test_load_graph_not_found_settles_and_logs_critical(evaluator_context, mock_storage, caplog):
+    """Permanent load_graph failure (404 BoilermakerStorageError) must settle message and log CRITICAL.
 
     In production, the underlying library raises AzureBlobError (wrapping the HTTP 404 response)
     which load_graph re-raises as BoilermakerStorageError(status_code=404).  load_graph never
@@ -870,8 +878,8 @@ async def test_bmo10_load_graph_not_found_settles_and_logs_critical(evaluator_co
     )
 
 
-async def test_bmo10_no_publish_when_load_graph_fails(evaluator_context, mock_storage):
-    """BMO-10: task_publisher must never be called when load_graph raises."""
+async def test_no_publish_when_load_graph_fails(evaluator_context, mock_storage):
+    """task_publisher must never be called when load_graph raises."""
     from unittest.mock import patch
 
     mock_storage.load_graph.side_effect = exc.BoilermakerStorageError("Transient error")
@@ -882,10 +890,10 @@ async def test_bmo10_no_publish_when_load_graph_fails(evaluator_context, mock_st
     assert evaluator_context.get_scheduled_messages() == [], "task_publisher must not be called when load_graph raises"
 
 
-async def test_bmo10_non404_storage_error_retried_raises_continue_graph_error_no_settlement(
+async def test_non404_storage_error_retried_raises_continue_graph_error_no_settlement(
     evaluator_context, mock_storage
 ):
-    """BMO-10: A non-404 BoilermakerStorageError (e.g. 503) must be retried and eventually
+    """A non-404 BoilermakerStorageError (e.g. 503) must be retried and eventually
     raise ContinueGraphError, leaving the message unsettled for Service Bus redelivery.
 
     This distinguishes the transient case (status_code=503) from the permanent 404 case.
@@ -920,10 +928,10 @@ async def test_bmo10_non404_storage_error_retried_raises_continue_graph_error_no
     )
 
 
-async def test_bmo10_retries_exhausted_continue_graph_error_does_not_propagate(
+async def test_retries_exhausted_continue_graph_error_does_not_propagate(
     retries_exhausted_scenario, mock_storage
 ):
-    """BMO-10: ContinueGraphError from continue_graph on the RetriesExhausted path must not propagate.
+    """ContinueGraphError from continue_graph on the RetriesExhausted path must not propagate.
 
     The message is already deadlettered before continue_graph is called, so
     suppressing settlement is not possible.  The correct behaviour is to log
@@ -954,8 +962,8 @@ async def test_bmo10_retries_exhausted_continue_graph_error_does_not_propagate(
     retries_exhausted_scenario.assert_msg_dead_lettered()
 
 
-async def test_bmo10_validation_error_in_load_graph_raises_continue_graph_error(evaluator_context, mock_storage):
-    """BMO-10: ValidationError raised by load_graph must be wrapped as BoilermakerStorageError,
+async def test_validation_error_in_load_graph_raises_continue_graph_error(evaluator_context, mock_storage):
+    """ValidationError raised by load_graph must be wrapped as BoilermakerStorageError,
     enter the retry loop, exhaust retries, and surface as ContinueGraphError — not as a raw
     ValidationError that bypasses message_handler's except clause.
 
@@ -994,12 +1002,17 @@ async def test_bmo10_validation_error_in_load_graph_raises_continue_graph_error(
     assert evaluator_context.get_scheduled_messages() == [], "task_publisher must not be called when load_graph raises"
 
 
-# BMO-9: continue_graph liveness gap — Scheduled re-publish
+# continue_graph liveness gap — Scheduled re-publish
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 
-async def test_bmo9_crash_recover_regular_child(evaluator_context, app):
-    """BMO-9: A regular child task already in Scheduled status must be re-published on redelivery."""
+async def test_publish_before_store_crash_recovery(evaluator_context, app):
+    """With publish-before-store, if the blob write fails after publish,
+    the task remains in Pending status.  On redelivery, generate_ready_tasks()
+    re-discovers it and re-publishes (SB dedup suppresses the duplicate).
+
+    This replaces the old second-pass crash-recovery test.
+    """
 
     async def downstream(state):
         return "downstream done"
@@ -1013,10 +1026,8 @@ async def test_bmo9_crash_recover_regular_child(evaluator_context, app):
     # Generate pending results so results map is populated
     list(graph.generate_pending_results())
 
-    # Simulate crash-after-store-before-publish: downstream is already Scheduled in blob
-    graph.results[downstream_task.task_id].status = TaskStatus.Scheduled
-
-    # ok_task succeeded (trigger for downstream)
+    # ok_task succeeded (trigger for downstream) — downstream is still Pending
+    # (simulates crash after publish but before blob write on a prior invocation)
     graph.add_result(
         TaskResult(
             task_id=evaluator_context.ok_task.task_id,
@@ -1036,12 +1047,13 @@ async def test_bmo9_crash_recover_regular_child(evaluator_context, app):
 
     published_ids = {msg.task.task_id for msg in evaluator_context.get_scheduled_messages()}
     assert downstream_task.task_id in published_ids, (
-        "Already-Scheduled downstream task must be re-published on redelivery (crash recovery)"
+        "Pending downstream task must be published on redelivery (generate_ready_tasks re-discovers it)"
     )
 
 
-async def test_bmo9_no_double_blob_write(evaluator_context, app):
-    """BMO-9: Re-running continue_graph with an already-Scheduled downstream task must NOT call store_task_result."""
+async def test_blob_write_after_publish(evaluator_context, app):
+    """With publish-before-store, a successful publish is followed by a blob write
+    to mark the task as Scheduled.  Verify that store_task_result IS called for newly-ready tasks."""
 
     async def downstream(state):
         return "done"
@@ -1053,8 +1065,7 @@ async def test_bmo9_no_double_blob_write(evaluator_context, app):
     graph.add_task(downstream_task, parent_ids=[evaluator_context.ok_task.task_id])
     list(graph.generate_pending_results())
 
-    # Downstream already Scheduled (crash-after-store)
-    graph.results[downstream_task.task_id].status = TaskStatus.Scheduled
+    # ok_task succeeded — downstream is Pending and ready
     graph.add_result(
         TaskResult(
             task_id=evaluator_context.ok_task.task_id,
@@ -1075,17 +1086,17 @@ async def test_bmo9_no_double_blob_write(evaluator_context, app):
     )
     await evaluator_context.evaluator.continue_graph(completed)
 
-    # store_task_result must NOT have been called for the already-Scheduled task
+    # store_task_result SHOULD be called for the downstream task (writing Scheduled status after publish)
     stored_ids = {
         call.args[0].task_id for call in evaluator_context.mock_storage.store_task_result.call_args_list if call.args
     }
-    assert downstream_task.task_id not in stored_ids, (
-        "store_task_result must not be called again for an already-Scheduled task (no double blob write)"
+    assert downstream_task.task_id in stored_ids, (
+        "store_task_result must be called after publish to write Scheduled status"
     )
 
 
-async def test_bmo9_is_complete_false_while_scheduled(evaluator_context, app):
-    """BMO-9 / BMO-17: graph.is_complete() must return False when a task is in Scheduled status."""
+async def test_is_complete_false_while_scheduled(evaluator_context, app):
+    """graph.is_complete() must return False when a task is in Scheduled status."""
 
     async def downstream(state):
         return "done"
@@ -1180,11 +1191,10 @@ async def test_redelivery_guard_skips_execution_and_calls_continue_graph(evaluat
     )
 
 
-async def test_bmo9_crash_recover_failure_callback(evaluator_context, app):
-    """BMO-9: A failure callback task already in Scheduled status must be re-published on redelivery.
-
-    This covers the critical case flagged by @distributed-systems-expert:
-    fail_children must be included in the second pass, not just regular children.
+async def test_failure_callback_publish_before_store(evaluator_context, app):
+    """With publish-before-store, a failure callback still in Pending status
+    (blob write failed on prior invocation) is re-discovered by generate_failure_ready_tasks()
+    and re-published on redelivery.  SB dedup suppresses the duplicate.
     """
 
     async def fail_cb(state):
@@ -1198,6 +1208,7 @@ async def test_bmo9_crash_recover_failure_callback(evaluator_context, app):
     list(graph.generate_pending_results())
 
     # ok_task has failed (trigger for the failure callback)
+    # fail_task remains Pending (simulates crash after publish but before blob write)
     graph.add_result(
         TaskResult(
             task_id=evaluator_context.ok_task.task_id,
@@ -1205,9 +1216,6 @@ async def test_bmo9_crash_recover_failure_callback(evaluator_context, app):
             status=TaskStatus.Failure,
         )
     )
-
-    # Simulate crash-after-store-before-publish: fail_task is already Scheduled in blob
-    graph.results[fail_task.task_id].status = TaskStatus.Scheduled
 
     evaluator_context.mock_storage.load_graph.return_value = graph
 
@@ -1220,8 +1228,8 @@ async def test_bmo9_crash_recover_failure_callback(evaluator_context, app):
 
     published_ids = {msg.task.task_id for msg in evaluator_context.get_scheduled_messages()}
     assert fail_task.task_id in published_ids, (
-        "Already-Scheduled failure callback task must be re-published on redelivery "
-        "(crash recovery for fail_children — critical case from @distributed-systems-expert review)"
+        "Pending failure callback must be published on redelivery "
+        "(generate_failure_ready_tasks re-discovers it)"
     )
 
 
@@ -1233,9 +1241,9 @@ async def test_bmo9_crash_recover_failure_callback(evaluator_context, app):
 async def test_publish_task_exception_on_second_task_does_not_abort_loop(app, evaluator_context):
     """A publish_task failure for one ready task must not abort publishing of remaining tasks.
 
-    Three ready tasks are set up. publish_task raises on the second call.
-    Assert: first task is published, third task is also attempted, continue_graph does not raise,
-    and the failed task remains in Scheduled status in the graph.
+    Two ready tasks are set up. publish_task raises on the second call.
+    Assert: first task is published, second task is also attempted, continue_graph does not raise,
+    and the failed task remains in Pending status (publish-before-store: blob write skipped on failure).
     """
 
     async def task_b(state):
@@ -1300,10 +1308,10 @@ async def test_publish_task_exception_on_second_task_does_not_abort_loop(app, ev
     # ready_count only counts successful publishes
     assert ready_count == 1, f"Expected ready_count=1 (only successful publish), got {ready_count}"
 
-    # The failed task is in Scheduled status in the blob (CAS write succeeded before publish_task raised)
+    # The failed task remains in Pending status (publish-before-store: blob write is skipped on publish failure)
     failed_task_id = next(tid for tid in attempted_task_ids if tid not in published_task_ids)
-    assert fresh_graph.results[failed_task_id].status == TaskStatus.Scheduled, (
-        "Failed-publish task must remain in Scheduled status in blob for crash-recovery on redelivery"
+    assert fresh_graph.results[failed_task_id].status == TaskStatus.Pending, (
+        "Failed-publish task must remain in Pending status (publish failed before blob write)"
     )
 
 

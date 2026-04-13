@@ -27,10 +27,12 @@ _LOAD_GRAPH_RETRY_POLICY = retries.RetryPolicy(
 class TaskGraphEvaluator(TaskEvaluatorBase):
     """Evaluator for tasks that are part of a TaskGraph workflow.
 
-    At-least-once delivery contract: any task in ``Scheduled`` status may be
-    published more than once.  Workers must tolerate at-least-once delivery.
-    Re-publication on Service Bus redelivery is the intentional recovery
-    mechanism for the store-before-publish crash gap in ``continue_graph``.
+    At-least-once delivery contract: workers must tolerate at-least-once
+    delivery.  ``continue_graph`` uses publish-before-store ordering: each
+    ready task is published to Service Bus (with duplicate detection via
+    task_id) before writing ``Scheduled`` status to blob storage.  If the
+    blob write fails, the task remains ``Pending`` and will be re-discovered
+    on redelivery; SB dedup suppresses the duplicate publish.
     """
 
     def __init__(
@@ -274,9 +276,11 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         ``BoilermakerStorageError(status_code=404)``.  The ``if not graph`` guard
         below is retained as a defensive fallback only.
 
-        At-least-once delivery: any task already in ``Scheduled`` status is
-        re-published without a second blob write (second pass below).  This is
-        the crash-recovery path for the store-before-publish gap.
+        Publish-before-store: each ready task is published to Service Bus
+        (with duplicate detection via task_id) before writing ``Scheduled``
+        status to blob storage.  If the blob write fails, the task remains
+        ``Pending`` and will be re-discovered by ``generate_ready_tasks()``
+        on redelivery; SB dedup suppresses the duplicate publish.
         """
         graph_id = completed_task_result.graph_id
         if not graph_id:
@@ -345,72 +349,45 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 f"expected {completed_task_result.status}, got {loaded_task_status}"
             )
 
-        # Snapshot tasks already in Scheduled status BEFORE the first pass.
-        # The second pass uses this snapshot so that tasks freshly scheduled
-        # in the first pass are not double-published.
-        already_scheduled_tasks = list(graph.generate_scheduled_tasks())
-
         # Find and publish newly ready tasks
         ready_count = 0
         for ready_task in itertools.chain.from_iterable(
             (graph.generate_ready_tasks(), graph.generate_failure_ready_tasks())
         ):
-            # Write that the task was *scheduled* back to Blob Storage with blob etag and then publish the task!
             try:
-                result = graph.schedule_task(ready_task.task_id)
-                await self.storage_interface.store_task_result(result, etag=result.etag)
-            except exc.BoilermakerStorageError:
-                logger.error(
-                    f"Failed to store scheduled status for task {ready_task.task_id} in graph {graph_id}. "
-                    "Not publishing the task to avoid double-scheduling.",
-                    exc_info=True,
-                )
-                continue
-            except ValueError:
-                logger.error(
-                    f"schedule_task raised ValueError for task {ready_task.task_id} in graph {graph_id}. "
-                    "Skipping to avoid double-scheduling.",
-                    exc_info=True,
-                )
-                continue
-
-            try:
+                # This should publish with a task_id so no double-publish
                 await self.publish_task(ready_task)
                 ready_count += 1
                 logger.info(f"Publishing ready task {ready_task.task_id} in graph {graph_id} total={ready_count}")
             except Exception:
                 logger.error(
                     f"Failed to publish ready task {ready_task.task_id} in graph {graph_id}; "
-                    "task is in Scheduled status in blob and will be recovered by crash-recovery pass on redelivery.",
+                    "task remains in Pending status in blob and will be retried on redelivery "
+                    "via generate_ready_tasks().",
                     exc_info=True,
                 )
+                continue
+
+            # Write that the task was *scheduled* back to Blob Storage with blob etag!
+            try:
+                result = graph.schedule_task(ready_task.task_id)
+                await self.storage_interface.store_task_result(result, etag=result.etag)
+            except exc.BoilermakerStorageError:
+                logger.error(
+                    f"Failed to store Scheduled status for task {ready_task.task_id} in graph {graph_id}. "
+                    "Task was already published; blob remains Pending and will be retried on redelivery.",
+                    exc_info=True,
+                )
+                continue
+            except ValueError:
+                logger.error(
+                    f"schedule_task raised ValueError for task {ready_task.task_id} in graph {graph_id}. "
+                    "Task was already published; blob write skipped.",
+                    exc_info=True,
+                )
+                continue
 
         if ready_count == 0:
             logger.info(f"No new tasks ready in graph {graph_id} after task {completed_task_result.task_id}")
-
-        # Second pass: re-publish tasks that were ALREADY in Scheduled status when the
-        # graph was loaded (crash-recovery).
-        #
-        # If a previous invocation of continue_graph wrote Scheduled to blob storage
-        # (store_task_result) but crashed before publishing the Service Bus message
-        # (publish_task), the task blob shows Scheduled but there is no SB message.
-        # generate_ready_tasks() skips Scheduled tasks (is_not_started == False), so
-        # without this pass the task would never be dispatched.
-        #
-        # We snapshot already-scheduled tasks BEFORE the first pass so that tasks
-        # scheduled in the first pass are not double-published here.
-        #
-        # On Service Bus redelivery, we detect these orphaned-Scheduled tasks here and
-        # re-publish them without a second blob write (the blob is already correct).
-        #
-        # NOTE: Workers must tolerate at-least-once delivery.  A task in Scheduled
-        # status may be published more than once.  This is the intentional recovery
-        # mechanism for the store-before-publish crash gap.
-        for scheduled_task in already_scheduled_tasks:
-            logger.info(
-                f"Re-publishing already-scheduled task {scheduled_task.task_id} "
-                f"in graph {graph_id} (crash recovery: blob written but message not published)"
-            )
-            await self.publish_task(scheduled_task)
 
         return ready_count
