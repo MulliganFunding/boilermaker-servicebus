@@ -28,7 +28,5 @@ async def test_debug_task_retry_policy_default():
 async def test_debug_task_retry_policy_exponential():
     """Test debug_task_retry_policy raises RetryExceptionDefaultExponential when use_default is False."""
     with pytest.raises(Exception) as exc:
-        await debug_task_retry_policy(
-            DummyState, False, msg="EXPONENTIAL", max_tries=3, delay=10, delay_max=100
-        )
+        await debug_task_retry_policy(DummyState, False, msg="EXPONENTIAL", max_tries=3, delay=10, delay_max=100)
     assert "EXPONENTIAL" in str(exc.value)

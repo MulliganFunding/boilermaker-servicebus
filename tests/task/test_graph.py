@@ -156,12 +156,12 @@ def test_task_graph_ready_tasks_excludes_started():
     t1 = task.Task.default("func1")
     graph.add_task(t1)
 
+    # Populate pending results before checking readiness
+    assert len(list(graph.generate_pending_results())) == 1
+
     # Initially ready
     ready_tasks = list(graph.generate_ready_tasks())
     assert len(ready_tasks) == 1
-
-    # Put a Pending result in there
-    assert len(list(graph.generate_pending_results())) == 1
 
     # Mark as started
     graph.schedule_task(t1.task_id)
@@ -841,7 +841,12 @@ def test_task_graph_mixed_success_failure_dependencies():
     assert task_a.task_id in graph.fail_edges
     assert task_b.task_id in graph.fail_edges
     assert cleanup_a.task_id in graph.fail_edges[task_a.task_id]
-    assert cleanup_b.task_id in graph.fail_edges[task_b.task_id]  # Test scenario 1: A succeeds
+    assert cleanup_b.task_id in graph.fail_edges[task_b.task_id]
+
+    # Populate pending results so generate_ready_tasks can find Pending-status tasks
+    list(graph.generate_pending_results())
+
+    # Test scenario 1: A succeeds
     graph.results[task_a.task_id] = task.TaskResult(
         task_id=task_a.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success
     )
@@ -1704,6 +1709,9 @@ def test_failure_ready_tasks_with_complex_dependency_chains():
     graph.add_task(handler_2, parent_ids=[handler_1.task_id])  # Handler chain
     graph.add_failure_callback(main_b.task_id, handler_3)
 
+    # Populate pending results so generate_ready_tasks can find Pending-status tasks
+    list(graph.generate_pending_results())
+
     # A fails - only handler_1 should be ready (not handler_2 which depends on handler_1)
     graph.results[main_a.task_id] = task.TaskResultSlim(
         status=task.TaskStatus.Failure,
@@ -2238,13 +2246,7 @@ def test_diamond_pattern():
     task_b = task.Task.default("fn_b")
     task_c = task.Task.default("fn_c")
     task_d = task.Task.default("fn_d")
-    graph = (
-        task.TaskGraphBuilder()
-        .add(task_a)
-        .parallel(task_b, task_c)
-        .then(task_d)
-        .build()
-    )
+    graph = task.TaskGraphBuilder().add(task_a).parallel(task_b, task_c).then(task_d).build()
     assert task_b.task_id in graph.edges[task_a.task_id]
     assert task_c.task_id in graph.edges[task_a.task_id]
     assert task_d.task_id in graph.edges[task_b.task_id]
@@ -2257,12 +2259,7 @@ def test_sequential_chain_with_inline_on_failure():
     task_b = task.Task.default("fn_b")
     err_a = task.Task.default("err_a")
     err_b = task.Task.default("err_b")
-    graph = (
-        task.TaskGraphBuilder()
-        .add(task_a, on_failure=err_a)
-        .then(task_b, on_failure=err_b)
-        .build()
-    )
+    graph = task.TaskGraphBuilder().add(task_a, on_failure=err_a).then(task_b, on_failure=err_b).build()
     assert err_a.task_id in graph.fail_children
     assert err_b.task_id in graph.fail_children
     assert task_a.task_id in graph.fail_edges
@@ -2319,3 +2316,78 @@ def test_complex_parallel_fan_in_with_failure_handlers():
     assert ingest_err.task_id in graph.fail_children
     assert process_err.task_id in graph.fail_children
     assert cleanup.task_id in graph.fail_children
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# generate_ready_tasks skips tasks with missing result blobs
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+def test_task_with_no_result_blob_is_skipped_with_warning(caplog):
+    """generate_ready_tasks must skip tasks with no result blob and emit a warning.
+
+    A task with no entry in graph.results (simulating a store_graph partial failure)
+    must not be yielded and must log a warning instead.
+    """
+    import logging
+
+    graph = task.TaskGraph()
+    t1 = task.Task.default("no_result_task")
+    graph.add_task(t1)
+    # Deliberately do NOT call generate_pending_results() — t1 has no result blob.
+
+    with caplog.at_level(logging.WARNING, logger="boilermaker.app"):
+        ready = list(graph.generate_ready_tasks())
+
+    assert ready == [], "Task with no result blob must not be yielded by generate_ready_tasks"
+    warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(t1.task_id in msg for msg in warning_messages), (
+        f"Expected warning to mention the task_id {t1.task_id!r}. Got: {warning_messages}"
+    )
+    assert any("no result blob" in msg for msg in warning_messages), (
+        f"Expected warning to mention missing result blob. Got: {warning_messages}"
+    )
+
+
+def test_task_with_pending_result_is_yielded():
+    """generate_ready_tasks must yield root tasks that have Pending status."""
+    graph = task.TaskGraph()
+    t1 = task.Task.default("pending_task")
+    graph.add_task(t1)
+
+    list(graph.generate_pending_results())
+
+    ready = list(graph.generate_ready_tasks())
+    assert len(ready) == 1
+    assert ready[0].task_id == t1.task_id
+
+
+def test_mixed_missing_and_pending_results(caplog):
+    """In a graph with some missing and some Pending results, only Pending tasks are yielded."""
+    import logging
+
+    graph = task.TaskGraph()
+    t_with_result = task.Task.default("has_result")
+    t_no_result = task.Task.default("no_result")
+    graph.add_task(t_with_result)
+    graph.add_task(t_no_result)
+
+    # Only populate pending result for t_with_result
+    graph.results[t_with_result.task_id] = task.TaskResultSlim(
+        task_id=t_with_result.task_id,
+        graph_id=graph.graph_id,
+        status=task.TaskStatus.Pending,
+    )
+    # t_no_result intentionally has no entry in graph.results
+
+    with caplog.at_level(logging.WARNING, logger="boilermaker.app"):
+        ready = list(graph.generate_ready_tasks())
+
+    ready_ids = {t.task_id for t in ready}
+    assert t_with_result.task_id in ready_ids, "Task with Pending result must be yielded"
+    assert t_no_result.task_id not in ready_ids, "Task with no result blob must not be yielded"
+
+    warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(t_no_result.task_id in msg for msg in warning_messages), (
+        f"Expected warning for task with no result blob. Got: {warning_messages}"
+    )

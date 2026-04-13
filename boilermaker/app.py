@@ -322,9 +322,7 @@ class Boilermaker:
             await app.apply_async(cleanup_temp_files, delay=300)
         """
         task = self.create_task(fn, *args, policy=policy, **kwargs)
-        return await self.publish_task(
-            task, delay=delay, publish_attempts=publish_attempts
-        )
+        return await self.publish_task(task, delay=delay, publish_attempts=publish_attempts)
 
     @tracer.start_as_current_span("boilermaker.publish-task")
     async def publish_task(
@@ -366,9 +364,7 @@ class Boilermaker:
                 if results and len(results) == 1:
                     sequence_number = results[0]
                     task.mark_published(sequence_number)
-                    logger.debug(
-                        f"Published task {task.task_id} to queue with sequence_number={sequence_number}"
-                    )
+                    logger.debug(f"Published task {task.task_id} to queue with sequence_number={sequence_number}")
                 return task
 
             except (
@@ -407,6 +403,13 @@ class Boilermaker:
                     [f"Expected graph_id={graph.graph_id}, found {task.graph_id=}"],
                 )
 
+        for task in graph.fail_children.values():
+            if task.graph_id != graph.graph_id:
+                raise BoilermakerAppException(
+                    "All failure callback tasks must have graph_id matching graph",
+                    [f"Expected graph_id={graph.graph_id}, found {task.graph_id=}"],
+                )
+
         # Store the graph definition and all pending task results
         # If this graph has already been stored, this should fail.
         try:
@@ -414,8 +417,34 @@ class Boilermaker:
         except BoilermakerStorageError as exc:
             raise BoilermakerAppException("Error storing TaskGraph to storage", [str(exc)]) from exc
 
-        # Publish all ready tasks (should be root nodes with no dependencies)
-        for task in graph.generate_ready_tasks():
+        # Reload to get ETags on pending result blobs (required for ETag-guarded Scheduled writes)
+        try:
+            loaded_graph = await self.results_storage.load_graph(graph.graph_id)
+        except BoilermakerStorageError as exc:
+            raise BoilermakerAppException("Error loading TaskGraph after storage", [str(exc)]) from exc
+
+        if not loaded_graph:
+            raise BoilermakerAppException("TaskGraph not found after storing — this should not happen", [])
+
+        # Publish root tasks with ETag-guarded Scheduled write (same protocol as continue_graph)
+        for task in loaded_graph.generate_ready_tasks():
+            try:
+                result = loaded_graph.schedule_task(task.task_id)
+                await self.results_storage.store_task_result(result, etag=result.etag)
+            except BoilermakerStorageError:
+                logger.error(
+                    f"Failed to write Scheduled status for root task {task.task_id} in graph "
+                    f"{graph.graph_id}. Not publishing to avoid inconsistent state.",
+                    exc_info=True,
+                )
+                continue
+            except ValueError:
+                logger.error(
+                    f"schedule_task raised ValueError for root task {task.task_id} in graph "
+                    f"{graph.graph_id}. Skipping.",
+                    exc_info=True,
+                )
+                continue
             await self.publish_task(task)
 
         return graph
