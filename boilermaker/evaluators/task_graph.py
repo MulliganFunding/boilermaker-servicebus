@@ -48,11 +48,12 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             raise ValueError("Storage interface is required for TaskGraphEvaluator")
 
         if task.acks_early:
-            logger.warning(
-                f"Task {task.task_id} ({task.function_name}) uses acks_early=True in a "
-                "TaskGraph context. If the worker crashes after message settlement but before "
-                "the task result is written, this task will be permanently stuck in Started "
-                "status with no recovery path. Use acks_late=True (the default) for graph tasks."
+            raise ValueError(
+                f"Task {task.task_id} ({task.function_name}) uses acks_early=True, which is "
+                "incompatible with TaskGraph coordination. If the worker crashes after message "
+                "settlement but before the task result is written, the task will be permanently "
+                "stuck in Started status with no recovery path. Set acks_early=False (the default) "
+                "for all graph tasks."
             )
 
         super().__init__(
@@ -88,6 +89,8 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 )
                 _existing = None
 
+            _etag: str | None = _existing.etag if _existing else None
+
             if _existing is not None and _existing.status.finished:
                 logger.info(
                     f"Task {self.task.task_id} already in terminal state {_existing.status!r} "
@@ -115,14 +118,123 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                         exc_info=True,
                     )
                 return _terminal_result
+        else:
+            _etag = None
 
         start_result = TaskResult(
             task_id=self.task.task_id,
             graph_id=self.task.graph_id,
             status=TaskStatus.Started,
         )
-        # What to do if failure?
-        await self.storage_interface.store_task_result(start_result)
+        # Write Started with an ETag so two concurrent workers racing on the same task
+        # cannot both pass the terminal-status guard and overwrite each other's result.
+        # When _etag is None (no prior read, or read failed) this degrades to an
+        # unconditional write — the same behaviour as before this fix.
+        try:
+            await self.storage_interface.store_task_result(start_result, etag=_etag)
+        except exc.BoilermakerStorageError as _started_err:
+            _is_precondition_failure = getattr(_started_err, "status_code", None) == 412
+            if not _is_precondition_failure:
+                logger.warning(
+                    f"Non-precondition error writing Started for task {self.task.task_id}; proceeding with execution",
+                    exc_info=True,
+                )
+            else:
+                # ETag mismatch: another worker wrote to this blob since our read.
+                # Re-read to determine the current state.
+                # _etag is only non-None when self.task.graph_id is set (see capture above),
+                # so this assertion is always true when we reach a 412.
+                assert self.task.graph_id is not None, (
+                    "412 on Started write implies _etag was set, which requires graph_id"
+                )
+                try:
+                    _reread = await self.storage_interface.load_task_result(self.task.task_id, self.task.graph_id)
+                except exc.BoilermakerStorageError:
+                    logger.error(
+                        f"412 on Started write and re-read also failed for task {self.task.task_id}; "
+                        "returning Failure to avoid stalling graph",
+                        exc_info=True,
+                    )
+                    return TaskResult(
+                        task_id=self.task.task_id,
+                        graph_id=self.task.graph_id,
+                        status=TaskStatus.Failure,
+                        errors=["412 on Started write; re-read failed"],
+                    )
+
+                if _reread is None:
+                    # The blob vanished between the 412 and the re-read — an unexpected
+                    # state, since a blob must exist once the graph is stored.  Returning
+                    # Failure surfaces the anomaly rather than silently dropping the task.
+                    logger.error(
+                        f"412 on Started write but re-read returned None for task "
+                        f"{self.task.task_id}; blob should always exist after graph creation. "
+                        "Returning Failure to avoid stalling the graph."
+                    )
+                    return TaskResult(
+                        task_id=self.task.task_id,
+                        graph_id=self.task.graph_id,
+                        status=TaskStatus.Failure,
+                        errors=["412 on Started write; re-read returned None (blob vanished)"],
+                    )
+
+                if _reread.status.finished:
+                    # Another worker already reached a terminal state — skip execution.
+                    logger.info(
+                        f"Task {self.task.task_id} reached terminal state {_reread.status!r} "
+                        "after 412 on Started write; skipping execution"
+                    )
+                    try:
+                        await self.complete_message()
+                    except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                        logger.warning(
+                            f"Failed to complete message after 412 skip for task {self.task.task_id}; "
+                            "SB will redeliver",
+                            exc_info=True,
+                        )
+                    return TaskResult(
+                        task_id=self.task.task_id,
+                        graph_id=self.task.graph_id,
+                        status=_reread.status,
+                    )
+
+                if _reread.status == TaskStatus.Started:
+                    # Another worker won the CAS and is executing — yield to that worker.
+                    logger.info(
+                        f"Task {self.task.task_id} is already Started by another worker "
+                        "(412 on Started write); completing message without executing"
+                    )
+                    try:
+                        await self.complete_message()
+                    except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                        logger.warning(
+                            f"Failed to complete message after 412 yield for task {self.task.task_id}; "
+                            "SB will redeliver",
+                            exc_info=True,
+                        )
+                    return TaskResult(
+                        task_id=self.task.task_id,
+                        graph_id=self.task.graph_id,
+                        status=TaskStatus.Started,
+                    )
+
+                # Unexpected status after 412 — neither finished nor Started.
+                logger.error(
+                    f"412 on Started write but re-read returned unexpected status "
+                    f"{_reread.status!r} for task {self.task.task_id}; "
+                    "returning Failure to avoid stalling the graph."
+                )
+                return TaskResult(
+                    task_id=self.task.task_id,
+                    graph_id=self.task.graph_id,
+                    status=TaskStatus.Failure,
+                    errors=[f"412 on Started write; re-read returned unexpected status {_reread.status!r}"],
+                )
+
+        # We successfully wrote Started — we own execution from here.
+        # Subsequent writes (RetriesExhausted, final result) are unconditional:
+        # no other worker can simultaneously write a terminal result without also
+        # passing through the Started ETag write we just won.
 
         # Immediately record an attempt
         self.task.record_attempt()
@@ -362,11 +474,20 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             #   - The blob hasn't changed since load_graph (412 if etag mismatch)
             # If either check fails, skip — nothing to do.
             task_result_slim = graph.results.get(ready_task.task_id)
-            lease_id = await self.storage_interface.try_acquire_lease(
-                ready_task.task_id,
-                graph_id,
-                etag=task_result_slim.etag if task_result_slim else None,
-            )
+            try:
+                lease_id = await self.storage_interface.try_acquire_lease(
+                    ready_task.task_id,
+                    graph_id,
+                    etag=task_result_slim.etag if task_result_slim else None,
+                )
+            except exc.BoilermakerStorageError:
+                logger.warning(
+                    f"try_acquire_lease raised an unexpected error for ready task "
+                    f"{ready_task.task_id} in graph {graph_id}; "
+                    "skipping task — it will be retried on redelivery.",
+                    exc_info=True,
+                )
+                continue
             if lease_id is None:
                 logger.debug(
                     f"Skipping task {ready_task.task_id} in graph {graph_id}: "
@@ -385,10 +506,13 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
 
                 # Step 3: Write Scheduled status. No etag needed — we already
                 # verified the blob was unmodified when we acquired the lease.
-                # The lease prevents any other writer from touching this blob.
+                # Pass lease_id so the Azure SDK rejects any writer that does
+                # not hold the lease, closing the race where a worker that picks
+                # up the just-published SB message writes Started before this
+                # Scheduled write completes.
                 try:
                     result = graph.schedule_task(ready_task.task_id)
-                    await self.storage_interface.store_task_result(result)
+                    await self.storage_interface.store_task_result(result, lease_id=lease_id)
                 except exc.BoilermakerStorageError:
                     logger.warning(
                         f"Failed to write Scheduled status for task {ready_task.task_id} "

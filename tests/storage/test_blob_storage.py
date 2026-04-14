@@ -388,6 +388,35 @@ async def test_store_task_result_raises_storage_error_on_etag_mismatch(blob_stor
         assert "match_condition" in call_kwargs
 
 
+async def test_store_task_result_with_lease_id_forwards_lease_to_upload(blob_storage, sample_task_result):
+    """When lease_id is provided, upload_blob must receive it as the ``lease`` kwarg.
+
+    The Azure SDK uses the ``lease`` kwarg to enforce that only the lease holder
+    can write. If it is not forwarded, the blob service ignores the held lease
+    and any concurrent writer can overwrite the blob (the bug fixed by BMO-31).
+    """
+    with patch.object(blob_storage, "upload_blob", new_callable=AsyncMock) as mock_upload:
+        await blob_storage.store_task_result(sample_task_result, lease_id="test-lease-id-abc")
+
+        assert mock_upload.call_count == 1
+        call_kwargs = mock_upload.call_args[1]
+        assert call_kwargs.get("lease") == "test-lease-id-abc"
+
+
+async def test_store_task_result_without_lease_id_omits_lease_kwarg(blob_storage, sample_task_result):
+    """When lease_id is not provided, upload_blob must NOT receive a ``lease`` kwarg.
+
+    Passing lease=None to the Azure SDK may cause unexpected behaviour on blobs
+    that have no active lease. The kwarg must be omitted entirely.
+    """
+    with patch.object(blob_storage, "upload_blob", new_callable=AsyncMock) as mock_upload:
+        await blob_storage.store_task_result(sample_task_result)
+
+        assert mock_upload.call_count == 1
+        call_kwargs = mock_upload.call_args[1]
+        assert "lease" not in call_kwargs
+
+
 async def test_store_task_result_without_graph_id(blob_storage, sample_task):
     """Test storing TaskResult without graph_id."""
     task_result = TaskResult(

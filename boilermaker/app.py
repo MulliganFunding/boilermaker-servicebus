@@ -450,7 +450,7 @@ class Boilermaker:
                 # verified the blob was unmodified when we acquired the lease.
                 try:
                     result = loaded_graph.schedule_task(task.task_id)
-                    await self.results_storage.store_task_result(result)
+                    await self.results_storage.store_task_result(result, lease_id=lease_id)
                 except BoilermakerStorageError:
                     logger.warning(
                         f"Failed to write Scheduled status for root task {task.task_id} in graph "

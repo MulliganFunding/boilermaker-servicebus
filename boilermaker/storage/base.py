@@ -33,11 +33,22 @@ class StorageInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def store_task_result(self, task_result: TaskResult | TaskResultSlim, etag: str | None = None) -> None:
+    async def store_task_result(
+        self,
+        task_result: TaskResult | TaskResultSlim,
+        etag: str | None = None,
+        lease_id: str | None = None,
+    ) -> None:
         """Stores a TaskResult to storage.
 
         Args:
-            task_result: The TaskResult instance to storage.
+            task_result: The TaskResult instance to store.
+            etag: Optional ETag for conditional write (If-Match). When provided,
+                the write is rejected (412) if the blob has been modified since
+                the ETag was observed.
+            lease_id: Optional lease ID. When provided, the write is sent as the
+                lease holder, so the storage backend rejects any writer that does
+                not hold the lease.
         """
         raise NotImplementedError
 

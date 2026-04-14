@@ -139,7 +139,7 @@ async def test_etag_passed_to_lease_acquisition(evaluator_context):
 
 
 async def test_store_task_result_called_without_etag(evaluator_context):
-    """When lease is held, store_task_result must be called without etag kwargs."""
+    """When lease is held, store_task_result must omit etag and include lease_id."""
     evaluator_context.prep_task_to_succeed()
 
     async with evaluator_context.with_regular_assertions(
@@ -149,9 +149,14 @@ async def test_store_task_result_called_without_etag(evaluator_context):
         # Get the scheduling write calls (beyond started + result)
         others = ctx.get_other_storage_calls()
         for scheduling_call in others:
-            # The call should NOT have etag kwarg
             assert "etag" not in scheduling_call.kwargs, (
                 "store_task_result in scheduling path must not pass etag when lease is held"
+            )
+            assert "lease_id" in scheduling_call.kwargs, (
+                "store_task_result in scheduling path must pass lease_id when lease is held"
+            )
+            assert scheduling_call.kwargs["lease_id"] == "mock-lease-id", (
+                "store_task_result must forward the acquired lease_id to enforce exclusivity"
             )
 
 
@@ -585,4 +590,39 @@ async def test_publish_graph_publish_failure_skips_store(app, mock_storage):
     # Lease must still be released despite publish failure
     assert mock_storage.release_lease.call_count >= 1, (
         "release_lease must be called even when publish fails"
+    )
+
+
+async def test_publish_graph_passes_lease_id_to_store_task_result(app, mock_storage):
+    """publish_graph must pass the acquired lease_id to store_task_result.
+
+    Verifies that the scheduling write in publish_graph enforces lease exclusivity
+    by forwarding the lease_id kwarg to store_task_result, matching the pattern in
+    continue_graph.
+    """
+
+    async def root_fn(state):
+        return "root"
+
+    app.register_async(root_fn)
+
+    graph = TaskGraph()
+    root = app.create_task(root_fn)
+    graph.add_task(root)
+    list(graph.generate_pending_results())
+
+    app.results_storage = mock_storage
+    mock_storage.store_graph.return_value = graph
+    mock_storage.load_graph.return_value = graph
+    mock_storage.try_acquire_lease.return_value = "expected-lease-id"
+
+    await app.publish_graph(graph)
+
+    assert mock_storage.store_task_result.call_count >= 1, (
+        "store_task_result must be called for the root task scheduling write"
+    )
+    scheduling_write = mock_storage.store_task_result.call_args_list[-1]
+    assert scheduling_write.kwargs.get("lease_id") == "expected-lease-id", (
+        "publish_graph must pass lease_id to store_task_result so the Azure Blob "
+        "service enforces lease exclusivity during the Scheduled write"
     )

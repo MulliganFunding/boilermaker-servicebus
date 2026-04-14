@@ -965,6 +965,329 @@ async def test_retries_exhausted_continue_graph_error_does_not_propagate(
     retries_exhausted_scenario.assert_msg_dead_lettered()
 
 
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# Crash-recovery: generate_scheduled_tasks() integration
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+async def test_crash_recovery_publishes_scheduled_task(evaluator_context, app):
+    """continue_graph re-publishes a task already in Scheduled status.
+
+    Scenario: a prior invocation wrote Scheduled to blob but crashed before
+    publishing the Service Bus message.  On redelivery, continue_graph must
+    detect the orphaned Scheduled task and re-publish it.  The blob is already
+    in Scheduled state so no blob write should occur for the re-published task.
+    """
+    from boilermaker.task import TaskResultSlim
+
+    async def root_task(state):
+        return "root"
+
+    async def orphaned_child(state):
+        return "orphaned"
+
+    app.register_many_async([root_task, orphaned_child])
+
+    root = app.create_task(root_task)
+    child = app.create_task(orphaned_child)
+
+    graph = TaskGraph()
+    graph.add_task(root)
+    graph.add_task(child, parent_ids=[root.task_id])
+    list(graph.generate_pending_results())
+
+    # Root succeeded — makes child ready.
+    graph.add_result(TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    # Child is already in Scheduled state (prior worker wrote blob but crashed before SB publish).
+    # The etag simulates the value returned by Azure after the blob write.
+    scheduled_slim = TaskResultSlim(
+        task_id=child.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Scheduled,
+        etag="etag-scheduled-child",
+    )
+    graph.results[child.task_id] = scheduled_slim
+
+    evaluator_context.graph = graph
+    evaluator_context.mock_storage.load_graph.return_value = graph
+
+    completed = TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success)
+    await evaluator_context.evaluator.continue_graph(completed)
+
+    published = evaluator_context.get_scheduled_messages()
+    published_ids = {msg.task.task_id for msg in published}
+
+    # The orphaned child must be re-published by the crash-recovery loop.
+    assert child.task_id in published_ids, (
+        "Scheduled task must be re-published by crash-recovery loop"
+    )
+
+
+async def test_crash_recovery_does_not_write_blob_for_scheduled_task(evaluator_context, app, mock_storage):
+    """continue_graph must NOT call store_task_result for a task already in Scheduled status.
+
+    The blob is already correct — no write is needed.  Only publish_task should be called.
+    """
+    from boilermaker.task import TaskResultSlim
+
+    async def root_task(state):
+        return "root"
+
+    async def orphaned_child(state):
+        return "orphaned"
+
+    app.register_many_async([root_task, orphaned_child])
+
+    root = app.create_task(root_task)
+    child = app.create_task(orphaned_child)
+
+    graph = TaskGraph()
+    graph.add_task(root)
+    graph.add_task(child, parent_ids=[root.task_id])
+    list(graph.generate_pending_results())
+
+    graph.add_result(TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    scheduled_slim = TaskResultSlim(
+        task_id=child.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Scheduled,
+        etag="etag-scheduled-child",
+    )
+    graph.results[child.task_id] = scheduled_slim
+
+    evaluator_context.graph = graph
+    mock_storage.store_task_result.reset_mock()
+
+    completed = TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success)
+    await evaluator_context.evaluator.continue_graph(completed)
+
+    # store_task_result must not be called for the already-Scheduled task.
+    # (It might be called zero times total if no Pending tasks existed.)
+    store_calls = mock_storage.store_task_result.call_args_list
+    scheduled_writes = [
+        call for call in store_calls
+        if hasattr(call.args[0], "task_id") and call.args[0].task_id == child.task_id
+    ]
+    assert len(scheduled_writes) == 0, (
+        "store_task_result must NOT be called for a task already in Scheduled status"
+    )
+
+
+async def test_crash_recovery_releases_lease(evaluator_context, app, mock_storage):
+    """continue_graph must release the lease after re-publishing a Scheduled task."""
+    from boilermaker.task import TaskResultSlim
+
+    async def root_task(state):
+        return "root"
+
+    async def orphaned_child(state):
+        return "orphaned"
+
+    app.register_many_async([root_task, orphaned_child])
+
+    root = app.create_task(root_task)
+    child = app.create_task(orphaned_child)
+
+    graph = TaskGraph()
+    graph.add_task(root)
+    graph.add_task(child, parent_ids=[root.task_id])
+    list(graph.generate_pending_results())
+
+    graph.add_result(TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    scheduled_slim = TaskResultSlim(
+        task_id=child.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Scheduled,
+        etag="etag-scheduled-child",
+    )
+    graph.results[child.task_id] = scheduled_slim
+
+    evaluator_context.graph = graph
+    mock_storage.release_lease.reset_mock()
+
+    completed = TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success)
+    await evaluator_context.evaluator.continue_graph(completed)
+
+    # release_lease must be called for the re-published Scheduled task.
+    release_calls = mock_storage.release_lease.call_args_list
+    released_task_ids = {call.args[0] for call in release_calls}
+    assert child.task_id in released_task_ids, (
+        "release_lease must be called for the re-published Scheduled task"
+    )
+
+
+async def test_crash_recovery_skips_when_lease_not_acquired(evaluator_context, app, mock_storage):
+    """When try_acquire_lease returns None for a Scheduled task, it must be skipped (not published)."""
+    from boilermaker.task import TaskResultSlim
+
+    async def root_task(state):
+        return "root"
+
+    async def orphaned_child(state):
+        return "orphaned"
+
+    app.register_many_async([root_task, orphaned_child])
+
+    root = app.create_task(root_task)
+    child = app.create_task(orphaned_child)
+
+    graph = TaskGraph()
+    graph.add_task(root)
+    graph.add_task(child, parent_ids=[root.task_id])
+    list(graph.generate_pending_results())
+
+    graph.add_result(TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    scheduled_slim = TaskResultSlim(
+        task_id=child.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Scheduled,
+        etag="etag-scheduled-child",
+    )
+    graph.results[child.task_id] = scheduled_slim
+
+    evaluator_context.graph = graph
+    # All lease acquisitions fail (another worker holds the lease).
+    mock_storage.try_acquire_lease.return_value = None
+
+    completed = TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success)
+    await evaluator_context.evaluator.continue_graph(completed)
+
+    published = evaluator_context.get_scheduled_messages()
+    published_ids = {msg.task.task_id for msg in published}
+
+    assert child.task_id not in published_ids, (
+        "Scheduled task must be skipped when lease acquisition fails"
+    )
+    # release_lease must NOT be called when lease was not acquired.
+    mock_storage.release_lease.assert_not_called()
+
+
+async def test_crash_recovery_storage_error_in_try_acquire_lease_continues_to_next_task(
+    evaluator_context, app, mock_storage
+):
+    """When try_acquire_lease raises BoilermakerStorageError in the crash-recovery loop,
+    the loop must continue to the next task and must not propagate the exception.
+
+    Scenario: two tasks are pre-existing in Scheduled status.  try_acquire_lease raises
+    BoilermakerStorageError for the first one (e.g. 503 from Azure) and returns a
+    valid lease_id for the second.  The first task must be skipped (not published, no
+    release_lease call for it), the second must be re-published normally, and no
+    exception must escape continue_graph.
+    """
+    from boilermaker.task import TaskResultSlim
+
+    async def root_task(state):
+        return "root"
+
+    async def orphaned_first(state):
+        return "orphaned_first"
+
+    async def orphaned_second(state):
+        return "orphaned_second"
+
+    app.register_many_async([root_task, orphaned_first, orphaned_second])
+
+    root = app.create_task(root_task)
+    first = app.create_task(orphaned_first)
+    second = app.create_task(orphaned_second)
+
+    graph = TaskGraph()
+    graph.add_task(root)
+    graph.add_task(first, parent_ids=[root.task_id])
+    graph.add_task(second, parent_ids=[root.task_id])
+    list(graph.generate_pending_results())
+
+    graph.add_result(TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    for task in (first, second):
+        graph.results[task.task_id] = TaskResultSlim(
+            task_id=task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Scheduled,
+            etag=f"etag-{task.task_id}",
+        )
+
+    evaluator_context.graph = graph
+
+    # try_acquire_lease raises for 'first', returns a valid lease_id for 'second'.
+    lease_id_second = "lease-second"
+    mock_storage.try_acquire_lease.side_effect = [
+        exc.BoilermakerStorageError("503 Service Unavailable"),
+        lease_id_second,
+    ]
+
+    completed = TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success)
+
+    # Must not raise — BoilermakerStorageError from try_acquire_lease must be caught.
+    await evaluator_context.evaluator.continue_graph(completed)
+
+    published = evaluator_context.get_scheduled_messages()
+    published_ids = {msg.task.task_id for msg in published}
+
+    assert first.task_id not in published_ids, (
+        "Task whose lease acquisition raised BoilermakerStorageError must not be published"
+    )
+    assert second.task_id in published_ids, (
+        "Task after the failed lease acquisition must still be re-published"
+    )
+
+    # release_lease must only be called for 'second' (the task whose lease was acquired).
+    release_calls = mock_storage.release_lease.call_args_list
+    released_task_ids = {call.args[0] for call in release_calls}
+    assert first.task_id not in released_task_ids, (
+        "release_lease must not be called for the task whose lease acquisition raised"
+    )
+    assert second.task_id in released_task_ids, (
+        "release_lease must be called for the task whose lease was successfully acquired"
+    )
+
+
+async def test_crash_recovery_does_not_republish_newly_scheduled_tasks(evaluator_context, app):
+    """Tasks scheduled during this invocation's ready-task loop must not be re-published.
+
+    The crash-recovery loop must only operate on tasks that were already in Scheduled
+    status when the graph was loaded, not tasks that were scheduled in this same call.
+    """
+
+    async def root_task(state):
+        return "root"
+
+    async def pending_child(state):
+        return "pending_child"
+
+    app.register_many_async([root_task, pending_child])
+
+    root = app.create_task(root_task)
+    child = app.create_task(pending_child)
+
+    graph = TaskGraph()
+    graph.add_task(root)
+    graph.add_task(child, parent_ids=[root.task_id])
+    list(graph.generate_pending_results())
+
+    # Root succeeded — child is Pending and will be scheduled by the ready-task loop.
+    graph.add_result(TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    evaluator_context.graph = graph
+
+    completed = TaskResult(task_id=root.task_id, graph_id=graph.graph_id, status=TaskStatus.Success)
+    await evaluator_context.evaluator.continue_graph(completed)
+
+    published = evaluator_context.get_scheduled_messages()
+    published_ids = [msg.task.task_id for msg in published]
+
+    # child should appear exactly once (from the ready-task loop), not twice.
+    child_publish_count = published_ids.count(child.task_id)
+    assert child_publish_count == 1, (
+        f"Pending->Scheduled task must be published exactly once, got {child_publish_count}. "
+        "Crash-recovery loop must not re-publish tasks scheduled in this same invocation."
+    )
+
+
 async def test_validation_error_in_load_graph_raises_continue_graph_error(evaluator_context, mock_storage):
     """ValidationError raised by load_graph must be wrapped as BoilermakerStorageError,
     enter the retry loop, exhaust retries, and surface as ContinueGraphError — not as a raw
@@ -1350,25 +1673,20 @@ async def test_continue_graph_does_not_raise_when_publish_fails(evaluator_contex
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
-# acks_early warning in TaskGraphEvaluator.__init__
+# acks_early=True raises ValueError in TaskGraphEvaluator.__init__
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 
-def test_acks_early_true_emits_warning_at_construction(app, mockservicebus, mock_storage, make_message, caplog):
-    """Constructing TaskGraphEvaluator with acks_early=True must emit a warning log.
+def test_acks_early_true_raises_at_construction(app, mockservicebus, mock_storage, make_message):
+    """Constructing TaskGraphEvaluator with acks_early=True must raise ValueError.
 
-    The warning must contain the task ID and describe the irrecoverable-Started risk.
-    Construction must succeed — no ValueError is raised.
-
-    acks_early is a property that returns not acks_late, so acks_late=False triggers the warning.
+    acks_early is a computed property (not acks_late), so setting acks_late=False triggers the error.
     """
-    import logging
 
     async def acks_early_task_fn(state):
         return "ok"
 
     app.register_async(acks_early_task_fn)
-    # acks_early is a computed property: acks_early == not acks_late
     early_task = Task.si(acks_early_task_fn, acks_late=False)
     early_task.msg = make_message(early_task)
 
@@ -1377,8 +1695,8 @@ def test_acks_early_true_emits_warning_at_construction(app, mockservicebus, mock
     async def noop_publisher(task, *args, **kwargs):
         pass
 
-    with caplog.at_level(logging.WARNING, logger="boilermaker.app"):
-        evaluator = TaskGraphEvaluator(
+    with pytest.raises(ValueError, match="acks_early=True"):
+        TaskGraphEvaluator(
             mockservicebus._receiver,
             early_task,
             noop_publisher,
@@ -1386,17 +1704,6 @@ def test_acks_early_true_emits_warning_at_construction(app, mockservicebus, mock
             state=app.state,
             storage_interface=mock_storage,
         )
-
-    # Construction must succeed — no ValueError
-    assert evaluator is not None
-
-    warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any(early_task.task_id in msg for msg in warning_messages), (
-        f"Expected warning to contain task_id {early_task.task_id!r}. Got: {warning_messages}"
-    )
-    assert any("Started" in msg for msg in warning_messages), (
-        f"Expected warning to describe the irrecoverable-Started risk. Got: {warning_messages}"
-    )
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -1554,3 +1861,236 @@ async def test_continue_graph_publish_does_not_override_message_id(success_scena
                 f"continue_graph publish for task {msg.task.function_name} must not "
                 f"override unique_msg_id, but got '{unique_msg_id}'"
             )
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# F3/F4: ETag-based CAS on Started write
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+async def test_started_write_passes_etag_from_initial_read(evaluator_context, mock_storage):
+    """When load_task_result returns a Pending blob with an ETag, the Started write
+    must be called with that ETag so concurrent workers cannot both win the CAS.
+
+    This is the core safety property of F3: the Started write is conditional on the
+    blob not having been modified since our read.
+    """
+    from unittest.mock import patch
+
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    graph = evaluator_context.graph
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = graph.graph_id
+
+    observed_etag = "W/\"abc123\""
+
+    # Arrange: the task is Pending with a known ETag.
+    pending_slim = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(graph.graph_id),
+        status=TaskStatus.Pending,
+        etag=observed_etag,
+    )
+    mock_storage.load_task_result.return_value = pending_slim
+
+    # The loaded graph must reflect a Success result so the status-mismatch check passes.
+    graph.add_result(
+        TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+    )
+    mock_storage.load_graph.return_value = graph
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        mock_eval_task.return_value = TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+        await evaluator_context.evaluator()
+
+    # The first store_task_result call is the Started write — it must carry the ETag.
+    started_call = mock_storage.store_task_result.call_args_list[0]
+    actual_etag = started_call.kwargs.get("etag") or (
+        started_call.args[1] if len(started_call.args) > 1 else None
+    )
+    assert actual_etag == observed_etag, (
+        f"Started write must pass etag={observed_etag!r} from the initial read, got {actual_etag!r}"
+    )
+
+
+async def test_412_on_started_write_with_terminal_reread_skips_execution(evaluator_context, mock_storage):
+    """When the Started write gets a 412 and the re-read shows a terminal status,
+    message_handler must skip execution and complete the message.
+
+    This covers the race where worker W1 wins the CAS and writes Success before W2's
+    Started write arrives.  W2 gets 412, re-reads Success, and gracefully yields.
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    graph = evaluator_context.graph
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = graph.graph_id
+
+    # Initial read returns Pending — task has not started yet.
+    pending_slim = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(graph.graph_id),
+        status=TaskStatus.Pending,
+        etag="W/\"etag-v1\"",
+    )
+    # After the 412, the re-read returns Success (another worker completed the task).
+    success_slim = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(graph.graph_id),
+        status=TaskStatus.Success,
+    )
+    mock_storage.load_task_result.side_effect = [pending_slim, success_slim]
+
+    # The Started write raises 412.
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError(
+        "412 Precondition Failed", status_code=412
+    )
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    # eval_task must NOT have been called — another worker already finished.
+    mock_eval_task.assert_not_called()
+
+    # The returned result must reflect the terminal status from the re-read.
+    assert result is not None
+    assert result.status == TaskStatus.Success, (
+        f"Expected Success (from re-read), got {result.status}"
+    )
+
+    # Message must have been completed (not left unsettled).
+    assert evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "complete_message must be called after 412 + terminal re-read"
+    )
+
+
+async def test_412_on_started_write_with_started_reread_yields_to_other_worker(evaluator_context, mock_storage):
+    """When the Started write gets a 412 and the re-read shows Started (another worker
+    is executing), message_handler must complete the message and return without executing.
+
+    This covers the race where worker W1 wins the CAS (writes Started) and W2's Started
+    write arrives late.  W2 gets 412, re-reads Started, completes its message, and yields.
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    graph = evaluator_context.graph
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = graph.graph_id
+
+    # Initial read returns Pending.
+    pending_slim = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(graph.graph_id),
+        status=TaskStatus.Pending,
+        etag="W/\"etag-v1\"",
+    )
+    # After the 412, the re-read returns Started (another worker won the CAS and is running).
+    started_slim = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(graph.graph_id),
+        status=TaskStatus.Started,
+    )
+    mock_storage.load_task_result.side_effect = [pending_slim, started_slim]
+
+    # The Started write raises 412.
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError(
+        "412 Precondition Failed", status_code=412
+    )
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    # eval_task must NOT have been called — we yielded to the other worker.
+    mock_eval_task.assert_not_called()
+
+    # The returned result carries Started status (we deferred to the other worker).
+    assert result is not None
+    assert result.status == TaskStatus.Started, (
+        f"Expected Started (yielded to other worker), got {result.status}"
+    )
+
+    # Message must have been completed so it is not redelivered.
+    assert evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "complete_message must be called after 412 + Started re-read (yield path)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_412_on_started_write_with_none_reread_returns_failure(evaluator_context, mock_storage):
+    """When the Started write gets a 412 and the subsequent re-read returns None (blob
+    vanished), message_handler must return a Failure result and must NOT silently complete
+    the message as if another worker is handling the task.
+
+    Returning Failure surfaces the anomaly so the graph is not permanently stalled.
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    graph = evaluator_context.graph
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = graph.graph_id
+
+    # Initial read returns Pending with an ETag so the CAS write is conditional.
+    pending_slim = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(graph.graph_id),
+        status=TaskStatus.Pending,
+        etag="W/\"etag-v1\"",
+    )
+    # After the 412 the re-read returns None — the blob has vanished unexpectedly.
+    mock_storage.load_task_result.side_effect = [pending_slim, None]
+
+    # The Started write raises 412.
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError(
+        "412 Precondition Failed", status_code=412
+    )
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    # eval_task must NOT have been called — the 412 path exits before execution.
+    mock_eval_task.assert_not_called()
+
+    # The returned result must be Failure, not Started (which would falsely imply
+    # another worker is handling the task).
+    assert result is not None
+    assert result.status == TaskStatus.Failure, (
+        f"Expected Failure when re-read returns None after 412, got {result.status}"
+    )
+
+    # The message must NOT have been completed — suppressing settlement allows
+    # redelivery so the task is not permanently dropped.
+    assert not evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "complete_message must NOT be called when re-read returns None after 412"
+    )

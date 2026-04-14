@@ -274,11 +274,22 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                     reason="DeserializationError",
                 ) from e
 
-    async def store_task_result(self, task_result: TaskResult | TaskResultSlim, etag: str | None = None) -> None:
+    async def store_task_result(
+        self,
+        task_result: TaskResult | TaskResultSlim,
+        etag: str | None = None,
+        lease_id: str | None = None,
+    ) -> None:
         """Stores a TaskResult to Azure Blob Storage.
 
         Args:
             task_result: The TaskResult instance to store.
+            etag: Optional ETag for conditional write (If-Match). When provided,
+                the write is rejected (412) if the blob has been modified since
+                the ETag was observed.
+            lease_id: Optional lease ID. When provided, the write is forwarded to
+                the Azure SDK as the ``lease`` kwarg so the service rejects the
+                upload if the caller is not the current lease holder.
         """
         with tracer.start_as_current_span("store_task_result"):
             fname = str(task_result.storage_path)
@@ -294,6 +305,8 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             if etag:
                 concurrency_kwargs["etag"] = etag
                 concurrency_kwargs["match_condition"] = MatchConditions.IfNotModified
+            if lease_id:
+                concurrency_kwargs["lease"] = lease_id
 
             try:
                 await self.upload_blob(
