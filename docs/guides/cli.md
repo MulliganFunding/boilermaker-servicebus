@@ -99,3 +99,85 @@ Recovery output:
 
 !!! warning "Recovery re-executes tasks"
     Recovery publishes the task again with `acks_late` semantics. If the original task execution is still running (e.g. a very slow worker), both copies may run concurrently. Ensure your task handlers are idempotent before using `--recover`.
+
+### `purge`
+
+Delete old task-result blobs from Azure Blob Storage. Graphs with in-progress tasks are automatically skipped.
+
+```sh
+boilermaker-graph purge \
+    --storage-url <url> \
+    --container <name> \
+    --older-than DAYS \
+    [--dry-run] \
+    [-v]
+```
+
+**Arguments**
+
+| Argument | Required | Description |
+|---|---|---|
+| `--storage-url` | Yes | Azure Blob Storage account URL (e.g. `https://myaccount.blob.core.windows.net`) |
+| `--container` | Yes | Blob container name |
+| `--older-than DAYS` | Yes | Delete blobs last modified more than `DAYS` days ago (1–30 inclusive) |
+| `--dry-run` | No | Print what would be deleted without deleting any blobs |
+| `-v` / `--verbose` | No | Enable debug logging |
+
+**Dry-run output**
+
+Use `--dry-run` to preview what will be deleted before committing:
+
+```
+Purge plan: blobs last modified before 2026-04-07 (older than 7 days)
+
+Graph: 019d8c0c-bd9b-7c23-be84-4d0799d7ecd4  (12 blobs)
+Graph: 019d8c0c-bd9b-7c23-be84-4d0799d7ecd5  (3 blobs)
+
+Total: 2 graphs, 15 blobs
+[DRY RUN] No blobs were deleted.
+```
+
+Graphs with in-progress tasks are printed to stderr and excluded from the plan:
+
+```
+SKIP: Graph 019d8c0c-... has in-progress tasks (Scheduled: 1, Started: 0, Retry: 2). Skipping.
+```
+
+**Post-deletion output**
+
+After a successful (non-dry-run) run:
+
+```
+Deleted 15 blobs across 2 graphs.
+Skipped 1 graph(s) due to in-progress tasks.
+```
+
+**Exit codes**
+
+| Code | Meaning |
+|---|---|
+| `0` | Success — no errors, no skipped graphs (or dry-run completed) |
+| `1` | One or more graphs skipped due to in-progress tasks |
+| `2` | Unrecoverable error (auth failure, container not found, all deletions failed) |
+
+!!! warning "Deletion is irreversible"
+    Deleted blobs cannot be recovered unless Azure soft-delete is enabled on the storage account. Always run with `--dry-run` first to confirm the scope. Concurrent `purge` invocations against the same container are safe — any blob already deleted by a concurrent process returns a 404, which is treated as a no-op.
+
+**Recommended usage pattern**
+
+Run `--dry-run` first to validate the deletion scope, then execute without it:
+
+```sh
+# Step 1: preview what will be deleted
+boilermaker-graph purge \
+    --storage-url "$AZURE_STORAGE_URL" \
+    --container "$CONTAINER_NAME" \
+    --older-than 7 \
+    --dry-run
+
+# Step 2: execute deletion after confirming the plan
+boilermaker-graph purge \
+    --storage-url "$AZURE_STORAGE_URL" \
+    --container "$CONTAINER_NAME" \
+    --older-than 7
+```

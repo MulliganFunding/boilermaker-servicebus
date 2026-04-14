@@ -1,18 +1,23 @@
 """Tests for boilermaker.cli — TaskGraph inspection CLI."""
 
 import re
+from datetime import datetime, timedelta, UTC
 from unittest import mock
 
 import pytest
+from azure.core.exceptions import HttpResponseError
 from boilermaker.cli import (
     _short_task_id,
+    _validate_older_than,
     build_parser,
     EXIT_ERROR,
     EXIT_HEALTHY,
     EXIT_STALLED,
     format_graph_table,
     inspect_graph,
+    purge_old_results,
 )
+from boilermaker.exc import BoilermakerStorageError
 from boilermaker.task import Task, TaskGraph, TaskResultSlim, TaskStatus
 from boilermaker.task.task_id import TaskId
 
@@ -395,3 +400,512 @@ class TestInspectGraphRecovery:
 
         assert code == EXIT_STALLED
         mock_sb.close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Purge: helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_blob(name: str, last_modified: datetime) -> mock.MagicMock:
+    """Build a minimal BlobProperties-like mock."""
+    blob = mock.MagicMock()
+    blob.name = name
+    blob.last_modified = last_modified
+    return blob
+
+
+def _make_azure_blob_error(status_code: int) -> mock.MagicMock:
+    """Build an AzureBlobError mock with the given HTTP status code."""
+    from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
+
+    http_error = mock.MagicMock(spec=HttpResponseError)
+    http_error.reason = "Not Found"
+    http_error.status_code = status_code
+    http_error.message = f"HTTP {status_code}"
+    return AzureBlobError(http_error)
+
+
+async def _async_gen(items):
+    for item in items:
+        yield item
+
+
+def _make_purge_storage(
+    blob_list: list,
+    graph: TaskGraph | None = None,
+) -> mock.AsyncMock:
+    """Build a storage mock suitable for purge_old_results tests.
+
+    list_blobs returns the blob_list as an async generator.
+    load_graph returns the graph (or None).
+    delete_blob does nothing by default.
+    """
+    storage = mock.AsyncMock()
+    storage.task_result_prefix = "task-results"
+    storage.list_blobs = lambda prefix: _async_gen(blob_list)
+    storage.load_graph = mock.AsyncMock(return_value=graph)
+    storage.delete_blob = mock.AsyncMock()
+    return storage
+
+
+def _old(days: int = 10) -> datetime:
+    """Return a UTC datetime that is `days` days in the past."""
+    return datetime.now(UTC) - timedelta(days=days)
+
+
+def _new(hours: int = 1) -> datetime:
+    """Return a UTC datetime that is `hours` hours in the past (recent)."""
+    return datetime.now(UTC) - timedelta(hours=hours)
+
+
+# ---------------------------------------------------------------------------
+# _validate_older_than
+# ---------------------------------------------------------------------------
+
+
+class TestValidateOlderThan:
+    def test_accepts_minimum_value(self):
+        assert _validate_older_than("1") == 1
+
+    def test_accepts_maximum_value(self):
+        assert _validate_older_than("30") == 30
+
+    def test_accepts_midrange_value(self):
+        assert _validate_older_than("15") == 15
+
+    def test_rejects_zero(self):
+        with pytest.raises(Exception):
+            _validate_older_than("0")
+
+    def test_rejects_thirty_one(self):
+        with pytest.raises(Exception):
+            _validate_older_than("31")
+
+    def test_rejects_negative(self):
+        with pytest.raises(Exception):
+            _validate_older_than("-1")
+
+    def test_rejects_non_integer_string(self):
+        with pytest.raises(Exception):
+            _validate_older_than("seven")
+
+    def test_rejects_float_string(self):
+        with pytest.raises(Exception):
+            _validate_older_than("7.5")
+
+
+# ---------------------------------------------------------------------------
+# Purge: argument parsing
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeArgumentParsing:
+    def test_parses_required_args(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "purge",
+            "--storage-url", "https://example.blob.core.windows.net",
+            "--container", "my-container",
+            "--older-than", "7",
+        ])
+        assert args.command == "purge"
+        assert args.storage_url == "https://example.blob.core.windows.net"
+        assert args.container == "my-container"
+        assert args.older_than == 7
+        assert args.dry_run is False
+        assert args.verbose is False
+
+    def test_parses_dry_run_flag(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "purge",
+            "--storage-url", "https://example.blob.core.windows.net",
+            "--container", "my-container",
+            "--older-than", "7",
+            "--dry-run",
+        ])
+        assert args.dry_run is True
+
+    def test_parses_verbose_flag(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "purge",
+            "--storage-url", "https://example.blob.core.windows.net",
+            "--container", "my-container",
+            "--older-than", "7",
+            "-v",
+        ])
+        assert args.verbose is True
+
+    def test_older_than_zero_causes_parse_error(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([
+                "purge",
+                "--storage-url", "https://example.blob.core.windows.net",
+                "--container", "my-container",
+                "--older-than", "0",
+            ])
+
+    def test_older_than_thirty_one_causes_parse_error(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([
+                "purge",
+                "--storage-url", "https://example.blob.core.windows.net",
+                "--container", "my-container",
+                "--older-than", "31",
+            ])
+
+    def test_older_than_non_integer_causes_parse_error(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([
+                "purge",
+                "--storage-url", "https://example.blob.core.windows.net",
+                "--container", "my-container",
+                "--older-than", "abc",
+            ])
+
+
+# ---------------------------------------------------------------------------
+# purge_old_results: empty container
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeEmptyContainer:
+    async def test_empty_container_returns_healthy(self, capsys):
+        storage = _make_purge_storage(blob_list=[])
+        code = await purge_old_results(storage, older_than_days=7)
+        assert code == EXIT_HEALTHY
+
+    async def test_empty_container_prints_nothing_to_purge(self, capsys):
+        storage = _make_purge_storage(blob_list=[])
+        await purge_old_results(storage, older_than_days=7)
+        captured = capsys.readouterr()
+        assert "Nothing to purge." in captured.out
+
+
+# ---------------------------------------------------------------------------
+# purge_old_results: age eligibility
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeAgeEligibility:
+    def _make_complete_graph(self) -> TaskGraph:
+        graph = TaskGraph()
+        task = Task.default("do_work")
+        graph.add_task(task)
+        _set_result(graph, task, TaskStatus.Success)
+        return graph
+
+    async def test_graphs_newer_than_cutoff_are_skipped(self, capsys):
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _new()),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        code = await purge_old_results(storage, older_than_days=7)
+        assert code == EXIT_HEALTHY
+        # load_graph should NOT have been called (age filter excludes it)
+        storage.load_graph.assert_not_called()
+
+    async def test_graphs_older_than_cutoff_are_eligible(self):
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        await purge_old_results(storage, older_than_days=7)
+        storage.load_graph.assert_called_once()
+
+    async def test_graph_with_any_recent_blob_is_skipped(self):
+        """If max(last_modified) is newer than cutoff, skip the whole graph."""
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(15)),
+            _make_blob(f"task-results/{graph_id}/task-1.json", _new(1)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        await purge_old_results(storage, older_than_days=7)
+        # load_graph should NOT be called because max(last_modified) is recent
+        storage.load_graph.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# purge_old_results: missing graph.json
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeMissingGraphJson:
+    async def test_graph_without_graph_json_is_skipped(self, capsys):
+        graph_id = "019d8c0c-bd9b-7c23-be84-4d0799d7ecd4"
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/task-1.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs)
+        code = await purge_old_results(storage, older_than_days=7)
+        assert code == EXIT_HEALTHY
+        captured = capsys.readouterr()
+        assert "no graph.json" in captured.err
+        storage.load_graph.assert_not_called()
+        storage.delete_blob.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# purge_old_results: in-progress safety check
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeInProgressSafetyCheck:
+    def _make_graph_with_status(self, status: TaskStatus) -> TaskGraph:
+        graph = TaskGraph()
+        task = Task.default("work")
+        graph.add_task(task)
+        _set_result(graph, task, status)
+        return graph
+
+    async def test_scheduled_task_causes_skip(self, capsys):
+        graph = self._make_graph_with_status(TaskStatus.Scheduled)
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        code = await purge_old_results(storage, older_than_days=7)
+        assert code == EXIT_STALLED
+        captured = capsys.readouterr()
+        assert "in-progress tasks" in captured.err
+        storage.delete_blob.assert_not_called()
+
+    async def test_started_task_causes_skip(self, capsys):
+        graph = self._make_graph_with_status(TaskStatus.Started)
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        code = await purge_old_results(storage, older_than_days=7)
+        assert code == EXIT_STALLED
+        storage.delete_blob.assert_not_called()
+
+    async def test_retry_task_causes_skip(self, capsys):
+        graph = self._make_graph_with_status(TaskStatus.Retry)
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        code = await purge_old_results(storage, older_than_days=7)
+        assert code == EXIT_STALLED
+        storage.delete_blob.assert_not_called()
+
+    async def test_in_progress_skip_message_sent_to_stderr(self, capsys):
+        graph = self._make_graph_with_status(TaskStatus.Scheduled)
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        await purge_old_results(storage, older_than_days=7)
+        captured = capsys.readouterr()
+        assert graph_id in captured.err
+
+    async def test_skipped_in_progress_count_excludes_age_filtered_graphs(self, capsys):
+        """Summary line counts only graphs skipped for in-progress tasks, not age-filtered ones."""
+        # Graph A: old and eligible for deletion (all tasks complete)
+        graph_eligible = TaskGraph()
+        task_eligible = Task.default("completed_work")
+        graph_eligible.add_task(task_eligible)
+        _set_result(graph_eligible, task_eligible, TaskStatus.Success)
+        graph_eligible_id = str(graph_eligible.graph_id)
+
+        # Graph B: old but has in-progress tasks — must be skipped
+        graph_in_progress = self._make_graph_with_status(TaskStatus.Started)
+        graph_in_progress_id = str(graph_in_progress.graph_id)
+
+        blobs = [
+            _make_blob(f"task-results/{graph_eligible_id}/graph.json", _old(10)),
+            _make_blob(f"task-results/{graph_in_progress_id}/graph.json", _old(10)),
+        ]
+
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+        storage.list_blobs = lambda prefix: _async_gen(blobs)
+        storage.load_graph = mock.AsyncMock(
+            side_effect=lambda gid: graph_eligible if str(gid) == graph_eligible_id else graph_in_progress
+        )
+        storage.delete_blob = mock.AsyncMock()
+
+        code = await purge_old_results(storage, older_than_days=7)
+        assert code == EXIT_STALLED
+        captured = capsys.readouterr()
+        assert "Skipped 1 graph(s) due to in-progress tasks." in captured.out
+
+
+# ---------------------------------------------------------------------------
+# purge_old_results: dry-run
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeDryRun:
+    def _make_complete_graph(self) -> TaskGraph:
+        graph = TaskGraph()
+        task = Task.default("do_work")
+        graph.add_task(task)
+        _set_result(graph, task, TaskStatus.Success)
+        return graph
+
+    async def test_dry_run_does_not_call_delete_blob(self):
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+            _make_blob(f"task-results/{graph_id}/task-1.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        code = await purge_old_results(storage, older_than_days=7, dry_run=True)
+        assert code == EXIT_HEALTHY
+        storage.delete_blob.assert_not_called()
+
+    async def test_dry_run_output_contains_dry_run_marker(self, capsys):
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        await purge_old_results(storage, older_than_days=7, dry_run=True)
+        captured = capsys.readouterr()
+        assert "[DRY RUN]" in captured.out
+
+    async def test_dry_run_output_lists_eligible_graph(self, capsys):
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        await purge_old_results(storage, older_than_days=7, dry_run=True)
+        captured = capsys.readouterr()
+        assert graph_id in captured.out
+
+
+# ---------------------------------------------------------------------------
+# purge_old_results: deletion order and success summary
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeDeletionOrder:
+    def _make_complete_graph(self) -> TaskGraph:
+        graph = TaskGraph()
+        task = Task.default("do_work")
+        graph.add_task(task)
+        _set_result(graph, task, TaskStatus.Success)
+        return graph
+
+    async def test_result_blobs_deleted_before_graph_json(self):
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        graph_json_path = f"task-results/{graph_id}/graph.json"
+        task_blob_path = f"task-results/{graph_id}/task-1.json"
+        blobs = [
+            _make_blob(graph_json_path, _old(10)),
+            _make_blob(task_blob_path, _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        await purge_old_results(storage, older_than_days=7)
+
+        delete_calls = [call.args[0] for call in storage.delete_blob.call_args_list]
+        assert delete_calls[-1] == graph_json_path
+        assert task_blob_path in delete_calls[:-1]
+
+    async def test_successful_deletion_summary_on_stdout(self, capsys):
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+            _make_blob(f"task-results/{graph_id}/task-1.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        code = await purge_old_results(storage, older_than_days=7)
+        assert code == EXIT_HEALTHY
+        captured = capsys.readouterr()
+        assert "Deleted" in captured.out
+        assert "blobs" in captured.out
+        assert "graphs" in captured.out
+
+    async def test_successful_deletion_returns_healthy(self):
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        code = await purge_old_results(storage, older_than_days=7)
+        assert code == EXIT_HEALTHY
+
+
+# ---------------------------------------------------------------------------
+# purge_old_results: 404 AzureBlobError treated as no-op
+# ---------------------------------------------------------------------------
+
+
+class TestPurge404NoOp:
+    def _make_complete_graph(self) -> TaskGraph:
+        graph = TaskGraph()
+        task = Task.default("do_work")
+        graph.add_task(task)
+        _set_result(graph, task, TaskStatus.Success)
+        return graph
+
+    async def test_404_on_delete_is_treated_as_success(self):
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        storage.delete_blob.side_effect = _make_azure_blob_error(404)
+        code = await purge_old_results(storage, older_than_days=7)
+        # 404 is a no-op; the graph still counts as successfully handled
+        assert code == EXIT_HEALTHY
+
+    async def test_non_404_error_logged_as_warning(self, capsys):
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        storage.delete_blob.side_effect = _make_azure_blob_error(500)
+        code = await purge_old_results(storage, older_than_days=7)
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err or "Failed" in captured.err
+        # All deletions failed for the only graph, so EXIT_ERROR
+        assert code == EXIT_ERROR
+
+
+# ---------------------------------------------------------------------------
+# purge_old_results: listing error
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeListingError:
+    async def test_listing_error_returns_exit_error(self, capsys):
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+
+        async def _failing_gen(prefix):
+            raise RuntimeError("network failure")
+            yield  # make it a generator
+
+        storage.list_blobs = _failing_gen
+        code = await purge_old_results(storage, older_than_days=7)
+        assert code == EXIT_ERROR
+        captured = capsys.readouterr()
+        assert "ERROR" in captured.err
