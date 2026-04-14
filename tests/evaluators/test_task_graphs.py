@@ -703,6 +703,7 @@ async def test_schedule_task_value_error_does_not_propagate(evaluator_context):
 
     mock_graph = MagicMock(spec=TaskGraph)
     mock_graph.graph_id = real_graph.graph_id
+    mock_graph.results = {}
     # Sanity check: status must match the completed result's status
     mock_graph.get_status.return_value = TaskStatus.Success
     # generate_ready_tasks yields the ok_task (so schedule_task gets called)
@@ -739,6 +740,7 @@ async def test_message_settled_even_when_schedule_task_raises(evaluator_context,
     # Build a mock graph whose schedule_task always raises ValueError
     mock_graph = MagicMock(spec=TaskGraph)
     mock_graph.graph_id = real_graph.graph_id
+    mock_graph.results = {}
     mock_graph.get_status.return_value = TaskStatus.Success
     mock_graph.generate_ready_tasks.return_value = iter([ok_task])
     mock_graph.generate_failure_ready_tasks.return_value = iter([])
@@ -786,6 +788,7 @@ async def test_other_tasks_dispatched_when_one_raises_value_error(evaluator_cont
     # Build a mock graph wrapping the real one so we can selectively raise ValueError for sibling_a
     mock_graph = MagicMock(spec=TaskGraph)
     mock_graph.graph_id = graph.graph_id
+    mock_graph.results = {}
     mock_graph.get_status.return_value = TaskStatus.Success
     # Both siblings are ready
     mock_graph.generate_ready_tasks.return_value = iter([sa, sb])
@@ -1421,6 +1424,7 @@ async def test_status_mismatch_raises_continue_graph_error(evaluator_context, mo
     # completed_task_result.status we will pass to continue_graph.
     mock_graph = MagicMock(spec=TaskGraph)
     mock_graph.graph_id = graph.graph_id
+    mock_graph.results = {}
     # The completing task finished with Success, but the loaded blob reports Pending —
     # a mismatch that should trigger the status guard.
     mock_graph.get_status.return_value = TaskStatus.Pending
@@ -1500,3 +1504,53 @@ async def test_fail_open_on_load_task_result_storage_error(evaluator_context, mo
 
     # Execution should have produced a result, not silently skipped.
     assert result is not None, "message_handler must return a result on the fail-open path"
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# Fix F0: Retry publish uses differentiated message_id
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_retry_publish_uses_differentiated_message_id(retry_scenario):
+    """Retry publishes must use message_id '{task_id}:{attempt_number}' so that
+    Azure Service Bus duplicate detection does not silently drop retry messages.
+
+    The original scheduling publish uses bare task_id as message_id. A retry
+    for the same task_id would be deduped without a differentiated ID.
+
+    record_attempt() is called before the retry branch, so
+    task.attempts.attempts is already incremented (first retry = 1).
+    """
+    async with retry_scenario.with_regular_assertions(
+        compare_result=None,
+        compare_status=TaskStatus.Retry,
+        check_graph_loaded=False,
+    ) as ctx:
+        ctx.assert_messages_scheduled(1)
+        scheduled = ctx.get_scheduled_messages()
+        retry_msg = scheduled[0]
+        task = retry_msg.task
+        kwargs = retry_msg.kwargs
+
+        # The retry publish must pass unique_msg_id with the attempt-differentiated format
+        expected_msg_id = f"{task.task_id}:{task.attempts.attempts}"
+        actual_msg_id = kwargs.get("unique_msg_id")
+        assert actual_msg_id == expected_msg_id, (
+            f"Retry publish must use differentiated message_id. "
+            f"Expected '{expected_msg_id}', got '{actual_msg_id}'"
+        )
+
+
+async def test_continue_graph_publish_does_not_override_message_id(success_scenario):
+    """continue_graph publishes must NOT pass unique_msg_id, preserving fan-in
+    dedup where two workers racing to schedule the same ready task should
+    produce identical message_ids (bare task_id)."""
+    async with success_scenario.with_regular_assertions(
+        compare_result="OK",
+        compare_status=TaskStatus.Success,
+    ) as ctx:
+        scheduled = ctx.get_scheduled_messages()
+        for msg in scheduled:
+            unique_msg_id = msg.kwargs.get("unique_msg_id")
+            assert unique_msg_id is None, (
+                f"continue_graph publish for task {msg.task.function_name} must not "
+                f"override unique_msg_id, but got '{unique_msg_id}'"
+            )

@@ -8,7 +8,7 @@ resolution-markers = [
 
 [[package]]
 name = "aio-azure-clients-toolbox"
-version = "1.1.0"
+version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -22,9 +22,9 @@ dependencies = [
     { name = "azure-servicebus" },
     { name = "azure-storage-blob" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/64/39/ba2eb096f2335e4180483fb675e6d52556212a4bfd5b1f19d0704d32ab7a/aio_azure_clients_toolbox-1.1.0.tar.gz", hash = "sha256:8bb36893cd1efa2fff761e7214ccfb51b4a2ccc4514ff96fde631662c2b42f46", size = 47413, upload-time = "2026-04-03T19:04:38.614Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b6/1d/2c0318d47ebe0b6e159aeecbabe8c007487f3e7e80945c9e476c9440fca3/aio_azure_clients_toolbox-1.2.0.tar.gz", hash = "sha256:2fc87c41e5ce299cbd827e32fd73db20eb986f150d56bb9b27d700b172026db4", size = 48044, upload-time = "2026-04-14T17:06:01.216Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/dc/2c5e4d58a5a47f55593f5a9f80141fd9d5cb0a6465ff11c8ad5be3d0ceb1/aio_azure_clients_toolbox-1.1.0-py3-none-any.whl", hash = "sha256:6e4cda155943c94b7d274d32d1116b275f268638f5c81cd42fb26c4e289c9958", size = 53635, upload-time = "2026-04-03T19:04:37.132Z" },
+    { url = "https://files.pythonhosted.org/packages/43/66/80bfdf788ea04fbca0bc3aa023fcbc7382f6fb5cc271b0538b83c8cc1e29/aio_azure_clients_toolbox-1.2.0-py3-none-any.whl", hash = "sha256:0bca548ebdb1b108f24cac6bd00a67f64c9acca439ea576a54fda2663a566497", size = 54212, upload-time = "2026-04-14T17:05:59.722Z" },
 ]
 
 [[package]]
@@ -351,7 +351,7 @@ wheels = [
 
 [[package]]
 name = "boilermaker-servicebus"
-version = "1.0.0a1"
+version = "1.0.0a2"
 source = { editable = "." }
 dependencies = [
     { name = "aio-azure-clients-toolbox" },
@@ -387,7 +387,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aio-azure-clients-toolbox", specifier = ">=1.1.0" },
+    { name = "aio-azure-clients-toolbox", specifier = ">=1.2.0" },
     { name = "anyio", specifier = ">=4.11.0" },
     { name = "azure-core-tracing-opentelemetry", specifier = ">=1.0.0b12" },
     { name = "azure-identity", specifier = ">=1.25.0" },

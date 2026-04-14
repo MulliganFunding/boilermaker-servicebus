@@ -442,6 +442,27 @@ class TaskGraph(BaseModel):
 
         return True
 
+    def detect_stalled_tasks(self) -> list[tuple[TaskId, str, TaskStatus]]:
+        """Identify tasks that appear stalled (non-terminal, non-pending status).
+
+        A task is considered stalled if its status is one of:
+        - Scheduled: should have been picked up by a worker
+        - Started: should have completed by now
+        - Retry: should have a pending SB message (but may have been dropped by dedup)
+
+        Returns a list of (task_id, function_name, status) tuples for stalled tasks.
+        This method does NOT determine root cause — it only identifies candidates.
+        """
+        stalled_statuses = {TaskStatus.Scheduled, TaskStatus.Started, TaskStatus.Retry}
+        stalled: list[tuple[TaskId, str, TaskStatus]] = []
+
+        for task_id, task in itertools.chain(self.children.items(), self.fail_children.items()):
+            result = self.results.get(task_id)
+            if result is not None and result.status in stalled_statuses:
+                stalled.append((task_id, task.function_name, result.status))
+
+        return stalled
+
     def _get_reachable_failure_tasks(self) -> set[TaskId]:
         """Get all failure callback tasks that are reachable from actual failures.
 

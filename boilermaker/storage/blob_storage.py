@@ -12,6 +12,8 @@ from azure.core.exceptions import (
     ResourceNotFoundError,
 )
 from azure.identity.aio import DefaultAzureCredential
+from azure.storage.blob.aio import BlobLeaseClient
+from opentelemetry import trace
 from pydantic import ValidationError
 
 from boilermaker.exc import BoilermakerStorageError
@@ -19,6 +21,7 @@ from boilermaker.storage import StorageInterface
 from boilermaker.task import GraphId, TaskGraph, TaskId, TaskResult, TaskResultSlim
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
@@ -54,52 +57,118 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         """
         if not graph_id:
             raise ValueError("`graph_id` must be provided to load a TaskGraph.")
-
-        graph_path = f"{self.task_result_prefix}/{TaskGraph.graph_path(graph_id)}"
-        graph_dir = f"{self.task_result_prefix}/{graph_id}"
-        try:
-            graph_contents = await self.download_blob(graph_path)
-        except AzureBlobError as exc:
-            raise BoilermakerStorageError(
-                f"Failed to load TaskGraph {graph_id}",
-                task_id=None,
-                graph_id=graph_id,
-                status_code=exc.status_code,
-                reason=exc.reason,
-            ) from exc
-        if graph_contents is None:
-            return None
-
-        try:
-            graph = TaskGraph.model_validate_json(graph_contents)
-        except ValidationError as e:
-            raise BoilermakerStorageError(
-                f"Failed to deserialize graph {graph_id}: {e}",
-                status_code=None,
-            ) from e
-
-        # Load all TaskResultSlim instances associated with this graph
-        # We don't want to load *all* return values into memory. Just the statuses.
-        async for blob in self.list_blobs(prefix=graph_dir):
-            # DO NOT REDOWNLOAD GRAPH
-            if blob.name == graph_path:
-                continue
+        with tracer.start_as_current_span("load_graph"):
+            graph_path = f"{self.task_result_prefix}/{TaskGraph.graph_path(graph_id)}"
+            graph_dir = f"{self.task_result_prefix}/{graph_id}"
             try:
-                tr = TaskResultSlim.model_validate_json(await self.download_blob(blob.name))
+                graph_contents = await self.download_blob(graph_path)
+            except AzureBlobError as exc:
+                raise BoilermakerStorageError(
+                    f"Failed to load TaskGraph {graph_id}",
+                    task_id=None,
+                    graph_id=graph_id,
+                    status_code=exc.status_code,
+                    reason=exc.reason,
+                ) from exc
+            if graph_contents is None:
+                return None
+
+            try:
+                graph = TaskGraph.model_validate_json(graph_contents)
             except ValidationError as e:
                 raise BoilermakerStorageError(
-                    f"Failed to deserialize task result in graph {graph_id}: {e}",
-                    name=blob.name,
-                    graph_id=graph_id,
+                    f"Failed to deserialize graph {graph_id}: {e}",
                     status_code=None,
-                    reason="DeserializationError",
                 ) from e
-            tr.etag = blob.etag
-            if tr.graph_id == graph_id:
-                graph.results[tr.task_id] = tr
-            else:
-                logger.warning(f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!")
-        return graph
+
+            # Load all TaskResultSlim instances associated with this graph
+            # We don't want to load *all* return values into memory. Just the statuses.
+            async for blob in self.list_blobs(prefix=graph_dir):
+                # DO NOT REDOWNLOAD GRAPH
+                if blob.name == graph_path:
+                    continue
+                try:
+                    async with self.get_blob_download_stream(blob.name) as stream:
+                        blob_etag = stream.properties.etag
+                        contents = await stream.readall()
+                    tr = TaskResultSlim.model_validate_json(contents)
+                    tr.etag = blob_etag
+                except ValidationError as e:
+                    raise BoilermakerStorageError(
+                        f"Failed to deserialize task result in graph {graph_id}: {e}",
+                        name=blob.name,
+                        graph_id=graph_id,
+                        status_code=None,
+                        reason="DeserializationError",
+                    ) from e
+
+                if tr.graph_id == graph_id:
+                    graph.results[tr.task_id] = tr
+                else:
+                    logger.warning(f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!")
+            return graph
+
+    async def try_acquire_lease(
+        self,
+        task_id: TaskId,
+        graph_id: GraphId,
+        etag: str | None = None,
+        lease_duration: int = 15,
+    ) -> str | None:
+        """Attempt to acquire a lease on a task result blob.
+
+        Uses Azure Blob Storage's built-in lease mechanism. The lease is
+        per-blob and exclusive — only one caller can hold it at a time.
+        If another worker already holds the lease, this returns None
+        immediately (no blocking, no retry).
+
+        When ``etag`` is provided, the lease acquire uses an If-Match
+        conditional header. This atomically checks "blob unchanged since
+        I read it" AND "no other worker holds the lease" in one call.
+        """
+        fname = f"{self.task_result_prefix}/{graph_id}/{task_id}.json"
+        with tracer.start_as_current_span("try_acquire_lease"):
+            try:
+                async with self.get_blob_client(fname) as blob_client:
+                    lease_client = BlobLeaseClient(blob_client)
+                    acquire_kwargs: dict = {}
+                    if etag:
+                        acquire_kwargs["etag"] = etag
+                        acquire_kwargs["match_condition"] = MatchConditions.IfNotModified
+                    await lease_client.acquire(
+                        lease_duration=lease_duration, **acquire_kwargs
+                    )
+                    return lease_client.id
+            except AzureBlobError as exc:
+                # 409 Conflict = blob is already leased by another worker
+                # 412 Precondition Failed = ETag mismatch (blob modified since load_graph)
+                if exc.status_code in (409, 412):
+                    return None
+                raise BoilermakerStorageError(
+                    f"Failed to acquire lease on task {task_id} in graph {graph_id}",
+                    task_id=task_id,
+                    graph_id=graph_id,
+                    status_code=exc.status_code,
+                    reason=exc.reason,
+                ) from exc
+
+    async def release_lease(
+        self, task_id: TaskId, graph_id: GraphId, lease_id: str
+    ) -> None:
+        """Release a previously acquired lease. Best-effort — logs warning on failure."""
+        fname = f"{self.task_result_prefix}/{graph_id}/{task_id}.json"
+        with tracer.start_as_current_span("release_lease"):
+            try:
+                async with self.get_blob_client(fname) as blob_client:
+                    lease_client = BlobLeaseClient(blob_client, lease_id=lease_id)
+                    await lease_client.release()
+            except AzureBlobError as exc:
+                # Lease may have expired or been broken — this is not fatal.
+                logger.warning(
+                    f"Failed to release lease {lease_id} on task {task_id} in graph {graph_id}: "
+                    f"status={exc.status_code} reason={exc.reason}. "
+                    "Lease will auto-expire after the configured duration."
+                )
 
     async def store_graph(self, graph: TaskGraph) -> TaskGraph:
         """
@@ -110,59 +179,60 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         Args:
             graph: The TaskGraph instance to store.
         """
-        lease = None
-        async with self.get_blob_service_client() as blob_service_client:
-            container_client = blob_service_client.get_container_client(self.container_name)
-            # Store the graph itself first
-            fname = f"{self.task_result_prefix}/{graph.storage_path}"
-            try:
-                _result = await container_client.upload_blob(
-                    fname,
-                    graph.model_dump_json(),
-                    blob_type="BlockBlob",
-                )
-            except (
-                ResourceNotFoundError,
-                HttpResponseError,
-                ResourceExistsError,
-            ) as exc:
-                logger.error(f"Error occurred while storing TaskGraph {graph.graph_id}: {exc}")
-                raise BoilermakerStorageError(
-                    f"Failed to store TaskGraph {graph.graph_id}",
-                    task_id=None,
-                    graph_id=graph.graph_id,
-                    status_code=500,
-                    reason="Unknown",
-                ) from exc
-            # Store pending results for *all* tasks in the graph
-            pending_result = None
-            try:
-                async with create_task_group() as tg:
-                    # don't let any tasks that get ahead accidentally clobber us
-                    for pending_result in graph.generate_pending_results():
-                        fname_pr = f"{self.task_result_prefix}/{pending_result.storage_path}"
+        with tracer.start_as_current_span("store_graph"):
+            lease = None
+            async with self.get_blob_service_client() as blob_service_client:
+                container_client = blob_service_client.get_container_client(self.container_name)
+                # Store the graph itself first
+                fname = f"{self.task_result_prefix}/{graph.storage_path}"
+                try:
+                    _result = await container_client.upload_blob(
+                        fname,
+                        graph.model_dump_json(),
+                        blob_type="BlockBlob",
+                    )
+                except (
+                    ResourceNotFoundError,
+                    HttpResponseError,
+                    ResourceExistsError,
+                ) as exc:
+                    logger.error(f"Error occurred while storing TaskGraph {graph.graph_id}: {exc}")
+                    raise BoilermakerStorageError(
+                        f"Failed to store TaskGraph {graph.graph_id}",
+                        task_id=None,
+                        graph_id=graph.graph_id,
+                        status_code=500,
+                        reason="Unknown",
+                    ) from exc
+                # Store pending results for *all* tasks in the graph
+                pending_result = None
+                try:
+                    async with create_task_group() as tg:
+                        # don't let any tasks that get ahead accidentally clobber us
+                        for pending_result in graph.generate_pending_results():
+                            fname_pr = f"{self.task_result_prefix}/{pending_result.storage_path}"
 
-                        uploader = partial(
-                            container_client.upload_blob,
-                            fname_pr,
-                            pending_result.model_dump_json(),
-                            blob_type="BlockBlob",
-                        )
-                        tg.start_soon(uploader)
-            except* Exception as excgroup:
-                formatted_traceback = traceback.format_exception_only(excgroup)
-                logger.error(f"Error occurred while storing pending TaskResults:\n {formatted_traceback}")
-                raise BoilermakerStorageError(
-                    f"Failed to store pending TaskResults for graph {graph.graph_id}",
-                    task_id=None,
-                    graph_id=graph.graph_id,
-                    status_code=500,
-                    reason="Unknown",
-                ) from excgroup
-            finally:
-                if lease is not None:
-                    await lease.release()
-        return graph
+                            uploader = partial(
+                                container_client.upload_blob,
+                                fname_pr,
+                                pending_result.model_dump_json(),
+                                blob_type="BlockBlob",
+                            )
+                            tg.start_soon(uploader)
+                except* Exception as excgroup:
+                    formatted_traceback = traceback.format_exception_only(excgroup)
+                    logger.error(f"Error occurred while storing pending TaskResults:\n {formatted_traceback}")
+                    raise BoilermakerStorageError(
+                        f"Failed to store pending TaskResults for graph {graph.graph_id}",
+                        task_id=None,
+                        graph_id=graph.graph_id,
+                        status_code=500,
+                        reason="Unknown",
+                    ) from excgroup
+                finally:
+                    if lease is not None:
+                        await lease.release()
+            return graph
 
     async def load_task_result(self, task_id: TaskId, graph_id: GraphId) -> TaskResultSlim | None:
         """Load a single task result from Azure Blob Storage.
@@ -175,38 +245,34 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             task_id: The TaskId of the task result to load.
             graph_id: The GraphId the task belongs to.
         """
-        fname = f"{self.task_result_prefix}/{graph_id}/{task_id}.json"
-        blob_etag = None
-        try:
-            # We need to make sure we load the etag
-            async with self.get_blob_client(fname) as blob_client:
-                blob_properties = await blob_client.get_blob_properties()
-                blob_etag = blob_properties.etag if blob_properties and blob_properties.etag is not None else None
-            contents = await self.download_blob(fname)
-        except AzureBlobError as exc:
-            if exc.status_code == 404:
-                return None
-            raise BoilermakerStorageError(
-                f"Failed to load task result {task_id}",
-                task_id=task_id,
-                graph_id=graph_id,
-                status_code=exc.status_code,
-                reason=exc.reason,
-            ) from exc
-        if contents is None:
-            return None
-        try:
-            result = TaskResultSlim.model_validate_json(contents)
-            result.etag = blob_etag
-            return result
-        except ValidationError as e:
-            raise BoilermakerStorageError(
-                f"Failed to deserialize task result {task_id}: {e}",
-                task_id=task_id,
-                graph_id=graph_id,
-                status_code=None,
-                reason="DeserializationError",
-            ) from e
+        with tracer.start_as_current_span("load_task_result"):
+            fname = f"{self.task_result_prefix}/{graph_id}/{task_id}.json"
+            try:
+                async with self.get_blob_download_stream(fname) as stream:
+                    blob_etag = stream.properties.etag
+                    contents = await stream.readall()
+            except AzureBlobError as exc:
+                if exc.status_code == 404:
+                    return None
+                raise BoilermakerStorageError(
+                    f"Failed to load task result {task_id}",
+                    task_id=task_id,
+                    graph_id=graph_id,
+                    status_code=exc.status_code,
+                    reason=exc.reason,
+                ) from exc
+            try:
+                result = TaskResultSlim.model_validate_json(contents)
+                result.etag = blob_etag
+                return result
+            except ValidationError as e:
+                raise BoilermakerStorageError(
+                    f"Failed to deserialize task result {task_id}: {e}",
+                    task_id=task_id,
+                    graph_id=graph_id,
+                    status_code=None,
+                    reason="DeserializationError",
+                ) from e
 
     async def store_task_result(self, task_result: TaskResult | TaskResultSlim, etag: str | None = None) -> None:
         """Stores a TaskResult to Azure Blob Storage.
@@ -214,35 +280,36 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         Args:
             task_result: The TaskResult instance to store.
         """
-        fname = str(task_result.storage_path)
-        if self.task_result_prefix:
-            fname = f"{self.task_result_prefix}/{fname}"
+        with tracer.start_as_current_span("store_task_result"):
+            fname = str(task_result.storage_path)
+            if self.task_result_prefix:
+                fname = f"{self.task_result_prefix}/{fname}"
 
-        # add tags:
-        blob_tags = {
-            "graph_id": task_result.graph_id or "none",
-            "status": task_result.status,
-        }
-        concurrency_kwargs: dict[str, str | int | MatchConditions] = {}
-        if etag:
-            concurrency_kwargs["etag"] = etag
-            concurrency_kwargs["match_condition"] = MatchConditions.IfNotModified
+            # add tags:
+            blob_tags = {
+                "graph_id": task_result.graph_id or "none",
+                "status": task_result.status,
+            }
+            concurrency_kwargs: dict[str, str | int | MatchConditions] = {}
+            if etag:
+                concurrency_kwargs["etag"] = etag
+                concurrency_kwargs["match_condition"] = MatchConditions.IfNotModified
 
-        try:
-            await self.upload_blob(
-                fname, task_result.model_dump_json(), tags=blob_tags, overwrite=True, **concurrency_kwargs
-            )
-        # SAFETY: This catch assumes aio_azure_clients_toolbox raises AzureBlobError
-        # (wrapping HTTP 412 Precondition Failed) when an ETag mismatch occurs.
-        # This is the primary guard against concurrent double-scheduling of downstream
-        # tasks. Verified against aio-azure-clients-toolbox v1.0.4 (see uv.lock):
-        # get_blob_client() catches all HttpResponseError (including 412) and re-raises
-        # as AzureBlobError. If the library behavior changes, this guard will silently break.
-        except AzureBlobError as exc:
-            raise BoilermakerStorageError(
-                f"Failed to store TaskResult {task_result.task_id}",
-                task_id=task_result.task_id,
-                graph_id=task_result.graph_id,
-                status_code=exc.status_code,
-                reason=exc.reason,
-            ) from exc
+            try:
+                await self.upload_blob(
+                    fname, task_result.model_dump_json(), tags=blob_tags, overwrite=True, **concurrency_kwargs
+                )
+            # SAFETY: This catch assumes aio_azure_clients_toolbox raises AzureBlobError
+            # (wrapping HTTP 412 Precondition Failed) when an ETag mismatch occurs.
+            # This is the primary guard against concurrent double-scheduling of downstream
+            # tasks. Verified against aio-azure-clients-toolbox v1.0.4 (see uv.lock):
+            # get_blob_client() catches all HttpResponseError (including 412) and re-raises
+            # as AzureBlobError. If the library behavior changes, this guard will silently break.
+            except AzureBlobError as exc:
+                raise BoilermakerStorageError(
+                    f"Failed to store TaskResult {task_result.task_id}",
+                    task_id=task_result.task_id,
+                    graph_id=task_result.graph_id,
+                    status_code=exc.status_code,
+                    reason=exc.reason,
+                ) from exc
