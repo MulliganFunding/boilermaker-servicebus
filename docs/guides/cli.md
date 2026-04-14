@@ -25,7 +25,7 @@ boilermaker-graph inspect <graph_id> \
     --storage-url <url> \
     --container <name> \
     [--recover] \
-    [--sb-connection-string <string>] \
+    [--sb-namespace-url <url>] \
     [--sb-queue-name <name>] \
     [-v]
 ```
@@ -38,7 +38,7 @@ boilermaker-graph inspect <graph_id> \
 | `--storage-url` | Yes | Azure Blob Storage account URL (e.g. `https://myaccount.blob.core.windows.net`) |
 | `--container` | Yes | Blob container name |
 | `--recover` | No | Re-publish stalled tasks to Service Bus |
-| `--sb-connection-string` | With `--recover` | Service Bus connection string |
+| `--sb-namespace-url` | With `--recover` | Service Bus namespace URL (e.g. `https://myns.servicebus.windows.net`) |
 | `--sb-queue-name` | With `--recover` | Service Bus queue name |
 | `-v` / `--verbose` | No | Enable debug logging |
 
@@ -86,7 +86,7 @@ boilermaker-graph inspect "$GRAPH_ID" \
     --storage-url "$AZURE_STORAGE_URL" \
     --container "$CONTAINER_NAME" \
     --recover \
-    --sb-connection-string "$SERVICE_BUS_CONNECTION_STRING" \
+    --sb-namespace-url "$SERVICE_BUS_NAMESPACE_URL" \
     --sb-queue-name "$QUEUE_NAME"
 ```
 

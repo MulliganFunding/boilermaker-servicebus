@@ -6,12 +6,12 @@ import logging
 import sys
 from datetime import datetime, UTC
 
-from aio_azure_clients_toolbox import AzureServiceBus
 from azure.identity.aio import DefaultAzureCredential
 
+from boilermaker.service_bus import AzureServiceBus
 from boilermaker.storage.blob_storage import BlobClientStorage
 from boilermaker.task import TaskGraph, TaskStatus
-from boilermaker.task.task_id import TaskId
+from boilermaker.task.task_id import GraphId, TaskId
 
 logger = logging.getLogger("boilermaker.cli")
 
@@ -104,7 +104,7 @@ async def inspect_graph(
     storage: BlobClientStorage,
     graph_id: str,
     recover: bool = False,
-    sb_connection_string: str | None = None,
+    sb_namespace_url: str | None = None,
     sb_queue_name: str | None = None,
 ) -> int:
     """Load a graph from blob storage, print its status table, and optionally recover stalled tasks.
@@ -113,13 +113,13 @@ async def inspect_graph(
         storage: Blob storage client.
         graph_id: The graph ID to inspect.
         recover: If True, re-publish stalled tasks to Service Bus.
-        sb_connection_string: Required when recover is True.
+        sb_namespace_url: Service Bus namespace URL, required when recover is True.
         sb_queue_name: Required when recover is True.
 
     Returns:
         Exit code: 0 = healthy, 1 = stalled tasks found, 2 = error.
     """
-    graph = await storage.load_graph(graph_id)
+    graph = await storage.load_graph(GraphId(graph_id))
     if graph is None:
         print(f"ERROR: Graph {graph_id} not found in storage.", file=sys.stderr)
         return EXIT_ERROR
@@ -129,13 +129,14 @@ async def inspect_graph(
     stalled = graph.detect_stalled_tasks()
 
     if stalled and recover:
-        if not sb_connection_string or not sb_queue_name:
-            print("ERROR: --recover requires --sb-connection-string and --sb-queue-name", file=sys.stderr)
+        if not sb_namespace_url or not sb_queue_name:
+            print("ERROR: --recover requires --sb-namespace-url and --sb-queue-name", file=sys.stderr)
             return EXIT_ERROR
 
         service_bus_client = AzureServiceBus(
-            connection_string=sb_connection_string,
-            queue_name=sb_queue_name,
+            sb_namespace_url,
+            sb_queue_name,
+            DefaultAzureCredential,
         )
         try:
             for task_id, fn_name, _status in stalled:
@@ -173,8 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--container", required=True, help="Blob container name")
     inspect_parser.add_argument("--recover", action="store_true", help="Re-publish stalled tasks to Service Bus")
     inspect_parser.add_argument(
-        "--sb-connection-string",
-        help="Service Bus connection string (required for --recover)",
+        "--sb-namespace-url",
+        help="Service Bus namespace URL (required for --recover)",
     )
     inspect_parser.add_argument(
         "--sb-queue-name",
@@ -207,7 +208,7 @@ def main() -> None:
                 storage,
                 args.graph_id,
                 recover=args.recover,
-                sb_connection_string=args.sb_connection_string,
+                sb_namespace_url=args.sb_namespace_url,
                 sb_queue_name=args.sb_queue_name,
             )
         finally:

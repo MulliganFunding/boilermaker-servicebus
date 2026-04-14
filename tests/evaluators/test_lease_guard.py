@@ -79,7 +79,7 @@ async def test_lease_released_on_publish_failure(evaluator_context):
         result="OK",
     )
 
-    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+    await evaluator_context.evaluator.continue_graph(completed)
 
     # Lease should still have been released despite publish failure
     assert evaluator_context.mock_storage.release_lease.call_count > 0, (
@@ -93,7 +93,6 @@ async def test_lease_released_on_storage_error(evaluator_context):
 
     # Make store_task_result raise on the scheduling writes (3rd+ calls)
     call_count = {"n": 0}
-    original_side_effect = evaluator_context.mock_storage.store_task_result.side_effect
 
     async def selective_storage_error(*args, **kwargs):
         call_count["n"] += 1
@@ -119,7 +118,7 @@ async def test_etag_passed_to_lease_acquisition(evaluator_context):
 
     # Set etags on graph results so they get passed through
     test_etag = "test-etag-value-123"
-    for task_id, result_slim in graph.results.items():
+    for _task_id, result_slim in graph.results.items():
         result_slim.etag = test_etag
 
     async with evaluator_context.with_regular_assertions(
@@ -130,7 +129,6 @@ async def test_etag_passed_to_lease_acquisition(evaluator_context):
         assert len(lease_calls) >= 1
 
         # At least one call should have the test etag
-        etags_used = [c.kwargs.get("etag") or c[1].get("etag") if len(c) > 1 else None for c in lease_calls]
         # Check via keyword argument
         for lease_call in lease_calls:
             # try_acquire_lease(task_id, graph_id, etag=...)
@@ -534,8 +532,6 @@ async def test_publish_graph_publishes_before_store(app, mock_storage):
         return await original_publish(task, **kwargs)
 
     app.publish_task = tracking_publish
-
-    original_store = mock_storage.store_task_result
 
     async def tracking_store(*args, **kwargs):
         call_order.append("store")

@@ -184,7 +184,7 @@ class TestInspectGraphExitCodes:
             storage,
             str(graph.graph_id),
             recover=True,
-            sb_connection_string=None,
+            sb_namespace_url=None,
             sb_queue_name=None,
         )
         assert code == EXIT_ERROR
@@ -210,7 +210,7 @@ class TestInspectGraphErrorOutput:
         storage = _mock_storage(graph)
         await inspect_graph(storage, str(graph.graph_id), recover=True)
         captured = capsys.readouterr()
-        assert "--recover requires --sb-connection-string and --sb-queue-name" in captured.err
+        assert "--recover requires --sb-namespace-url and --sb-queue-name" in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -258,11 +258,11 @@ class TestArgumentParsing:
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
             "--recover",
-            "--sb-connection-string", "Endpoint=sb://test",
+            "--sb-namespace-url", "https://test.servicebus.windows.net",
             "--sb-queue-name", "my-queue",
         ])
         assert args.recover is True
-        assert args.sb_connection_string == "Endpoint=sb://test"
+        assert args.sb_namespace_url == "https://test.servicebus.windows.net"
         assert args.sb_queue_name == "my-queue"
 
     def test_inspect_parses_verbose_flag(self):
@@ -315,7 +315,7 @@ class TestInspectGraphRecovery:
                 storage,
                 str(graph.graph_id),
                 recover=True,
-                sb_connection_string="Endpoint=sb://test",
+                sb_namespace_url="https://test.servicebus.windows.net",
                 sb_queue_name="test-queue",
             )
 
@@ -343,7 +343,7 @@ class TestInspectGraphRecovery:
                 storage,
                 str(graph.graph_id),
                 recover=True,
-                sb_connection_string="Endpoint=sb://test",
+                sb_namespace_url="https://test.servicebus.windows.net",
                 sb_queue_name="test-queue",
             )
 
@@ -365,7 +365,7 @@ class TestInspectGraphRecovery:
                 storage,
                 str(graph.graph_id),
                 recover=True,
-                sb_connection_string="Endpoint=sb://test",
+                sb_namespace_url="https://test.servicebus.windows.net",
                 sb_queue_name="test-queue",
             )
 
@@ -389,7 +389,7 @@ class TestInspectGraphRecovery:
                 storage,
                 str(graph.graph_id),
                 recover=True,
-                sb_connection_string="Endpoint=sb://test",
+                sb_namespace_url="https://test.servicebus.windows.net",
                 sb_queue_name="test-queue",
             )
 
