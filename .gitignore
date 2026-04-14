@@ -23,3 +23,7 @@ todo*.md
 tmp/
 .bmo/
 .claude/
+specs/states/
+specs/*out
+specs/*TTrace*
+specs/*trace*

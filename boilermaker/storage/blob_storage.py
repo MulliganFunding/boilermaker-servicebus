@@ -83,29 +83,54 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
 
             # Load all TaskResultSlim instances associated with this graph
             # We don't want to load *all* return values into memory. Just the statuses.
-            async for blob in self.list_blobs(prefix=graph_dir):
-                # DO NOT REDOWNLOAD GRAPH
-                if blob.name == graph_path:
-                    continue
-                try:
-                    async with self.get_blob_download_stream(blob.name) as stream:
-                        blob_etag = stream.properties.etag
-                        contents = await stream.readall()
-                    tr = TaskResultSlim.model_validate_json(contents)
-                    tr.etag = blob_etag
-                except ValidationError as e:
-                    raise BoilermakerStorageError(
-                        f"Failed to deserialize task result in graph {graph_id}: {e}",
-                        name=blob.name,
-                        graph_id=graph_id,
-                        status_code=None,
-                        reason="DeserializationError",
-                    ) from e
+            try:
+                async for blob in self.list_blobs(prefix=graph_dir):
+                    # DO NOT REDOWNLOAD GRAPH
+                    if blob.name == graph_path:
+                        continue
+                    try:
+                        async with self.get_blob_download_stream(blob.name) as stream:
+                            blob_etag = stream.properties.etag
+                            contents = await stream.readall()
+                        tr = TaskResultSlim.model_validate_json(contents)
+                        tr.etag = blob_etag
+                    except AzureBlobError as exc:
+                        raise BoilermakerStorageError(
+                            f"Failed to load task result blob {blob.name} in graph {graph_id}",
+                            name=blob.name,
+                            graph_id=graph_id,
+                            status_code=exc.status_code,
+                            reason=exc.reason,
+                        ) from exc
+                    except ValidationError as e:
+                        raise BoilermakerStorageError(
+                            f"Failed to deserialize task result in graph {graph_id}: {e}",
+                            name=blob.name,
+                            graph_id=graph_id,
+                            status_code=None,
+                            reason="DeserializationError",
+                        ) from e
 
-                if tr.graph_id == graph_id:
-                    graph.results[tr.task_id] = tr
-                else:
-                    logger.warning(f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!")
+                    if tr.graph_id == graph_id:
+                        graph.results[tr.task_id] = tr
+                    else:
+                        logger.warning(
+                            f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!"
+                        )
+            except AzureBlobError as exc:
+                raise BoilermakerStorageError(
+                    f"Failed to list blobs for graph {graph_id}",
+                    graph_id=graph_id,
+                    status_code=exc.status_code,
+                    reason=exc.reason,
+                ) from exc
+            except HttpResponseError as exc:
+                raise BoilermakerStorageError(
+                    f"Failed to list blobs for graph {graph_id}",
+                    graph_id=graph_id,
+                    status_code=exc.status_code,
+                    reason=str(exc),
+                ) from exc
             return graph
 
     async def try_acquire_lease(

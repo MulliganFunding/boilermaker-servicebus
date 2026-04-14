@@ -1,6 +1,7 @@
 """Tests for boilermaker.cli — TaskGraph inspection CLI."""
 
 import re
+from argparse import ArgumentTypeError
 from datetime import datetime, timedelta, UTC
 from unittest import mock
 
@@ -17,7 +18,6 @@ from boilermaker.cli import (
     inspect_graph,
     purge_old_results,
 )
-from boilermaker.exc import BoilermakerStorageError
 from boilermaker.task import Task, TaskGraph, TaskResultSlim, TaskStatus
 from boilermaker.task.task_id import TaskId
 
@@ -474,32 +474,15 @@ class TestValidateOlderThan:
     def test_accepts_midrange_value(self):
         assert _validate_older_than("15") == 15
 
-    def test_rejects_zero(self):
-        with pytest.raises(Exception):
-            _validate_older_than("0")
-
-    def test_rejects_thirty_one(self):
-        with pytest.raises(Exception):
-            _validate_older_than("31")
-
-    def test_rejects_negative(self):
-        with pytest.raises(Exception):
-            _validate_older_than("-1")
-
-    def test_rejects_non_integer_string(self):
-        with pytest.raises(Exception):
-            _validate_older_than("seven")
-
-    def test_rejects_float_string(self):
-        with pytest.raises(Exception):
-            _validate_older_than("7.5")
+    @pytest.mark.parametrize("invalid_value", ["0", "31", "-1", "seven", "7.5"])
+    def test_rejects_invalid_values(self, invalid_value):
+        with pytest.raises(ArgumentTypeError):
+            _validate_older_than(invalid_value)
 
 
 # ---------------------------------------------------------------------------
 # Purge: argument parsing
 # ---------------------------------------------------------------------------
-
-
 class TestPurgeArgumentParsing:
     def test_parses_required_args(self):
         parser = build_parser()

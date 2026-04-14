@@ -7,9 +7,9 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, UTC
 
+from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
 from azure.identity.aio import DefaultAzureCredential
 
-from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
 from boilermaker.exc import BoilermakerStorageError
 from boilermaker.service_bus import AzureServiceBus
 from boilermaker.storage.blob_storage import BlobClientStorage
@@ -175,8 +175,8 @@ def _validate_older_than(value: str) -> int:
     """
     try:
         days = int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"--older-than must be an integer, got: {value!r}")
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(f"--older-than must be an integer, got: {value!r}") from err
     if days < OLDER_THAN_MIN or days > OLDER_THAN_MAX:
         raise argparse.ArgumentTypeError(
             f"--older-than must be between {OLDER_THAN_MIN} and {OLDER_THAN_MAX} (inclusive), got: {days}"

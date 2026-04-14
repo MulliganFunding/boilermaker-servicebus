@@ -1,8 +1,9 @@
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
-from azure.core.exceptions import ResourceExistsError
+from azure.core.exceptions import HttpResponseError, ResourceExistsError
 from azure.identity.aio import DefaultAzureCredential
 from azure.storage.blob import BlobProperties
 from boilermaker.exc import BoilermakerStorageError
@@ -296,6 +297,82 @@ async def test_load_graph_skips_graph_blob_in_list_results(
     assert result.graph_id == sample_task_graph.graph_id
     assert sample_task_result_slim.task_id in result.results
     assert result.results[sample_task_result_slim.task_id].task_id == sample_task_result_slim.task_id
+
+
+async def test_load_graph_azure_blob_error_in_inner_download_raises_storage_error(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+):
+    """AzureBlobError from get_blob_download_stream in the inner task-result loop must
+    be wrapped as BoilermakerStorageError.
+
+    The outer download_blob (graph.json) succeeds; the failure occurs only when
+    downloading an individual task-result blob inside the `async for` loop.
+    Patching download_blob separately ensures the outer graph.json fetch is not
+    affected by the get_blob_download_stream replacement.
+    """
+    graph_json = sample_task_graph.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.list_blobs_returns(
+        [
+            BlobProperties(
+                name=f"task-results/{sample_task_graph.graph_id}/task-result.json",
+                last_modified="2023-01-01T00:00:00Z",
+            ),
+        ]
+    )
+
+    azure_error = AzureBlobError(
+        MagicMock(
+            **{
+                "message": "Service Unavailable",
+                "status_code": 503,
+                "reason": "Service Unavailable",
+            }
+        )
+    )
+
+    @asynccontextmanager
+    async def failing_download_stream(_blob_name, **_kwargs):
+        raise azure_error
+        yield  # make this an async generator
+
+    with (
+        patch.object(blob_storage, "download_blob", new_callable=AsyncMock) as mock_dl,
+        patch.object(blob_storage, "get_blob_download_stream", failing_download_stream),
+    ):
+        mock_dl.return_value = graph_json
+        with pytest.raises(BoilermakerStorageError) as exc_info:
+            await blob_storage.load_graph(sample_task_graph.graph_id)
+
+    assert "Failed to load task result blob" in str(exc_info.value)
+    assert exc_info.value.status_code == 503
+
+
+async def test_load_graph_http_response_error_from_list_blobs_raises_storage_error(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+):
+    """HttpResponseError raised by list_blobs (after graph.json downloads successfully)
+    must be wrapped as BoilermakerStorageError.
+
+    This exercises the outer except HttpResponseError guard added by BMO-40, which
+    catches errors that escape from the container_client.list_blobs async iterator
+    before any blob is yielded.
+    """
+    graph_json = sample_task_graph.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(graph_json)
+    set_return.list_blobs_returns(
+        HttpResponseError(message="The specified resource does not exist.", response=None)
+    )
+
+    with pytest.raises(BoilermakerStorageError) as exc_info:
+        await blob_storage.load_graph(sample_task_graph.graph_id)
+
+    assert "Failed to list blobs" in str(exc_info.value)
 
 
 # Tests for store_graph method

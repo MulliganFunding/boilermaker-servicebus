@@ -129,7 +129,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         # Write Started with an ETag so two concurrent workers racing on the same task
         # cannot both pass the terminal-status guard and overwrite each other's result.
         # When _etag is None (no prior read, or read failed) this degrades to an
-        # unconditional write — the same behaviour as before this fix.
+        # unconditional write.
         try:
             await self.storage_interface.store_task_result(start_result, etag=_etag)
         except exc.BoilermakerStorageError as _started_err:
@@ -218,18 +218,115 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                         status=TaskStatus.Started,
                     )
 
-                # Unexpected status after 412 — neither finished nor Started.
-                logger.error(
-                    f"412 on Started write but re-read returned unexpected status "
-                    f"{_reread.status!r} for task {self.task.task_id}; "
-                    "returning Failure to avoid stalling the graph."
-                )
-                return TaskResult(
-                    task_id=self.task.task_id,
-                    graph_id=self.task.graph_id,
-                    status=TaskStatus.Failure,
-                    errors=[f"412 on Started write; re-read returned unexpected status {_reread.status!r}"],
-                )
+                if _reread.status == TaskStatus.Scheduled:
+                    # The scheduler wrote Scheduled and released its lease before the
+                    # SB message was consumed.  No other worker holds Started yet —
+                    # this worker should claim execution by retrying the Started write
+                    # using the etag from the Scheduled blob.
+                    # Spec action: WriteStarted412 (Scheduled branch) →
+                    #              RetryStartedAfterScheduled
+                    if _reread.etag is None:
+                        logger.warning(
+                            f"412 + Scheduled re-read for task {self.task.task_id}: "
+                            "re-read etag is None — degraded to unconditional retry write"
+                        )
+                    logger.warning(
+                        f"412 + Scheduled for task {self.task.task_id}; "
+                        "retrying Started write with re-read etag"
+                    )
+                    try:
+                        await self.storage_interface.store_task_result(start_result, etag=_reread.etag)
+                        # RetryStartedWriteSuccess: fall through to execution (no return).
+                        # This path is identical to WriteStartedSuccess — no special handling.
+
+                    except exc.BoilermakerStorageError as _retry_err:
+                        _retry_is_precondition_failure = getattr(_retry_err, "status_code", None) == 412
+
+                        if not _retry_is_precondition_failure:
+                            # RetryStartedWriteNon412Error: fail-open, fall through to execution.
+                            logger.warning(
+                                f"Non-412 error on retry Started write for task {self.task.task_id}; "
+                                "proceeding with execution",
+                                exc_info=True,
+                            )
+                            # no return — fall through to execution
+
+                        else:
+                            # RetryStartedWrite412: another worker moved the blob between
+                            # the re-read and the retry.  Re-read a second time to determine
+                            # the current state.  Always settle in every branch from here.
+                            # Spec action: RetryStartedWrite412 → RereadAfterRetry412
+                            logger.warning(
+                                f"Second 412 on retry Started write for task {self.task.task_id}; "
+                                "re-reading to determine action"
+                            )
+                            try:
+                                _reread2 = await self.storage_interface.load_task_result(
+                                    self.task.task_id, self.task.graph_id
+                                )
+                            except exc.BoilermakerStorageError:
+                                logger.error(
+                                    f"Second 412 + re-read also failed for task {self.task.task_id}; "
+                                    "settling and returning Failure",
+                                    exc_info=True,
+                                )
+                                _reread2 = None
+
+                            # RereadAfterRetry: ALL branches call complete_message() before returning.
+                            try:
+                                await self.complete_message()
+                            except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                                logger.warning(
+                                    f"Failed to complete message after second 412 for task {self.task.task_id}; "
+                                    "SB will redeliver",
+                                    exc_info=True,
+                                )
+
+                            if _reread2 is not None and _reread2.status == TaskStatus.Started:
+                                # Another worker won the second CAS — yield to that worker.
+                                return TaskResult(
+                                    task_id=self.task.task_id,
+                                    graph_id=self.task.graph_id,
+                                    status=TaskStatus.Started,
+                                )
+                            elif _reread2 is not None and _reread2.status.finished:
+                                # Task is already terminal — yield to that result.
+                                return TaskResult(
+                                    task_id=self.task.task_id,
+                                    graph_id=self.task.graph_id,
+                                    status=_reread2.status,
+                                )
+                            else:
+                                # Unexpected state after two 412s (None, Pending, Scheduled, etc).
+                                return TaskResult(
+                                    task_id=self.task.task_id,
+                                    graph_id=self.task.graph_id,
+                                    status=TaskStatus.Failure,
+                                    errors=["two 412s on Started write; unexpected state after second re-read"],
+                                )
+
+                else:
+                    # Truly unexpected status after 412 (not None, finished, Started, or Scheduled).
+                    # Settle the message to avoid orphaning it on SB lock expiry.
+                    logger.error(
+                        f"412 on Started write but re-read returned unexpected status "
+                        f"{_reread.status!r} for task {self.task.task_id}; "
+                        "settling and returning Failure to avoid stalling the graph."
+                    )
+                    try:
+                        await self.complete_message()
+                    except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                        logger.warning(
+                            f"Failed to complete message after 412+unexpected status for task {self.task.task_id}; "
+                            "SB will redeliver",
+                            exc_info=True,
+                        )
+                    return TaskResult(
+                        task_id=self.task.task_id,
+                        graph_id=self.task.graph_id,
+                        status=TaskStatus.Failure,
+                        errors=[f"412 on Started write; re-read returned unexpected status {_reread.status!r}"],
+                    )
 
         # We successfully wrote Started — we own execution from here.
         # Subsequent writes (RetriesExhausted, final result) are unconditional:
