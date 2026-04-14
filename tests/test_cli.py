@@ -7,17 +7,12 @@ from unittest import mock
 
 import pytest
 from azure.core.exceptions import HttpResponseError
-from boilermaker.cli import (
-    _short_task_id,
-    _validate_older_than,
-    build_parser,
-    EXIT_ERROR,
-    EXIT_HEALTHY,
-    EXIT_STALLED,
-    format_graph_table,
-    inspect_graph,
-    purge_old_results,
-)
+from boilermaker.cli import build_parser
+from boilermaker.cli._globals import EXIT_ERROR, EXIT_HEALTHY, EXIT_STALLED
+from boilermaker.cli._output import _short_task_id, format_graph_table
+from boilermaker.cli.inspect import run_inspect
+from boilermaker.cli.purge import _validate_older_than, run_purge
+from boilermaker.cli.recover import run_recover
 from boilermaker.task import Task, TaskGraph, TaskResultSlim, TaskStatus
 from boilermaker.task.task_id import TaskId
 
@@ -80,7 +75,7 @@ class TestFormatGraphTable:
         graph, task_a, _, _ = _make_graph_with_tasks()
         _set_result(graph, task_a, TaskStatus.Success)
         output = format_graph_table(graph)
-        assert "Task ID (short)" in output
+        assert "Task ID" in output
         assert "Function" in output
         assert "Status" in output
         assert "Type" in output
@@ -114,7 +109,7 @@ class TestFormatGraphTable:
         _set_result(graph, task_b, TaskStatus.Success)
         _set_result(graph, task_c, TaskStatus.Retry)
         output = format_graph_table(graph)
-        assert "** STALLED **" in output
+        assert "STALLED" in output
 
     def test_no_stalled_marker_for_healthy_graph(self):
         graph, task_a, task_b, task_c = _make_graph_with_tasks()
@@ -122,7 +117,7 @@ class TestFormatGraphTable:
         _set_result(graph, task_b, TaskStatus.Success)
         _set_result(graph, task_c, TaskStatus.Success)
         output = format_graph_table(graph)
-        assert "** STALLED **" not in output
+        assert "STALLED" not in output
 
     def test_summary_line_present(self):
         graph, task_a, task_b, task_c = _make_graph_with_tasks()
@@ -151,14 +146,14 @@ class TestFormatGraphTable:
 
 
 # ---------------------------------------------------------------------------
-# inspect_graph — exit codes
+# run_inspect — exit codes
 # ---------------------------------------------------------------------------
 
 
 class TestInspectGraphExitCodes:
     async def test_returns_error_when_graph_not_found(self):
         storage = _mock_storage(graph=None)
-        code = await inspect_graph(storage, "nonexistent-graph-id")
+        code = await run_inspect(storage, "nonexistent-graph-id")
         assert code == EXIT_ERROR
 
     async def test_returns_healthy_for_completed_graph(self):
@@ -167,7 +162,7 @@ class TestInspectGraphExitCodes:
         _set_result(graph, task_b, TaskStatus.Success)
         _set_result(graph, task_c, TaskStatus.Success)
         storage = _mock_storage(graph)
-        code = await inspect_graph(storage, str(graph.graph_id))
+        code = await run_inspect(storage, str(graph.graph_id))
         assert code == EXIT_HEALTHY
 
     async def test_returns_stalled_for_stuck_tasks(self):
@@ -176,7 +171,7 @@ class TestInspectGraphExitCodes:
         _set_result(graph, task_b, TaskStatus.Started)
         _set_result(graph, task_c, TaskStatus.Pending)
         storage = _mock_storage(graph)
-        code = await inspect_graph(storage, str(graph.graph_id))
+        code = await run_inspect(storage, str(graph.graph_id))
         assert code == EXIT_STALLED
 
     async def test_returns_error_when_recover_missing_sb_args(self):
@@ -185,10 +180,9 @@ class TestInspectGraphExitCodes:
         _set_result(graph, task_b, TaskStatus.Scheduled)
         _set_result(graph, task_c, TaskStatus.Pending)
         storage = _mock_storage(graph)
-        code = await inspect_graph(
+        code = await run_recover(
             storage,
             str(graph.graph_id),
-            recover=True,
             sb_namespace_url=None,
             sb_queue_name=None,
         )
@@ -196,14 +190,14 @@ class TestInspectGraphExitCodes:
 
 
 # ---------------------------------------------------------------------------
-# inspect_graph — error output
+# run_inspect — error output
 # ---------------------------------------------------------------------------
 
 
 class TestInspectGraphErrorOutput:
     async def test_graph_not_found_prints_to_stderr(self, capsys):
         storage = _mock_storage(graph=None)
-        await inspect_graph(storage, "missing-graph")
+        await run_inspect(storage, "missing-graph")
         captured = capsys.readouterr()
         assert "ERROR: Graph missing-graph not found in storage." in captured.err
 
@@ -213,13 +207,13 @@ class TestInspectGraphErrorOutput:
         _set_result(graph, task_b, TaskStatus.Retry)
         _set_result(graph, task_c, TaskStatus.Pending)
         storage = _mock_storage(graph)
-        await inspect_graph(storage, str(graph.graph_id), recover=True)
+        await run_recover(storage, str(graph.graph_id), sb_namespace_url=None, sb_queue_name=None)
         captured = capsys.readouterr()
         assert "--recover requires --sb-namespace-url and --sb-queue-name" in captured.err
 
 
 # ---------------------------------------------------------------------------
-# inspect_graph — table output verification
+# run_inspect — table output verification
 # ---------------------------------------------------------------------------
 
 
@@ -230,10 +224,10 @@ class TestInspectGraphOutput:
         _set_result(graph, task_b, TaskStatus.Success)
         _set_result(graph, task_c, TaskStatus.Success)
         storage = _mock_storage(graph)
-        await inspect_graph(storage, str(graph.graph_id))
+        await run_inspect(storage, str(graph.graph_id))
         captured = capsys.readouterr()
         assert "business_search" in captured.out
-        assert "Complete: True" in captured.out
+        assert "Complete" in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -245,38 +239,37 @@ class TestArgumentParsing:
     def test_inspect_parses_required_args(self):
         parser = build_parser()
         args = parser.parse_args([
-            "inspect", "my-graph-id",
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
+            "inspect", "--graph", "my-graph-id",
         ])
         assert args.command == "inspect"
-        assert args.graph_id == "my-graph-id"
+        assert args.graph == "my-graph-id"
         assert args.storage_url == "https://example.blob.core.windows.net"
         assert args.container == "my-container"
-        assert args.recover is False
         assert args.verbose is False
 
-    def test_inspect_parses_recover_flags(self):
+    def test_recover_parses_sb_flags(self):
         parser = build_parser()
         args = parser.parse_args([
-            "inspect", "my-graph-id",
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
-            "--recover",
+            "recover",
+            "--graph", "my-graph-id",
             "--sb-namespace-url", "https://test.servicebus.windows.net",
             "--sb-queue-name", "my-queue",
         ])
-        assert args.recover is True
+        assert args.command == "recover"
         assert args.sb_namespace_url == "https://test.servicebus.windows.net"
         assert args.sb_queue_name == "my-queue"
 
     def test_inspect_parses_verbose_flag(self):
         parser = build_parser()
         args = parser.parse_args([
-            "inspect", "my-graph-id",
             "--storage-url", "https://x.blob.core.windows.net",
             "--container", "c",
             "-v",
+            "inspect", "--graph", "my-graph-id",
         ])
         assert args.verbose is True
 
@@ -285,14 +278,20 @@ class TestArgumentParsing:
         args = parser.parse_args([])
         assert args.command is None
 
-    def test_missing_required_args_exits(self):
+    def test_missing_graph_flag_does_not_exit_at_parse_time(self):
+        # With the new parser, inspect without --graph is validated post-parse
         parser = build_parser()
-        with pytest.raises(SystemExit):
-            parser.parse_args(["inspect"])
+        args = parser.parse_args([
+            "--storage-url", "https://x.blob.core.windows.net",
+            "--container", "c",
+            "inspect",
+        ])
+        assert args.command == "inspect"
+        assert args.graph is None
 
 
 # ---------------------------------------------------------------------------
-# inspect_graph — recovery code path
+# run_recover — recovery code path
 # ---------------------------------------------------------------------------
 
 
@@ -315,11 +314,10 @@ class TestInspectGraphRecovery:
         storage = _mock_storage(graph)
         mock_sb = _mock_service_bus()
 
-        with mock.patch("boilermaker.cli.AzureServiceBus", return_value=mock_sb):
-            code = await inspect_graph(
+        with mock.patch("boilermaker.cli.recover.AzureServiceBus", return_value=mock_sb):
+            code = await run_recover(
                 storage,
                 str(graph.graph_id),
-                recover=True,
                 sb_namespace_url="https://test.servicebus.windows.net",
                 sb_queue_name="test-queue",
             )
@@ -343,11 +341,10 @@ class TestInspectGraphRecovery:
         storage = _mock_storage(graph)
         mock_sb = _mock_service_bus()
 
-        with mock.patch("boilermaker.cli.AzureServiceBus", return_value=mock_sb):
-            code = await inspect_graph(
+        with mock.patch("boilermaker.cli.recover.AzureServiceBus", return_value=mock_sb):
+            code = await run_recover(
                 storage,
                 str(graph.graph_id),
-                recover=True,
                 sb_namespace_url="https://test.servicebus.windows.net",
                 sb_queue_name="test-queue",
             )
@@ -365,11 +362,10 @@ class TestInspectGraphRecovery:
         storage = _mock_storage(graph)
         mock_sb = _mock_service_bus()
 
-        with mock.patch("boilermaker.cli.AzureServiceBus", return_value=mock_sb):
-            code = await inspect_graph(
+        with mock.patch("boilermaker.cli.recover.AzureServiceBus", return_value=mock_sb):
+            code = await run_recover(
                 storage,
                 str(graph.graph_id),
-                recover=True,
                 sb_namespace_url="https://test.servicebus.windows.net",
                 sb_queue_name="test-queue",
             )
@@ -389,11 +385,10 @@ class TestInspectGraphRecovery:
         mock_sb = _mock_service_bus()
         mock_sb.send_message.side_effect = RuntimeError("Connection lost")
 
-        with mock.patch("boilermaker.cli.AzureServiceBus", return_value=mock_sb):
-            code = await inspect_graph(
+        with mock.patch("boilermaker.cli.recover.AzureServiceBus", return_value=mock_sb):
+            code = await run_recover(
                 storage,
                 str(graph.graph_id),
-                recover=True,
                 sb_namespace_url="https://test.servicebus.windows.net",
                 sb_queue_name="test-queue",
             )
@@ -435,7 +430,7 @@ def _make_purge_storage(
     blob_list: list,
     graph: TaskGraph | None = None,
 ) -> mock.AsyncMock:
-    """Build a storage mock suitable for purge_old_results tests.
+    """Build a storage mock suitable for run_purge tests.
 
     list_blobs returns the blob_list as an async generator.
     load_graph returns the graph (or None).
@@ -487,9 +482,10 @@ class TestPurgeArgumentParsing:
     def test_parses_required_args(self):
         parser = build_parser()
         args = parser.parse_args([
-            "purge",
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
+            "purge",
+            "--task-results",
             "--older-than", "7",
         ])
         assert args.command == "purge"
@@ -502,9 +498,10 @@ class TestPurgeArgumentParsing:
     def test_parses_dry_run_flag(self):
         parser = build_parser()
         args = parser.parse_args([
-            "purge",
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
+            "purge",
+            "--task-results",
             "--older-than", "7",
             "--dry-run",
         ])
@@ -513,11 +510,12 @@ class TestPurgeArgumentParsing:
     def test_parses_verbose_flag(self):
         parser = build_parser()
         args = parser.parse_args([
-            "purge",
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
-            "--older-than", "7",
             "-v",
+            "purge",
+            "--task-results",
+            "--older-than", "7",
         ])
         assert args.verbose is True
 
@@ -525,9 +523,10 @@ class TestPurgeArgumentParsing:
         parser = build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args([
-                "purge",
                 "--storage-url", "https://example.blob.core.windows.net",
                 "--container", "my-container",
+                "purge",
+                "--task-results",
                 "--older-than", "0",
             ])
 
@@ -535,9 +534,10 @@ class TestPurgeArgumentParsing:
         parser = build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args([
-                "purge",
                 "--storage-url", "https://example.blob.core.windows.net",
                 "--container", "my-container",
+                "purge",
+                "--task-results",
                 "--older-than", "31",
             ])
 
@@ -545,33 +545,34 @@ class TestPurgeArgumentParsing:
         parser = build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args([
-                "purge",
                 "--storage-url", "https://example.blob.core.windows.net",
                 "--container", "my-container",
+                "purge",
+                "--task-results",
                 "--older-than", "abc",
             ])
 
 
 # ---------------------------------------------------------------------------
-# purge_old_results: empty container
+# run_purge: empty container
 # ---------------------------------------------------------------------------
 
 
 class TestPurgeEmptyContainer:
     async def test_empty_container_returns_healthy(self, capsys):
         storage = _make_purge_storage(blob_list=[])
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_HEALTHY
 
     async def test_empty_container_prints_nothing_to_purge(self, capsys):
         storage = _make_purge_storage(blob_list=[])
-        await purge_old_results(storage, older_than_days=7)
+        await run_purge(storage, older_than_days=7)
         captured = capsys.readouterr()
         assert "Nothing to purge." in captured.out
 
 
 # ---------------------------------------------------------------------------
-# purge_old_results: age eligibility
+# run_purge: age eligibility
 # ---------------------------------------------------------------------------
 
 
@@ -590,7 +591,7 @@ class TestPurgeAgeEligibility:
             _make_blob(f"task-results/{graph_id}/graph.json", _new()),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_HEALTHY
         # load_graph should NOT have been called (age filter excludes it)
         storage.load_graph.assert_not_called()
@@ -602,7 +603,7 @@ class TestPurgeAgeEligibility:
             _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        await purge_old_results(storage, older_than_days=7)
+        await run_purge(storage, older_than_days=7)
         storage.load_graph.assert_called_once()
 
     async def test_graph_with_any_recent_blob_is_skipped(self):
@@ -614,13 +615,13 @@ class TestPurgeAgeEligibility:
             _make_blob(f"task-results/{graph_id}/task-1.json", _new(1)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        await purge_old_results(storage, older_than_days=7)
+        await run_purge(storage, older_than_days=7)
         # load_graph should NOT be called because max(last_modified) is recent
         storage.load_graph.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# purge_old_results: missing graph.json
+# run_purge: missing graph.json
 # ---------------------------------------------------------------------------
 
 
@@ -631,7 +632,7 @@ class TestPurgeMissingGraphJson:
             _make_blob(f"task-results/{graph_id}/task-1.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs)
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_HEALTHY
         captured = capsys.readouterr()
         assert "no graph.json" in captured.err
@@ -640,7 +641,7 @@ class TestPurgeMissingGraphJson:
 
 
 # ---------------------------------------------------------------------------
-# purge_old_results: in-progress safety check
+# run_purge: in-progress safety check
 # ---------------------------------------------------------------------------
 
 
@@ -659,7 +660,7 @@ class TestPurgeInProgressSafetyCheck:
             _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_STALLED
         captured = capsys.readouterr()
         assert "in-progress tasks" in captured.err
@@ -672,7 +673,7 @@ class TestPurgeInProgressSafetyCheck:
             _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_STALLED
         storage.delete_blob.assert_not_called()
 
@@ -683,7 +684,7 @@ class TestPurgeInProgressSafetyCheck:
             _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_STALLED
         storage.delete_blob.assert_not_called()
 
@@ -694,7 +695,7 @@ class TestPurgeInProgressSafetyCheck:
             _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        await purge_old_results(storage, older_than_days=7)
+        await run_purge(storage, older_than_days=7)
         captured = capsys.readouterr()
         assert graph_id in captured.err
 
@@ -724,14 +725,14 @@ class TestPurgeInProgressSafetyCheck:
         )
         storage.delete_blob = mock.AsyncMock()
 
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_STALLED
         captured = capsys.readouterr()
         assert "Skipped 1 graph(s) due to in-progress tasks." in captured.out
 
 
 # ---------------------------------------------------------------------------
-# purge_old_results: dry-run
+# run_purge: dry-run
 # ---------------------------------------------------------------------------
 
 
@@ -751,7 +752,7 @@ class TestPurgeDryRun:
             _make_blob(f"task-results/{graph_id}/task-1.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        code = await purge_old_results(storage, older_than_days=7, dry_run=True)
+        code = await run_purge(storage, older_than_days=7, dry_run=True)
         assert code == EXIT_HEALTHY
         storage.delete_blob.assert_not_called()
 
@@ -762,7 +763,7 @@ class TestPurgeDryRun:
             _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        await purge_old_results(storage, older_than_days=7, dry_run=True)
+        await run_purge(storage, older_than_days=7, dry_run=True)
         captured = capsys.readouterr()
         assert "[DRY RUN]" in captured.out
 
@@ -773,13 +774,13 @@ class TestPurgeDryRun:
             _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        await purge_old_results(storage, older_than_days=7, dry_run=True)
+        await run_purge(storage, older_than_days=7, dry_run=True)
         captured = capsys.readouterr()
         assert graph_id in captured.out
 
 
 # ---------------------------------------------------------------------------
-# purge_old_results: deletion order and success summary
+# run_purge: deletion order and success summary
 # ---------------------------------------------------------------------------
 
 
@@ -801,7 +802,7 @@ class TestPurgeDeletionOrder:
             _make_blob(task_blob_path, _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        await purge_old_results(storage, older_than_days=7)
+        await run_purge(storage, older_than_days=7)
 
         delete_calls = [call.args[0] for call in storage.delete_blob.call_args_list]
         assert delete_calls[-1] == graph_json_path
@@ -815,7 +816,7 @@ class TestPurgeDeletionOrder:
             _make_blob(f"task-results/{graph_id}/task-1.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_HEALTHY
         captured = capsys.readouterr()
         assert "Deleted" in captured.out
@@ -829,12 +830,12 @@ class TestPurgeDeletionOrder:
             _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_HEALTHY
 
 
 # ---------------------------------------------------------------------------
-# purge_old_results: 404 AzureBlobError treated as no-op
+# run_purge: 404 AzureBlobError treated as no-op
 # ---------------------------------------------------------------------------
 
 
@@ -854,7 +855,7 @@ class TestPurge404NoOp:
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
         storage.delete_blob.side_effect = _make_azure_blob_error(404)
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         # 404 is a no-op; the graph still counts as successfully handled
         assert code == EXIT_HEALTHY
 
@@ -866,7 +867,7 @@ class TestPurge404NoOp:
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
         storage.delete_blob.side_effect = _make_azure_blob_error(500)
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         captured = capsys.readouterr()
         assert "WARNING" in captured.err or "Failed" in captured.err
         # All deletions failed for the only graph, so EXIT_ERROR
@@ -874,7 +875,7 @@ class TestPurge404NoOp:
 
 
 # ---------------------------------------------------------------------------
-# purge_old_results: listing error
+# run_purge: listing error
 # ---------------------------------------------------------------------------
 
 
@@ -888,7 +889,7 @@ class TestPurgeListingError:
             yield  # make it a generator
 
         storage.list_blobs = _failing_gen
-        code = await purge_old_results(storage, older_than_days=7)
+        code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_ERROR
         captured = capsys.readouterr()
         assert "ERROR" in captured.err

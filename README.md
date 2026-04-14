@@ -91,10 +91,10 @@ export SERVICE_BUS_QUEUE_NAME="your-queue-name"
 
 ```sh
 # Safety (exhaustive, terminates):
-  java -jar tla2tools.jar -workers auto \
-       -config specs/TaskGraphTinySafety.cfg specs/TaskGraphTiny.tla
+java -jar tla2tools.jar -workers auto \
+    -config specs/TaskGraphTinySafety.cfg specs/TaskGraphTiny.tla
 
 # Liveness (simulation, bounded depth: not exhaustive but practical):
-  java -jar tla2tools.jar -simulate num=100000 -depth 200 \
-       -config specs/TaskGraphTiny.cfg specs/TaskGraphTiny.tla
+java -jar tla2tools.jar -simulate num=100000 -depth 200 \
+    -config specs/TaskGraphTiny.cfg specs/TaskGraphTiny.tla
 ```
