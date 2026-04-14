@@ -80,6 +80,7 @@ nav:
     - Callbacks & Chains: guides/callbacks-chains.md
     - Task Graphs: guides/task-graphs.md
     - Error Handling & Retries: guides/error-handling.md
+    - CLI Reference: guides/cli.md
   - API Reference:
     - Boilermaker: api-reference/app.md
     - Task: api-reference/task.md

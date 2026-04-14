@@ -32,7 +32,11 @@ TaskHandlerRegistry: typing.TypeAlias = dict[str, task_types.TaskHandler]
 class TaskPublisher(typing.Protocol):
     # Define types here, as if __call__ were a function (ignore self).
     def __call__(
-        self, task: Task, delay: int | None = None, publish_attempts: int | None = None
+        self,
+        task: Task,
+        delay: int | None = None,
+        publish_attempts: int | None = None,
+        unique_msg_id: str | None = None,
     ) -> Awaitable[None]: ...
 
 
@@ -242,8 +246,9 @@ class TaskEvaluatorBase:
         task: Task,
         delay: int = 0,
         publish_attempts: int = 1,
+        unique_msg_id: str | None = None,
     ) -> Task:
-        await self.task_publisher(task, delay=delay, publish_attempts=publish_attempts)
+        await self.task_publisher(task, delay=delay, publish_attempts=publish_attempts, unique_msg_id=unique_msg_id)
         return task
 
     # Message handling actions

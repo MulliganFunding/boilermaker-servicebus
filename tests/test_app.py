@@ -455,12 +455,13 @@ async def test_publish_graph_failures(app, mockservicebus, mock_storage):
     mockservicebus._sender.assert_not_called()
 
 
-async def test_publish_graph_etag_cas_failure_skips_one_root_task(app, mockservicebus, mock_storage):
-    """Test that an ETag CAS failure for one root task skips publication of that task only.
+async def test_publish_graph_store_failure_does_not_prevent_publish(app, mockservicebus, mock_storage):
+    """Test that a store_task_result failure for Scheduled write does not prevent publish.
 
-    Per-task exception isolation: when store_task_result raises BoilermakerStorageError
-    for one root task, that task must NOT be published to Service Bus, but all other
-    root tasks must still be published.
+    With publish-before-store ordering (matching continue_graph), the task is published
+    to Service Bus first. If the subsequent Scheduled write fails, the task was already
+    published — only a warning is logged. Both root tasks should be published regardless
+    of Scheduled-write failures.
     """
     import copy
 
@@ -483,7 +484,6 @@ async def test_publish_graph_etag_cas_failure_skips_one_root_task(app, mockservi
     ready_task_ids = [task.task_id for task in loaded_graph.generate_ready_tasks()]
     assert len(ready_task_ids) == 2, "Expected two root tasks"
     failing_task_id = ready_task_ids[0]
-    succeeding_task_id = ready_task_ids[1]
 
     # store_task_result raises for the first root task, succeeds for the second
     async def store_task_result_side_effect(result, etag=None):
@@ -505,12 +505,11 @@ async def test_publish_graph_etag_cas_failure_skips_one_root_task(app, mockservi
 
     await app.publish_graph(graph)
 
-    # The failing root task must NOT be published
-    assert failing_task_id not in published_task_ids
-    # The succeeding root task must be published
-    assert succeeding_task_id in published_task_ids
-    # Exactly one task published to Service Bus
-    assert len(mockservicebus._sender.method_calls) == 1
+    # Both tasks should be published (publish happens before store)
+    assert failing_task_id in published_task_ids
+    assert ready_task_ids[1] in published_task_ids
+    # Both tasks published to Service Bus
+    assert len(mockservicebus._sender.method_calls) == 2
 
 
 async def test_publish_graph_fail_children_graph_id_mismatch_raises(app, mockservicebus, mock_storage):

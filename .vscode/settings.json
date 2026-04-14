@@ -7,5 +7,5 @@
     "editor.formatOnSaveMode": "modifications",
     "editor.formatOnSave": true
   },
-  "tlaplus.tlc.modelChecker.options": "-workers 1 -coverage 1"
+  "tlaplus.tlc.modelChecker.options": "-workers 4 -coverage 1"
 }

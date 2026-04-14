@@ -475,7 +475,7 @@ async def test_message_handler_publish_task(message_handler):
     result = await message_handler.publish_task(new_task, delay=10, publish_attempts=2)
 
     assert result is new_task
-    message_handler.task_publisher.assert_called_once_with(new_task, delay=10, publish_attempts=2)
+    message_handler.task_publisher.assert_called_once_with(new_task, delay=10, publish_attempts=2, unique_msg_id=None)
 
 
 async def test_message_handler_abandon_current_message(message_handler, mockservicebus, dummy_msg):

@@ -1,23 +1,26 @@
 [project]
 name = "boilermaker-servicebus"
-version = "1.0.0a1"
+version = "1.0.0a2"
 description = "An async python Background task system using Azure Service Bus Queues"
 authors = [{ "name" = "Erik Aker", "email" = "eaker@mulliganfunding.com" }]
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # We requires unique_msg_id kwarg for servicebus send
-    "aio-azure-clients-toolbox>=1.1.0",
-    "anyio >= 4.11.0",
+    "aio-azure-clients-toolbox>=1.2.0",
+    "rich >= 13.0.0",
+    "anyio >= 4.13.0",
     "azure-core-tracing-opentelemetry >= 1.0.0b12",
-    "azure-servicebus >= 7.14.2",
-    "azure-identity >= 1.25.0",
+    "azure-servicebus >= 7.14.3",
+    "azure-identity >= 1.25.3",
     "opentelemetry-api >= 1.34.0",
-    "pydantic >= 2.12.2",
-    "pydantic-settings >= 2.11.0",
-    "uuid-utils>=0.11.1",
+    "pydantic >= 2.13.0",
+    "pydantic-settings >= 2.13.1",
+    "uuid-utils>=0.14.1",
 ]
+
+[project.scripts]
+boilermaker = "boilermaker.cli:main"
 
 [project.urls]
 Documentation = "https://mulliganfunding.github.io/boilermaker-servicebus/"
@@ -36,7 +39,7 @@ dev = [
     "mkdocs-material>=9.7.6",
     "mkdocstrings[python]>=1.0.3",
     "mkdocs-mermaid2-plugin>=1.2.3",
-    "ty>=0.0.29",
+    "ty>=0.0.30",
 ]
 
 [project.optional-dependencies]

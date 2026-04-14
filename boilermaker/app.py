@@ -330,6 +330,7 @@ class Boilermaker:
         task: Task,
         delay: int = 0,
         publish_attempts: int = 1,
+        unique_msg_id: str | None = None,
     ) -> Task:
         """Publish a task to the Azure Service Bus queue.
 
@@ -359,7 +360,7 @@ class Boilermaker:
                 results: list[int] = await self.service_bus_client.send_message(
                     task.model_dump_json(),
                     delay=delay,
-                    unique_msg_id=str(task.task_id),
+                    unique_msg_id=unique_msg_id or str(task.task_id),
                 )
                 if results and len(results) == 1:
                     sequence_number = results[0]
@@ -426,26 +427,57 @@ class Boilermaker:
         if not loaded_graph:
             raise BoilermakerAppException("TaskGraph not found after storing — this should not happen", [])
 
-        # Publish root tasks with ETag-guarded Scheduled write (same protocol as continue_graph)
+        # Publish root tasks with lease+ETag guard (same protocol as continue_graph)
         for task in loaded_graph.generate_ready_tasks():
+            task_result_slim = loaded_graph.results.get(task.task_id)
+            lease_id = await self.results_storage.try_acquire_lease(
+                task.task_id,
+                graph.graph_id,
+                etag=task_result_slim.etag if task_result_slim else None,
+            )
+            if lease_id is None:
+                logger.debug(
+                    f"Skipping root task {task.task_id} in graph {graph.graph_id}: "
+                    "lease not acquired (another caller holds it or blob was modified)."
+                )
+                continue
+
             try:
-                result = loaded_graph.schedule_task(task.task_id)
-                await self.results_storage.store_task_result(result, etag=result.etag)
-            except BoilermakerStorageError:
+                # Step 2: Publish task to SB (message_id = task_id for fan-in dedup).
+                await self.publish_task(task)
+
+                # Step 3: Write Scheduled status. No etag needed — we already
+                # verified the blob was unmodified when we acquired the lease.
+                try:
+                    result = loaded_graph.schedule_task(task.task_id)
+                    await self.results_storage.store_task_result(result, lease_id=lease_id)
+                except BoilermakerStorageError:
+                    logger.warning(
+                        f"Failed to write Scheduled status for root task {task.task_id} in graph "
+                        f"{graph.graph_id} (lease held). "
+                        "Task was already published to Service Bus.",
+                        exc_info=True,
+                    )
+                    continue
+                except ValueError:
+                    logger.error(
+                        f"schedule_task raised ValueError for root task {task.task_id} in graph "
+                        f"{graph.graph_id}. Task was already published; blob write skipped.",
+                        exc_info=True,
+                    )
+                    continue
+            except Exception:
                 logger.error(
-                    f"Failed to write Scheduled status for root task {task.task_id} in graph "
-                    f"{graph.graph_id}. Not publishing to avoid inconsistent state.",
+                    f"Failed to publish root task {task.task_id} in graph {graph.graph_id}; "
+                    "task remains in Pending status in blob and will be retried on redelivery "
+                    "via generate_ready_tasks().",
                     exc_info=True,
                 )
                 continue
-            except ValueError:
-                logger.error(
-                    f"schedule_task raised ValueError for root task {task.task_id} in graph "
-                    f"{graph.graph_id}. Skipping.",
-                    exc_info=True,
+            finally:
+                await self.results_storage.release_lease(
+                    task.task_id, graph.graph_id, lease_id
                 )
-                continue
-            await self.publish_task(task)
 
         return graph
 
