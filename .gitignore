@@ -21,3 +21,10 @@ unittest.junit.xml
 site/
 todo*.md
 tmp/
+.bmo/
+.claude/
+specs/states/
+specs/*out
+specs/*TTrace*
+specs/*trace*
+states/

@@ -7,6 +7,7 @@ async def sample_task(state, number1, number2: int = 4):
         state.sample_task_called += number1
     return number1 + number2
 
+
 # ~~~~ ~~~~~ ~~~~ ~~~~ #
 # Cycle Detection Tests
 # ~~~~ ~~~~~ ~~~~ ~~~~ #
@@ -205,6 +206,9 @@ def test_cycle_detection_stress_test_false_positive():
     # The stress test: this should still be valid
     assert len(graph.children) == 12  # All tasks added
 
+    # Populate pending results so generate_ready_tasks can find Pending-status tasks
+    list(graph.generate_pending_results())
+
     # Only tasks with no parents should be ready initially (just A)
     ready_tasks = list(graph.generate_ready_tasks())
     assert len(ready_tasks) == 1
@@ -374,3 +378,34 @@ def test_cycle_detection_algorithm_really_try_to_break_it():
     # Try: 8 -> 5 (would create cycle through 5 -> 8 path)
     with pytest.raises(ValueError, match="would create a cycle"):
         graph.add_task(tasks[5], parent_ids=[tasks[8].task_id])
+
+
+def test_cycle_detection_error_message_contains_all_parent_ids():
+    """Cycle detection error message must include the full parent_ids list.
+
+    Regression guard: the original message used `parent_id` (the last loop
+    variable) instead of `parent_ids` (the full argument). When multiple
+    parents are supplied the message must list all of them, not just the last.
+    """
+    graph = task.TaskGraph(graph_id="error_msg_test")
+
+    task_a = task.Task.si(sample_task)
+    task_b = task.Task.si(sample_task)
+    task_c = task.Task.si(sample_task)
+
+    # Build: A -> B -> C (valid chain)
+    graph.add_task(task_a)
+    graph.add_task(task_b, parent_ids=[task_a.task_id])
+    graph.add_task(task_c, parent_ids=[task_b.task_id])
+
+    # Attempt to close the cycle using two parents so parent_ids has >1 element.
+    # task_a already has task_b as a descendant, so making it depend on both
+    # task_b and task_c would create a cycle.
+    with pytest.raises(ValueError) as exc_info:
+        graph.add_task(task_a, parent_ids=[task_b.task_id, task_c.task_id])
+
+    error_message = str(exc_info.value)
+    assert "would create a cycle" in error_message
+    # The message must reference the full parent_ids list, not a single parent_id.
+    assert task_b.task_id in error_message
+    assert task_c.task_id in error_message

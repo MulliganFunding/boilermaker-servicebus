@@ -7,8 +7,7 @@ from boilermaker.exc import BoilermakerUnregisteredFunction
 from boilermaker.failure import TaskFailureResult
 from boilermaker.retries import RetryException
 from boilermaker.task import Task, TaskResult, TaskStatus
-
-from .common import TaskHandler
+from boilermaker.task.types import TaskHandler
 
 logger = logging.getLogger("boilermaker.app")
 
@@ -45,9 +44,7 @@ async def eval_task(
     logger.info(f"[{task.function_name}] Begin Task {task.sequence_number=}")
 
     if function is None:
-        raise BoilermakerUnregisteredFunction(
-            f"Function {task.function_name} not found in registry"
-        )
+        raise BoilermakerUnregisteredFunction(f"Function {task.function_name} not found in registry")
 
     try:
         result = await function(
@@ -78,8 +75,7 @@ async def eval_task(
                 status=TaskStatus.Success,
             )
             logger.info(
-                f"[{task.function_name}] Completed Task {task.sequence_number=} "
-                f"in {time.monotonic() - start:.3f}s"
+                f"[{task.function_name}] Completed Task {task.sequence_number=} in {time.monotonic() - start:.3f}s"
             )
     except RetryException as retry:
         # A retry has been requested:

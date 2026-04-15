@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from boilermaker import retries, task
+from boilermaker.task.graph import _LastAddedSentinel
 
 from ..graph_factories import diamond_graph, linear_graph, ready_task_scenario, simple_graph
 from .helpers import (
@@ -155,12 +156,12 @@ def test_task_graph_ready_tasks_excludes_started():
     t1 = task.Task.default("func1")
     graph.add_task(t1)
 
+    # Populate pending results before checking readiness
+    assert len(list(graph.generate_pending_results())) == 1
+
     # Initially ready
     ready_tasks = list(graph.generate_ready_tasks())
     assert len(ready_tasks) == 1
-
-    # Put a Pending result in there
-    assert len(list(graph.generate_pending_results())) == 1
 
     # Mark as started
     graph.schedule_task(t1.task_id)
@@ -840,7 +841,12 @@ def test_task_graph_mixed_success_failure_dependencies():
     assert task_a.task_id in graph.fail_edges
     assert task_b.task_id in graph.fail_edges
     assert cleanup_a.task_id in graph.fail_edges[task_a.task_id]
-    assert cleanup_b.task_id in graph.fail_edges[task_b.task_id]  # Test scenario 1: A succeeds
+    assert cleanup_b.task_id in graph.fail_edges[task_b.task_id]
+
+    # Populate pending results so generate_ready_tasks can find Pending-status tasks
+    list(graph.generate_pending_results())
+
+    # Test scenario 1: A succeeds
     graph.results[task_a.task_id] = task.TaskResult(
         task_id=task_a.task_id, graph_id=graph.graph_id, status=task.TaskStatus.Success
     )
@@ -987,8 +993,11 @@ def test_task_graph_builder_parallel():
     task_c = task.Task.default("task_c")
     tasks = [task_a, task_b, task_c]
 
-    # Add parallel tasks
-    result = builder.parallel(tasks)
+    with pytest.raises(ValueError, match="parallel requires at least one task"):
+        builder.parallel()
+
+    # Add parallel tasks (variadic)
+    result = builder.parallel(task_a, task_b, task_c)
 
     # Should return self for chaining
     assert result is builder
@@ -1014,8 +1023,8 @@ def test_task_graph_builder_parallel_with_dependencies():
     # Add initial task
     builder.add(init_task)
 
-    # Add parallel tasks that depend on init_task
-    builder.parallel([task_a, task_b], depends_on=[init_task.task_id])
+    # Add parallel tasks that depend on init_task (using Task object)
+    builder.parallel(task_a, task_b, depends_on=[init_task])
 
     # Both parallel tasks should depend on init_task
     assert builder._dependencies[task_a.task_id] == {init_task.task_id}
@@ -1050,43 +1059,197 @@ def test_task_graph_builder_then_without_previous_task():
     builder = task.TaskGraphBuilder()
     task_a = task.Task.default("task_a")
 
-    with pytest.raises(ValueError, match="No previous tasks to depend on"):
+    with pytest.raises(ValueError, match="No tasks have been added yet"):
         builder.then(task_a)
 
 
-def test_task_graph_builder_then_parallel():
-    """Test parallel() method functionality."""
+# ~~~~ §8.3 — _resolve_dependencies() type widening ~~~~ #
+
+
+def test_add_depends_on_task_object():
+    """depends_on=[task_a] (Task object) resolves correctly to task_a.task_id."""
     builder = task.TaskGraphBuilder()
-    init_task = task.Task.default("init_task")
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
 
-    # Add initial task
-    builder.add(init_task)
+    builder.add(task_a, depends_on=None)
+    builder.add(task_b, depends_on=[task_a])
 
-    # Add parallel tasks that depend on init_task
-    result = builder.parallel([task_a, task_b])
-
-    # Should return self for chaining
-    assert result is builder
-
-    # Both should depend on init_task
-    assert builder._dependencies[task_a.task_id] == {init_task.task_id}
-    assert builder._dependencies[task_b.task_id] == {init_task.task_id}
-
-    # Both should be in _last_added
-    assert set(builder._last_added) == {task_a.task_id, task_b.task_id}
+    assert builder._dependencies[task_b.task_id] == {task_a.task_id}
 
 
-def test_task_graph_builder_chain():
-    """Test chain() convenience method."""
+def test_add_depends_on_task_id_string():
+    """depends_on=[task_a.task_id] (string) works as before."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+
+    builder.add(task_a, depends_on=None)
+    builder.add(task_b, depends_on=[task_a.task_id])
+
+    assert builder._dependencies[task_b.task_id] == {task_a.task_id}
+
+
+def test_add_depends_on_task_chain():
+    """depends_on=[chain_abc] (TaskChain) resolves to chain_abc.last.task_id."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+    task_d = task.Task.default("task_d")
+
+    chain_abc = task.TaskChain(task_a, task_b, task_c)
+    # Register each task in the chain so _resolve_dependencies can find them
+    builder.add(task_a, depends_on=None)
+    builder.add(task_b, depends_on=None)
+    builder.add(task_c, depends_on=None)
+
+    builder.add(task_d, depends_on=[chain_abc])
+
+    # Should resolve to last (task_c)
+    assert builder._dependencies[task_d.task_id] == {task_c.task_id}
+
+
+def test_add_depends_on_mixed_types():
+    """_resolve_dependencies handles Task objects and str TaskId in the same list."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder.add(task_a, depends_on=None)
+    builder.add(task_b, depends_on=None)
+    # task_c depends on task_a (as Task object) AND task_b (as raw TaskId string)
+    builder.add(task_c, depends_on=[task_a, task_b.task_id])
+
+    assert task_a.task_id in builder._dependencies[task_c.task_id]
+    assert task_b.task_id in builder._dependencies[task_c.task_id]
+
+
+def test_add_depends_on_unknown_task_raises():
+    """depends_on with an unregistered task raises ValueError."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+    task_never_added = task.Task.default("task_never_added")
+
+    builder.add(task_a, depends_on=None)
+
+    with pytest.raises(ValueError, match="not found in this graph"):
+        builder.add(task_a, depends_on=[task_never_added])
+
+
+# ~~~~ §8.4 — duplicate-task validation ~~~~ #
+
+
+def test_add_duplicate_task_raises():
+    """Adding the same Task object twice raises ValueError with task_id and function_name."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+
+    builder.add(task_a, depends_on=None)
+
+    with pytest.raises(ValueError, match=task_a.task_id):
+        builder.add(task_a, depends_on=None)
+
+
+def test_add_duplicate_task_id_raises():
+    """Two different Task objects with the same task_id raises ValueError."""
+    builder = task.TaskGraphBuilder()
+    task_a1 = task.Task.default("task_a")
+    # Create a separate Task instance that shares task_a1's task_id
+    task_a2 = task.Task.default("task_a", task_id=task_a1.task_id)
+
+    builder.add(task_a1, depends_on=None)
+
+    with pytest.raises(ValueError, match=task_a1.task_id):
+        builder.add(task_a2, depends_on=None)
+
+
+# ~~~~ §8.5 — inline on_failure= in add() ~~~~ #
+
+
+def test_add_with_on_failure_registers_callback():
+    """add(task_a, on_failure=handler) stores handler in _failure_callbacks."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+    handler = task.Task.default("handler")
+
+    builder.add(task_a, depends_on=None, on_failure=handler)
+
+    assert task_a.task_id in builder._failure_callbacks
+    assert handler in builder._failure_callbacks[task_a.task_id]
+
+
+def test_add_on_failure_appears_in_built_graph():
+    """After build(), on_failure handler appears in graph.fail_children and graph.fail_edges."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+    handler = task.Task.default("handler")
+
+    graph = builder.add(task_a, depends_on=None, on_failure=handler).build()
+
+    assert handler.task_id in graph.fail_children
+    assert task_a.task_id in graph.fail_edges
+    assert handler.task_id in graph.fail_edges[task_a.task_id]
+
+
+# ~~~~ §8.6 — then() with on_failure= ~~~~ #
+
+
+def test_then_on_empty_builder_raises():
+    """then() on empty builder raises with updated error message."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+
+    with pytest.raises(
+        ValueError,
+        match="No tasks have been added yet. Call .add\\(\\) or .add_chain\\(\\) first",
+    ):
+        builder.then(task_a)
+
+
+def test_then_with_on_failure():
+    """add(task_a).then(task_b, on_failure=handler) registers handler on task_b, not task_a."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    handler = task.Task.default("handler")
+
+    builder.add(task_a, depends_on=None).then(task_b, on_failure=handler)
+
+    # Handler should be on task_b
+    assert task_b.task_id in builder._failure_callbacks
+    assert handler in builder._failure_callbacks[task_b.task_id]
+    # task_a should have no failure callbacks
+    assert task_a.task_id not in builder._failure_callbacks
+
+
+def test_then_delegates_to_add():
+    """add(a).then(b) is identical to add(a).add(b, depends_on=LAST_ADDED)."""
+    builder1 = task.TaskGraphBuilder()
+    builder2 = task.TaskGraphBuilder()
+
+    task_a1 = task.Task.default("task_a")
+    task_b1 = task.Task.default("task_b")
+    task_a2 = task.Task.default("task_a", task_id=task_a1.task_id)
+    task_b2 = task.Task.default("task_b", task_id=task_b1.task_id)
+
+    builder1.add(task_a1, depends_on=None).then(task_b1)
+    builder2.add(task_a2, depends_on=None).add(task_b2, depends_on=task.LAST_ADDED)
+
+    assert builder1._dependencies[task_b1.task_id] == builder2._dependencies[task_b2.task_id]
+    assert builder1._last_added == builder2._last_added
+
+
+def test_task_graph_builder_sequence():
+    """Test sequence() convenience method."""
     builder = task.TaskGraphBuilder()
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
     task_c = task.Task.default("task_c")
 
     # Chain tasks
-    result = builder.chain(task_a, task_b, task_c)
+    result = builder.sequence(task_a, task_b, task_c)
 
     # Should return self for chaining
     assert result is builder
@@ -1100,89 +1263,21 @@ def test_task_graph_builder_chain():
     assert builder._last_added == [task_c.task_id]
 
 
-def test_task_graph_builder_chain_empty():
-    """Test chain() with no tasks."""
+def test_task_graph_builder_sequence_empty():
+    """Test sequence() with no tasks."""
     builder = task.TaskGraphBuilder()
-    result = builder.chain()
+    result = builder.sequence()
 
     # Should return self and do nothing
     assert result is builder
     assert len(builder._tasks) == 0
 
 
-def test_task_graph_builder_on_failure():
-    """Test on_failure() method."""
-    builder = task.TaskGraphBuilder()
-    main_task = task.Task.default("main_task")
-    error_handler = task.Task.default("error_handler")
-
-    # Add main task first
-    builder.add(main_task)
-
-    # Add failure callback
-    result = builder.on_failure(main_task.task_id, error_handler)
-
-    # Should return self for chaining
-    assert result is builder
-
-    # Failure callback should be stored
-    assert main_task.task_id in builder._failure_callbacks
-    assert error_handler in builder._failure_callbacks[main_task.task_id]
-
-
-def test_task_graph_builder_on_failure_task_not_found():
-    """Test on_failure() raises error when parent task not found."""
-    builder = task.TaskGraphBuilder()
-    missing_task_id = task.TaskId("missing-task")
-    error_handler = task.Task.default("error_handler")
-
-    with pytest.raises(ValueError, match="Parent task .* not found"):
-        builder.on_failure(missing_task_id, error_handler)
-
-
-def test_task_graph_builder_multiple_failure_callbacks():
-    """Test adding multiple failure callbacks to same task."""
-    builder = task.TaskGraphBuilder()
-    main_task = task.Task.default("main_task")
-    handler_a = task.Task.default("handler_a")
-    handler_b = task.Task.default("handler_b")
-
-    # Add main task and multiple failure handlers
-    builder.add(main_task)
-    builder.on_failure(main_task.task_id, handler_a)
-    builder.on_failure(main_task.task_id, handler_b)
-
-    # Both handlers should be stored
-    callbacks = builder._failure_callbacks[main_task.task_id]
-    assert len(callbacks) == 2
-    assert handler_a in callbacks
-    assert handler_b in callbacks
-
-
-def test_task_graph_builder_add_success_fail_branch():
-    """Test add_success_fail_branch() with explicit condition_task_id."""
-    builder = task.TaskGraphBuilder()
-    task_a = task.Task.default("task_a")
-    success_task = task.Task.default("success_task")
-    failure_task = task.Task.default("failure_task")
-
-    # Add multiple tasks
-    builder.add(task_a)
-
-    # Branch from task_a explicitly (not _last_added)
-    builder.add_success_fail_branch(task_a.task_id, success_task, failure_task)
-
-    # Success task should depend on task_a (not task_b)
-    assert builder._dependencies[success_task.task_id] == {task_a.task_id}
-    assert task_a.task_id in builder._failure_callbacks
-    assert failure_task in builder._failure_callbacks[task_a.task_id]
-
-
 def test_task_graph_builder_build_empty():
     """Test build() raises error for empty graph."""
     builder = task.TaskGraphBuilder()
 
-    with pytest.raises(ValueError, match="Cannot build empty graph"):
+    with pytest.raises(ValueError, match="Cannot build an empty graph"):
         builder.build()
 
 
@@ -1218,8 +1313,8 @@ def test_task_graph_builder_build_with_failure_callbacks():
     success_task = task.Task.default("success_task")
     failure_task = task.Task.default("failure_task")
 
-    # Build graph with failure callback
-    graph = builder.add(main_task).then(success_task).on_failure(main_task.task_id, failure_task).build()
+    # Build graph with failure callback using inline on_failure=
+    graph = builder.add(main_task, on_failure=failure_task).then(success_task).build()
 
     # Verify failure callback is in graph
     assert failure_task.task_id in graph.fail_children
@@ -1249,20 +1344,19 @@ def test_task_graph_builder_complex_workflow():
     # init -> validate -> (process_a, process_b, process_c) -> merge -> finalize
     # with cleanup on validate failure and error_handler on merge failure
     graph = (
-        builder.chain(init_task, validate_task)
-        .parallel([process_a, process_b, process_c])
-        .then(merge_task)
-        .chain(finalize_task, cleanup_task)
-        .on_failure(validate_task.task_id, cleanup_task)
-        .on_failure(merge_task.task_id, error_handler)
+        builder.add(init_task, depends_on=None)
+        .then(validate_task, on_failure=cleanup_task)
+        .parallel(process_a, process_b, process_c)
+        .then(merge_task, on_failure=error_handler)
+        .then(finalize_task)
         .build()
     )
 
-    # Verify the structure - all tasks should be in children (including failure callbacks)
+    # Verify the structure
     # Regular tasks: init, validate, process_a, process_b, process_c, merge, finalize = 7
-    # Failure callbacks are also in children: cleanup_task, error_handler
-    assert len(graph.children) == 8  # All tasks not including failure callbacks
-    assert len(graph.fail_children) == 2  # cleanup_task, error_handler
+    assert len(graph.children) == 7
+    # Failure callbacks: cleanup_task (on validate), error_handler (on merge)
+    assert len(graph.fail_children) == 2
 
     # Verify chain: init -> validate
     assert validate_task.task_id in graph.edges[init_task.task_id]
@@ -1280,10 +1374,6 @@ def test_task_graph_builder_complex_workflow():
             merge_parents.add(parent_id)
     assert merge_parents == {process_a.task_id, process_b.task_id, process_c.task_id}
 
-    # Verify final chain: merge -> finalize -> cleanup
-    assert finalize_task.task_id in graph.edges[merge_task.task_id]
-    assert cleanup_task.task_id in graph.edges[finalize_task.task_id]
-
     # Verify failure callbacks
     assert cleanup_task.task_id in graph.fail_edges[validate_task.task_id]
     assert error_handler.task_id in graph.fail_edges[merge_task.task_id]
@@ -1295,17 +1385,17 @@ def test_task_graph_builder_method_chaining():
 
     # Create tasks
     tasks = [task.Task.default(f"task_{i}") for i in range(10)]
+    error_handler = task.Task.default("error_handler")
 
     # Chain multiple operations - this should not raise any errors
     result = (
-        builder.add(tasks[0])
+        builder.add(tasks[0], on_failure=error_handler)
         .then(tasks[1])
-        .parallel(tasks[2:5])
+        .parallel(*tasks[2:5])
         .then(tasks[5])
-        .parallel(tasks[6:8])
+        .parallel(*tasks[6:8])
         .then(tasks[8])
         .then(tasks[9])
-        .on_failure(tasks[0].task_id, task.Task.default("error_handler"))
     )
 
     # Should return the builder for continued chaining
@@ -1317,19 +1407,19 @@ def test_task_graph_builder_method_chaining():
 
 
 def test_task_graph_builder_cycle_detection_during_build():
-    """Test that cycle detection works during build() phase."""
+    """Test that the builder raises early when a dependency is not yet registered.
+
+    With _resolve_dependencies() validation, forward references are rejected at add() time,
+    which prevents cycles from being formed through the builder API.
+    """
     builder = task.TaskGraphBuilder()
 
     task_a = task.Task.default("task_a")
     task_b = task.Task.default("task_b")
 
-    # Create structure that will cause cycle when built
-    builder.add(task_a, depends_on=[task_b.task_id])  # A depends on B
-    builder.add(task_b, depends_on=[task_a.task_id])  # B depends on A
-
-    # Should raise ValueError during build due to cycle
-    with pytest.raises(ValueError, match="would create a cycle in the DAG"):
-        builder.build()
+    # task_b hasn't been added yet — _resolve_dependencies raises immediately
+    with pytest.raises(ValueError, match="not found in this graph"):
+        builder.add(task_a, depends_on=[task_b.task_id])
 
 
 def test_task_graph_builder_state_isolation():
@@ -1494,11 +1584,10 @@ def test_callback_migration_ergonomics():
     success_task = task.Task.default("success_task")
     failure_task = task.Task.default("failure_task")
 
-    # NEW ERGONOMIC WAY: Use builder with graph-level callbacks
+    # Inline on_failure= kwarg on add() — no separate .on_failure() call needed
     graph = (
-        builder.add(main_task)
+        builder.add(main_task, on_failure=failure_task)
         .then(success_task)  # Success path via dependency
-        .on_failure(main_task.task_id, failure_task)  # Failure path via callback
         .build()
     )
 
@@ -1523,34 +1612,24 @@ def test_complex_callback_migration_scenario():
     save_results = task.Task.default("save_results")
     send_notification = task.Task.default("send_notification")
 
-    # Error handlers (multiple per failure point)
+    # Error handlers (one per failure point, using inline on_failure=)
     validation_error_log = task.Task.default("validation_error_log")
-    validation_error_alert = task.Task.default("validation_error_alert")
     processing_error_rollback = task.Task.default("processing_error_rollback")
-    processing_error_retry = task.Task.default("processing_error_retry")
     save_error_backup = task.Task.default("save_error_backup")
 
-    # Build complex workflow with multiple failure handlers per task
+    # Build complex workflow with failure handlers via inline on_failure=
     graph = (
-        builder.chain(validate_input, process_data, save_results, send_notification)
-        .on_failure(validate_input.task_id, validation_error_log)
-        .on_failure(validate_input.task_id, validation_error_alert)  # Multiple handlers!
-        .on_failure(process_data.task_id, processing_error_rollback)
-        .on_failure(process_data.task_id, processing_error_retry)  # Multiple handlers!
-        .on_failure(save_results.task_id, save_error_backup)
+        builder.add(validate_input, depends_on=None, on_failure=validation_error_log)
+        .then(process_data, on_failure=processing_error_rollback)
+        .then(save_results, on_failure=save_error_backup)
+        .then(send_notification)
         .build()
     )
 
-    # Verify multiple failure handlers per task (impossible with old task-level callbacks)
-    validate_failures = graph.fail_edges[validate_input.task_id]
-    assert validation_error_log.task_id in validate_failures
-    assert validation_error_alert.task_id in validate_failures
-    assert len(validate_failures) == 2
-
-    process_failures = graph.fail_edges[process_data.task_id]
-    assert processing_error_rollback.task_id in process_failures
-    assert processing_error_retry.task_id in process_failures
-    assert len(process_failures) == 2
+    # Verify failure handlers per task
+    assert validation_error_log.task_id in graph.fail_edges[validate_input.task_id]
+    assert processing_error_rollback.task_id in graph.fail_edges[process_data.task_id]
+    assert save_error_backup.task_id in graph.fail_edges[save_results.task_id]
 
     # All main tasks have clean callback state (moved to graph level)
     for main_task in [validate_input, process_data, save_results, send_notification]:
@@ -1630,6 +1709,9 @@ def test_failure_ready_tasks_with_complex_dependency_chains():
     graph.add_task(handler_2, parent_ids=[handler_1.task_id])  # Handler chain
     graph.add_failure_callback(main_b.task_id, handler_3)
 
+    # Populate pending results so generate_ready_tasks can find Pending-status tasks
+    list(graph.generate_pending_results())
+
     # A fails - only handler_1 should be ready (not handler_2 which depends on handler_1)
     graph.results[main_a.task_id] = task.TaskResultSlim(
         status=task.TaskStatus.Failure,
@@ -1664,3 +1746,648 @@ def test_failure_ready_tasks_with_complex_dependency_chains():
     )
     assert len(continue_tasks) == 1
     assert continue_tasks[0].task_id == handler_2.task_id
+
+
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
+# LAST_ADDED SENTINEL TESTS
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
+def test_task_graph_builder_add_depends_on_none_creates_root():
+    """depends_on=None must create a root task with no parents, not fall back to cursor."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+
+    builder.add(task_a)
+    builder.add(task_b, depends_on=None)  # must be a root, NOT depend on task_a
+
+    graph = builder.build()
+
+    # task_a must NOT point to task_b (task_b has no parents)
+    assert task_b.task_id not in graph.edges.get(task_a.task_id, set())
+    # task_b must be present in the graph
+    assert task_b.task_id in graph.children
+
+
+def test_task_graph_builder_add_depends_on_last_added_uses_cursor():
+    """Explicit depends_on=LAST_ADDED must behave identically to omitting depends_on."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+
+    builder.add(task_a)
+    builder.add(task_b, depends_on=task.LAST_ADDED)
+
+    graph = builder.build()
+
+    # task_b must depend on task_a (cursor-following): task_a → task_b
+    assert task_b.task_id in graph.edges[task_a.task_id]
+
+
+def test_task_graph_builder_parallel_depends_on_none_creates_roots():
+    """parallel(tasks, depends_on=None) must create root tasks with no parents."""
+    builder = task.TaskGraphBuilder()
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder.add(task_a)
+    builder.parallel(task_b, task_c, depends_on=None)  # roots, NOT depending on task_a
+
+    graph = builder.build()
+
+    # task_a must NOT point to task_b or task_c
+    assert task_b.task_id not in graph.edges.get(task_a.task_id, set())
+    assert task_c.task_id not in graph.edges.get(task_a.task_id, set())
+    # task_b and task_c must be in the graph
+    assert task_b.task_id in graph.children
+    assert task_c.task_id in graph.children
+
+
+def test_last_added_sentinel_is_singleton():
+    """LAST_ADDED must be a singleton — instantiating _LastAddedSentinel always returns same object."""
+    s1 = _LastAddedSentinel()
+    s2 = _LastAddedSentinel()
+    assert s1 is s2
+    assert s1 is task.LAST_ADDED
+
+
+def test_last_added_sentinel_repr():
+    """LAST_ADDED repr must return 'LAST_ADDED' for debuggability."""
+    assert repr(task.LAST_ADDED) == "LAST_ADDED"
+
+
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
+# TASKCHAIN TESTS
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
+def test_task_chain_requires_at_least_one_task():
+    """TaskChain() with zero tasks must raise ValueError."""
+    with pytest.raises(ValueError, match="TaskChain requires at least one task."):
+        task.TaskChain()
+
+
+def test_task_chain_single_task():
+    """For a single-task chain, head and last must both reference that task."""
+    task_a = task.Task.default("task_a")
+    chain = task.TaskChain(task_a)
+    assert chain.head is task_a
+    assert chain.last is task_a
+
+
+def test_task_chain_head_and_last():
+    """head must be the first task and last must be the last task in the chain."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+    chain = task.TaskChain(task_a, task_b, task_c)
+    assert chain.head is task_a
+    assert chain.last is task_c
+
+
+def test_task_chain_preserves_task_order():
+    """_tasks must preserve insertion order."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+    chain = task.TaskChain(task_a, task_b, task_c)
+    assert chain._tasks == [task_a, task_b, task_c]
+
+
+def test_task_chain_on_failure_stored():
+    """_on_failure must store the provided failure handler task."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    handler = task.Task.default("handler")
+    chain = task.TaskChain(task_a, task_b, on_any_failure=handler)
+    assert chain.on_any_failure is handler
+
+
+def test_task_chain_no_failure_handler():
+    """_on_failure must be None when no on_failure task is provided."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    chain = task.TaskChain(task_a, task_b)
+    assert chain.on_any_failure is None
+
+
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
+# §8.7 — parallel() NEW TESTS
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
+
+
+def test_parallel_basic():
+    """parallel(a, b, c) as first call → all three are roots, cursor = [a, b, c]."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder = task.TaskGraphBuilder()
+    builder.parallel(task_a, task_b, task_c)
+
+    assert builder._dependencies[task_a.task_id] == set()
+    assert builder._dependencies[task_b.task_id] == set()
+    assert builder._dependencies[task_c.task_id] == set()
+    assert set(builder._last_added) == {task_a.task_id, task_b.task_id, task_c.task_id}
+
+
+def test_parallel_after_add():
+    """add(a).parallel(b, c) → b and c both depend on a."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a).parallel(task_b, task_c)
+
+    assert builder._dependencies[task_b.task_id] == {task_a.task_id}
+    assert builder._dependencies[task_c.task_id] == {task_a.task_id}
+
+
+def test_parallel_then_fan_in():
+    """parallel(a, b, c).then(d) → d depends on a, b, AND c."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+    task_d = task.Task.default("task_d")
+
+    builder = task.TaskGraphBuilder()
+    builder.parallel(task_a, task_b, task_c).then(task_d)
+
+    assert builder._dependencies[task_d.task_id] == {
+        task_a.task_id,
+        task_b.task_id,
+        task_c.task_id,
+    }
+
+
+def test_parallel_with_explicit_depends_on():
+    """parallel(b, c, depends_on=[task_a]) with Task object resolves correctly."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a, depends_on=None)
+    builder.parallel(task_b, task_c, depends_on=[task_a])
+
+    assert builder._dependencies[task_b.task_id] == {task_a.task_id}
+    assert builder._dependencies[task_c.task_id] == {task_a.task_id}
+
+
+def test_parallel_with_none_depends_on():
+    """add(a).parallel(b, c, depends_on=None) → b/c are roots, NOT depending on a."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a).parallel(task_b, task_c, depends_on=None)
+
+    assert builder._dependencies[task_b.task_id] == set()
+    assert builder._dependencies[task_c.task_id] == set()
+
+
+def test_parallel_with_on_failure():
+    """parallel(b, c, on_failure=handler) → handler registered on BOTH b and c."""
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+    handler = task.Task.default("handler")
+
+    builder = task.TaskGraphBuilder()
+    builder.parallel(task_b, task_c, on_failure=handler)
+
+    assert handler in builder._failure_callbacks[task_b.task_id]
+    assert handler in builder._failure_callbacks[task_c.task_id]
+
+
+def test_parallel_single_task():
+    """parallel(task_a) is valid — equivalent to add."""
+    task_a = task.Task.default("task_a")
+
+    builder = task.TaskGraphBuilder()
+    result = builder.parallel(task_a)
+
+    assert result is builder
+    assert task_a.task_id in builder._tasks
+    assert builder._last_added == [task_a.task_id]
+
+
+def test_parallel_cursor_contains_all_tasks():
+    """_last_added after parallel() contains exactly all task IDs passed."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder = task.TaskGraphBuilder()
+    builder.parallel(task_a, task_b, task_c)
+
+    assert set(builder._last_added) == {task_a.task_id, task_b.task_id, task_c.task_id}
+    assert len(builder._last_added) == 3
+
+
+def test_parallel_duplicate_task_raises():
+    """parallel(task_a, task_a) raises ValueError."""
+    task_a = task.Task.default("task_a")
+
+    builder = task.TaskGraphBuilder()
+    with pytest.raises(ValueError, match="already been added"):
+        builder.parallel(task_a, task_a)
+
+
+def test_parallel_already_added_task_raises():
+    """add(a).parallel(a) raises ValueError."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a)
+    with pytest.raises(ValueError, match="already been added"):
+        builder.parallel(task_a, task_b)
+
+
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
+# §8.8 — add_chain() SEQUENTIAL TESTS
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
+
+
+def test_add_chain_sequential_single_task():
+    """add(a).add_chain(TaskChain(b)) → b depends on a; cursor = [b.task_id]."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a).add_chain(task.TaskChain(task_b))
+
+    assert builder._dependencies[task_b.task_id] == {task_a.task_id}
+    assert builder._last_added == [task_b.task_id]
+
+
+def test_add_chain_sequential_multi_task():
+    """add(a).add_chain(TaskChain(b, c)) → b→a, c→b; cursor = [c.task_id]."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a).add_chain(task.TaskChain(task_b, task_c))
+
+    assert builder._dependencies[task_b.task_id] == {task_a.task_id}
+    assert builder._dependencies[task_c.task_id] == {task_b.task_id}
+    assert builder._last_added == [task_c.task_id]
+
+
+def test_add_chain_replaces_cursor():
+    """Cursor after sequential add_chain is only [last.task_id]."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+    task_d = task.Task.default("task_d")
+
+    builder = task.TaskGraphBuilder()
+    builder.parallel(task_a, task_b).add_chain(task.TaskChain(task_c, task_d))
+
+    # cursor was [task_a, task_b] before; after add_chain it must be only [task_d]
+    assert builder._last_added == [task_d.task_id]
+
+
+def test_add_chain_embeds_all_tasks():
+    """All tasks in the chain appear in builder._tasks."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder = task.TaskGraphBuilder()
+    builder.add_chain(task.TaskChain(task_a, task_b, task_c))
+
+    assert task_a.task_id in builder._tasks
+    assert task_b.task_id in builder._tasks
+    assert task_c.task_id in builder._tasks
+
+
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
+# §8.9 — add_chain() ROOT / ACCUMULATION TESTS
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~
+
+
+def test_add_chain_root_no_dependency():
+    """add_chain(chain, depends_on=None) → head has empty parent set."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a).add_chain(task.TaskChain(task_b, task_c), depends_on=None)
+
+    # head (task_b) must have no parents
+    assert builder._dependencies[task_b.task_id] == set()
+
+
+def test_add_chain_root_accumulates_cursor():
+    """Two depends_on=None add_chain calls → _last_added = [last1, last2]."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+    task_d = task.Task.default("task_d")
+
+    builder = task.TaskGraphBuilder()
+    builder.add_chain(task.TaskChain(task_a, task_b), depends_on=None)
+    builder.add_chain(task.TaskChain(task_c, task_d), depends_on=None)
+
+    assert set(builder._last_added) == {task_b.task_id, task_d.task_id}
+    assert len(builder._last_added) == 2
+
+
+def test_fan_in_from_two_independent_chains():
+    """Key integration test: two independent chains fan into a single join task."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+    task_d = task.Task.default("task_d")
+    task_e = task.Task.default("task_e")
+    task_f = task.Task.default("task_f")
+
+    chain_abc = task.TaskChain(task_a, task_b, task_c)
+    chain_de = task.TaskChain(task_d, task_e)
+
+    graph = (
+        task.TaskGraphBuilder()
+        .add_chain(chain_abc, depends_on=None)
+        .add_chain(chain_de, depends_on=None)
+        .then(task_f)
+        .build()
+    )
+
+    # task_f must depend on exactly task_c AND task_e
+    # edges maps parent → children, so task_f appears in edges of task_c and task_e
+    assert task_f.task_id in graph.edges[task_c.task_id]
+    assert task_f.task_id in graph.edges[task_e.task_id]
+    # task_f should be the only child of both lasts
+    assert graph.edges[task_c.task_id] == {task_f.task_id}
+    assert graph.edges[task_e.task_id] == {task_f.task_id}
+
+    # Neither chain depends on the other
+    assert task_d.task_id not in graph.edges.get(task_a.task_id, set())
+    assert task_a.task_id not in graph.edges.get(task_d.task_id, set())
+
+
+def test_add_chain_explicit_depends_on_replaces_cursor():
+    """Explicit depends_on=[...] replaces cursor with only [last.task_id]."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+    task_d = task.Task.default("task_d")
+
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a, depends_on=None)
+    builder.add(task_b, depends_on=None)
+    # cursor is now [task_b.task_id]; add_chain with explicit depends_on should REPLACE
+    builder.add_chain(task.TaskChain(task_c, task_d), depends_on=[task_a])
+
+    assert builder._last_added == [task_d.task_id]
+
+
+def test_add_chain_on_failure_registered_on_each_task():
+    """Chain's on_failure is registered on every task in the chain."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+    handler = task.Task.default("handler")
+
+    chain = task.TaskChain(task_a, task_b, task_c, on_any_failure=handler)
+    builder = task.TaskGraphBuilder()
+    builder.add_chain(chain, depends_on=None)
+
+    assert handler in builder._failure_callbacks[task_a.task_id]
+    assert handler in builder._failure_callbacks[task_b.task_id]
+    assert handler in builder._failure_callbacks[task_c.task_id]
+
+
+def test_add_chain_duplicate_task_raises():
+    """Embedding a chain with an already-registered task raises ValueError."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a)
+    with pytest.raises(ValueError, match="already been added"):
+        builder.add_chain(task.TaskChain(task_a, task_b))
+
+
+def test_add_chain_first_on_empty_builder():
+    """add_chain(chain) as first call → head has no parents; cursor = [last.task_id]."""
+    task_a = task.Task.default("task_a")
+    task_b = task.Task.default("task_b")
+    task_c = task.Task.default("task_c")
+
+    builder = task.TaskGraphBuilder()
+    builder.add_chain(task.TaskChain(task_a, task_b, task_c))
+
+    # head has no parents (empty builder, uses LAST_ADDED which resolves to [])
+    assert builder._dependencies[task_a.task_id] == set()
+    # cursor is only the last
+    assert builder._last_added == [task_c.task_id]
+
+
+# ~~~~ ~~~~~ ~~~~ ~~~~ #
+# §8.2 Missing Named Tests
+# ~~~~ ~~~~~ ~~~~ ~~~~ #
+
+
+def test_add_depends_on_last_added_sentinel_explicit():
+    """Passing depends_on=LAST_ADDED explicitly is identical to omitting depends_on."""
+    task_a = task.Task.default("fn_a")
+    task_b = task.Task.default("fn_b")
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a)
+    builder.add(task_b, depends_on=task.LAST_ADDED)
+    graph = builder.build()
+    assert task_b.task_id in graph.edges[task_a.task_id]
+
+
+def test_add_depends_on_none_replaces_cursor():
+    """add(task, depends_on=None) replaces cursor with just that task."""
+    task_a = task.Task.default("fn_a")
+    task_b = task.Task.default("fn_b")
+    task_c = task.Task.default("fn_c")
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a)
+    builder.add(task_b, depends_on=None)  # independent root; cursor = [task_b]
+    builder.add(task_c)  # should depend on task_b (cursor), not task_a
+    graph = builder.build()
+    assert task_c.task_id in graph.edges[task_b.task_id]
+    assert task_c.task_id not in graph.edges.get(task_a.task_id, set())
+
+
+# ~~~~ ~~~~~ ~~~~ ~~~~ #
+# §8.10 Missing Named Tests
+# ~~~~ ~~~~~ ~~~~ ~~~~ #
+
+
+def test_build_twice_produces_independent_graphs():
+    """build() can be called multiple times; each call returns an independent TaskGraph."""
+    task_a = task.Task.default("fn_a")
+    task_b = task.Task.default("fn_b")
+    builder = task.TaskGraphBuilder()
+    builder.add(task_a).then(task_b)
+    graph1 = builder.build()
+    graph2 = builder.build()
+    assert graph1.graph_id != graph2.graph_id
+    assert graph1 is not graph2
+    assert set(graph1.children.keys()) == set(graph2.children.keys())
+
+
+# ~~~~ ~~~~~ ~~~~ ~~~~ #
+# §8.11 Complex Workflow Integration Tests
+# ~~~~ ~~~~~ ~~~~ ~~~~ #
+
+
+def test_diamond_pattern():
+    """Classic diamond: A fans out to B and C, both join at D."""
+    task_a = task.Task.default("fn_a")
+    task_b = task.Task.default("fn_b")
+    task_c = task.Task.default("fn_c")
+    task_d = task.Task.default("fn_d")
+    graph = task.TaskGraphBuilder().add(task_a).parallel(task_b, task_c).then(task_d).build()
+    assert task_b.task_id in graph.edges[task_a.task_id]
+    assert task_c.task_id in graph.edges[task_a.task_id]
+    assert task_d.task_id in graph.edges[task_b.task_id]
+    assert task_d.task_id in graph.edges[task_c.task_id]
+
+
+def test_sequential_chain_with_inline_on_failure():
+    """Failure handlers are registered per-task when using on_failure= kwarg."""
+    task_a = task.Task.default("fn_a")
+    task_b = task.Task.default("fn_b")
+    err_a = task.Task.default("err_a")
+    err_b = task.Task.default("err_b")
+    graph = task.TaskGraphBuilder().add(task_a, on_failure=err_a).then(task_b, on_failure=err_b).build()
+    assert err_a.task_id in graph.fail_children
+    assert err_b.task_id in graph.fail_children
+    assert task_a.task_id in graph.fail_edges
+    assert err_a.task_id in graph.fail_edges[task_a.task_id]
+    assert task_b.task_id in graph.fail_edges
+    assert err_b.task_id in graph.fail_edges[task_b.task_id]
+
+
+def test_explicit_depends_on_with_chain_objects():
+    """TaskChain objects in depends_on resolve to chain.last.task_id."""
+    task_a = task.Task.default("fn_a")
+    task_b = task.Task.default("fn_b")
+    task_c = task.Task.default("fn_c")
+    task_d = task.Task.default("fn_d")
+    chain_ab = task.TaskChain(task_a, task_b)
+    graph = (
+        task.TaskGraphBuilder()
+        .add_chain(chain_ab, depends_on=None)
+        .add(task_c, depends_on=None)  # independent root
+        .add(task_d, depends_on=[chain_ab, task_c])  # waits for chain last AND task_c
+        .build()
+    )
+    assert task_d.task_id in graph.edges[task_b.task_id]  # chain resolved to last
+    assert task_d.task_id in graph.edges[task_c.task_id]
+
+
+def test_complex_parallel_fan_in_with_failure_handlers():
+    """Two independent chains with per-chain failure handlers converge on a join task."""
+    validate = task.Task.default("validate")
+    ingest = task.Task.default("ingest")
+    ingest_err = task.Task.default("ingest_err")
+    transform = task.Task.default("transform")
+    enrich = task.Task.default("enrich")
+    process_err = task.Task.default("process_err")
+    aggregate = task.Task.default("aggregate")
+    cleanup = task.Task.default("cleanup")
+
+    ingest_chain = task.TaskChain(validate, ingest, on_any_failure=ingest_err)
+    process_chain = task.TaskChain(transform, enrich, on_any_failure=process_err)
+
+    graph = (
+        task.TaskGraphBuilder()
+        .add_chain(ingest_chain, depends_on=None)
+        .add_chain(process_chain, depends_on=None)
+        .then(aggregate, on_failure=cleanup)
+        .build()
+    )
+    # aggregate depends on both chain lasts
+    assert aggregate.task_id in graph.edges[ingest.task_id]
+    assert aggregate.task_id in graph.edges[enrich.task_id]
+    # ingest chain internal deps
+    assert ingest.task_id in graph.edges[validate.task_id]
+    # failure handlers registered
+    assert ingest_err.task_id in graph.fail_children
+    assert process_err.task_id in graph.fail_children
+    assert cleanup.task_id in graph.fail_children
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# generate_ready_tasks skips tasks with missing result blobs
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+def test_task_with_no_result_blob_is_skipped_with_warning(caplog):
+    """generate_ready_tasks must skip tasks with no result blob and emit a warning.
+
+    A task with no entry in graph.results (simulating a store_graph partial failure)
+    must not be yielded and must log a warning instead.
+    """
+    import logging
+
+    graph = task.TaskGraph()
+    t1 = task.Task.default("no_result_task")
+    graph.add_task(t1)
+    # Deliberately do NOT call generate_pending_results() — t1 has no result blob.
+
+    with caplog.at_level(logging.WARNING, logger="boilermaker.app"):
+        ready = list(graph.generate_ready_tasks())
+
+    assert ready == [], "Task with no result blob must not be yielded by generate_ready_tasks"
+    warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(t1.task_id in msg for msg in warning_messages), (
+        f"Expected warning to mention the task_id {t1.task_id!r}. Got: {warning_messages}"
+    )
+    assert any("no result blob" in msg for msg in warning_messages), (
+        f"Expected warning to mention missing result blob. Got: {warning_messages}"
+    )
+
+
+def test_task_with_pending_result_is_yielded():
+    """generate_ready_tasks must yield root tasks that have Pending status."""
+    graph = task.TaskGraph()
+    t1 = task.Task.default("pending_task")
+    graph.add_task(t1)
+
+    list(graph.generate_pending_results())
+
+    ready = list(graph.generate_ready_tasks())
+    assert len(ready) == 1
+    assert ready[0].task_id == t1.task_id
+
+
+def test_mixed_missing_and_pending_results(caplog):
+    """In a graph with some missing and some Pending results, only Pending tasks are yielded."""
+    import logging
+
+    graph = task.TaskGraph()
+    t_with_result = task.Task.default("has_result")
+    t_no_result = task.Task.default("no_result")
+    graph.add_task(t_with_result)
+    graph.add_task(t_no_result)
+
+    # Only populate pending result for t_with_result
+    graph.results[t_with_result.task_id] = task.TaskResultSlim(
+        task_id=t_with_result.task_id,
+        graph_id=graph.graph_id,
+        status=task.TaskStatus.Pending,
+    )
+    # t_no_result intentionally has no entry in graph.results
+
+    with caplog.at_level(logging.WARNING, logger="boilermaker.app"):
+        ready = list(graph.generate_ready_tasks())
+
+    ready_ids = {t.task_id for t in ready}
+    assert t_with_result.task_id in ready_ids, "Task with Pending result must be yielded"
+    assert t_no_result.task_id not in ready_ids, "Task with no result blob must not be yielded"
+
+    warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(t_no_result.task_id in msg for msg in warning_messages), (
+        f"Expected warning for task with no result blob. Got: {warning_messages}"
+    )

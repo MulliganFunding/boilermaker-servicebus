@@ -1,6 +1,30 @@
 # Task Graph API Reference
 
-API documentation for TaskGraph and TaskGraphBuilder classes used to build complex workflows with dependencies.
+API documentation for TaskGraph, TaskGraphBuilder, and TaskChain classes used to build complex workflows with dependencies.
+
+## Module-level Constants
+
+### `LAST_ADDED`
+
+```python
+from boilermaker.task import LAST_ADDED
+```
+
+Sentinel value used as the default for `depends_on` parameters. When passed (or omitted,
+since it is the default), the method resolves dependencies using the builder's internal
+cursor — the last task(s) added. Use `None` to declare an explicit root task with no
+parents.
+
+## TaskChain
+
+::: boilermaker.task.graph.TaskChain
+  options:
+    show_source: true
+    show_root_heading: true
+    members:
+      - __init__
+      - head
+      - last
 
 ## TaskGraphBuilder
 
@@ -11,11 +35,10 @@ API documentation for TaskGraph and TaskGraphBuilder classes used to build compl
     members:
       - __init__
       - add
-      - parallel
       - then
+      - parallel
+      - add_chain
       - chain
-      - on_failure
-      - add_success_fail_branch
       - build
 
 ## TaskGraph
@@ -45,15 +68,55 @@ API documentation for TaskGraph and TaskGraphBuilder classes used to build compl
 ## Quick Examples
 
 ```py
-# Sequential workflow
-graph = TaskGraphBuilder().chain(task_a, task_b, task_c).build()
+from boilermaker.task import LAST_ADDED, TaskChain, TaskGraphBuilder
 
-# Parallel execution
-graph = TaskGraphBuilder().parallel([task_a, task_b, task_c]).build()
+# Sequential workflow: A → B → C
+graph = (
+    TaskGraphBuilder()
+    .add(task_a)
+    .then(task_b)
+    .then(task_c)
+    .build()
+)
 
-# With failure handling
-graph = (TaskGraphBuilder()
-    .add(main_task)
-    .on_failure(main_task.task_id, cleanup_task)
-    .build())
+# Fan-out: A → (B, C, D)
+graph = (
+    TaskGraphBuilder()
+    .add(task_a)
+    .parallel(task_b, task_c, task_d)
+    .build()
+)
+
+# Diamond: A → (B, C) → D
+graph = (
+    TaskGraphBuilder()
+    .add(task_a)
+    .parallel(task_b, task_c)
+    .then(task_d)
+    .build()
+)
+
+# Inline failure handler
+graph = (
+    TaskGraphBuilder()
+    .add(main_task, on_failure=cleanup_task)
+    .then(success_task)  # only runs if main_task succeeds
+    .build()
+)
+
+# Independent chains with fan-in join
+chain_abc = TaskChain(task_a, task_b, task_c)
+chain_de  = TaskChain(task_d, task_e)
+
+graph = (
+    TaskGraphBuilder()
+    .add_chain(chain_abc, depends_on=None)  # root; cursor accumulates
+    .add_chain(chain_de,  depends_on=None)  # root; cursor accumulates
+    .then(task_f)                           # depends on both chain lasts
+    .build()
+)
+
+# TaskChain with shared failure handler
+pipeline = TaskChain(task_a, task_b, task_c, on_any_failure=error_handler)
+graph = TaskGraphBuilder().add_chain(pipeline).build()
 ```

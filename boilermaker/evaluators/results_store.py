@@ -62,9 +62,7 @@ class ResultsStorageTaskEvaluator(TaskEvaluatorBase):
                 await self.complete_message()
                 message_settled = True
             except exc.BoilermakerTaskLeaseLost:
-                logger.error(
-                    f"Lost message lease when trying to complete early for task {self.task.function_name}"
-                )
+                logger.error(f"Lost message lease when trying to complete early for task {self.task.function_name}")
                 return TaskResult(
                     task_id=self.task.task_id,
                     graph_id=self.task.graph_id,
@@ -89,8 +87,7 @@ class ResultsStorageTaskEvaluator(TaskEvaluatorBase):
                     message_settled = True
                 except exc.BoilermakerTaskLeaseLost:
                     logger.error(
-                        f"Lost message lease when trying to deadletter/complete "
-                        f" for task {self.task.function_name}"
+                        f"Lost message lease when trying to deadletter/complete  for task {self.task.function_name}"
                     )
                     return TaskResult(
                         task_id=self.task.task_id,

@@ -7,7 +7,7 @@ allows sending messages or subscribing to a queue.
 
 from aio_azure_clients_toolbox import (
     CredentialFactory,
-    ManagedAzureServiceBusSender,  # type: ignore
+    ManagedAzureServiceBusSender,
 )
 
 from .config import Config

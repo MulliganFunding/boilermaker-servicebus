@@ -27,10 +27,7 @@ class GraphBuilder:
         """Mark a task as completed with given result."""
         task_obj = self.tasks[name]
         task_result = TaskResult(
-            task_id=task_obj.task_id,
-            graph_id=self.graph.graph_id,
-            status=TaskStatus.Success,
-            result=result
+            task_id=task_obj.task_id, graph_id=self.graph.graph_id, status=TaskStatus.Success, result=result
         )
         self.graph.add_result(task_result)
         return task_result
@@ -39,10 +36,7 @@ class GraphBuilder:
         """Mark a task as failed."""
         task_obj = self.tasks[name]
         task_result = TaskResult(
-            task_id=task_obj.task_id,
-            graph_id=self.graph.graph_id,
-            status=TaskStatus.Failure,
-            errors=[error]
+            task_id=task_obj.task_id, graph_id=self.graph.graph_id, status=TaskStatus.Failure, errors=[error]
         )
         self.graph.add_result(task_result)
         return task_result
@@ -67,7 +61,7 @@ def linear_graph(num_tasks: int = 3) -> tuple[TaskGraph, list[Task]]:
     # Each subsequent task depends on the previous one
     for i in range(1, num_tasks):
         task_name = f"task_{i}"
-        parent_name = f"task_{i-1}"
+        parent_name = f"task_{i - 1}"
         t = builder.add_task(task_name, parents=[parent_name])
         tasks.append(t)
 
@@ -90,12 +84,7 @@ def diamond_graph() -> tuple[TaskGraph, dict[str, Task]]:
     t3 = builder.add_task("right", parents=["root"])
     t4 = builder.add_task("merge", parents=["left", "right"])
 
-    return builder.graph, {
-        "root": t1,
-        "left": t2,
-        "right": t3,
-        "merge": t4
-    }
+    return builder.graph, {"root": t1, "left": t2, "right": t3, "merge": t4}
 
 
 def parallel_graph(num_parallel: int = 3) -> tuple[TaskGraph, Task, list[Task]]:
@@ -152,14 +141,18 @@ def complex_graph() -> tuple[TaskGraph, dict[str, Task]]:
 
 
 def ready_task_scenario() -> tuple[TaskGraph, dict[str, Task], callable]:
-    """Create a scenario for testing ready task detection."""
+    """Create a scenario for testing ready task detection.
+
+    Pending results are pre-populated for all tasks so that generate_ready_tasks
+    can correctly identify tasks with Pending status.
+    """
     graph, tasks = diamond_graph()
+    list(graph.generate_pending_results())
 
     def assert_ready_tasks(expected_names: list[str]):
         """Helper to assert which tasks are ready."""
         ready = list(graph.generate_ready_tasks())
-        ready_names = [next(name for name, t in tasks.items()
-                           if t.task_id == r.task_id) for r in ready]
+        ready_names = [next(name for name, t in tasks.items() if t.task_id == r.task_id) for r in ready]
         assert set(ready_names) == set(expected_names), f"Expected {expected_names}, got {ready_names}"
 
     return graph, tasks, assert_ready_tasks

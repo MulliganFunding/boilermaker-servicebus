@@ -161,9 +161,7 @@ async def test_create_task_with_policy(app):
     # Sanity check: default policy should be higher than what we're setting below
     assert app.task_registry["somefunc"].policy.max_tries > 2
     # Now we can create a task out of it
-    policy = retries.RetryPolicy(
-        max_tries=2, delay=30, delay_max=600, retry_mode=retries.RetryMode.Exponential
-    )
+    policy = retries.RetryPolicy(max_tries=2, delay=30, delay_max=600, retry_mode=retries.RetryMode.Exponential)
     task = app.create_task(somefunc, somekwarg="akwargval", policy=policy)
     assert task.function_name == "somefunc"
     assert task.payload == {"args": (), "kwargs": {"somekwarg": "akwargval"}}
@@ -457,6 +455,88 @@ async def test_publish_graph_failures(app, mockservicebus, mock_storage):
     mockservicebus._sender.assert_not_called()
 
 
+async def test_publish_graph_store_failure_does_not_prevent_publish(app, mockservicebus, mock_storage):
+    """Test that a store_task_result failure for Scheduled write does not prevent publish.
+
+    With publish-before-store ordering (matching continue_graph), the task is published
+    to Service Bus first. If the subsequent Scheduled write fails, the task was already
+    published — only a warning is logged. Both root tasks should be published regardless
+    of Scheduled-write failures.
+    """
+    import copy
+
+    app.results_storage = mock_storage
+
+    # Build a graph with two independent root tasks (no parent-child relationship)
+    graph = TaskGraph()
+    t1 = Task.si(sample_task, 1, 2)
+    t2 = Task.si(sample_task, 3, 4)
+    graph.add_task(t1)
+    graph.add_task(t2)
+
+    # Simulate load_graph returning a graph with ETags on pending results
+    loaded_graph = copy.deepcopy(graph)
+    for result in loaded_graph.generate_pending_results():
+        result.etag = "mock-etag"
+    mock_storage.load_graph = AsyncMock(return_value=loaded_graph)
+
+    # Determine which task_id will be scheduled first by generate_ready_tasks
+    ready_task_ids = [task.task_id for task in loaded_graph.generate_ready_tasks()]
+    assert len(ready_task_ids) == 2, "Expected two root tasks"
+    failing_task_id = ready_task_ids[0]
+
+    # store_task_result raises for the first root task, succeeds for the second
+    async def store_task_result_side_effect(result, etag=None):
+        if result.task_id == failing_task_id:
+            raise BoilermakerStorageError("ETag conflict — concurrent write")
+
+    mock_storage.store_task_result.side_effect = store_task_result_side_effect
+
+    # Patch publish_task to track which task IDs were published
+    published_task_ids = []
+
+    original_publish_task = app.publish_task
+
+    async def tracking_publish_task(task, **kwargs):
+        published_task_ids.append(task.task_id)
+        return await original_publish_task(task, **kwargs)
+
+    app.publish_task = tracking_publish_task
+
+    await app.publish_graph(graph)
+
+    # Both tasks should be published (publish happens before store)
+    assert failing_task_id in published_task_ids
+    assert ready_task_ids[1] in published_task_ids
+    # Both tasks published to Service Bus
+    assert len(mockservicebus._sender.method_calls) == 2
+
+
+async def test_publish_graph_fail_children_graph_id_mismatch_raises(app, mockservicebus, mock_storage):
+    """publish_graph must reject graphs where any fail_children task
+    carries a graph_id different from the graph's own graph_id.
+    """
+    app.results_storage = mock_storage
+
+    graph = TaskGraph()
+    t1 = Task.si(sample_task, 1, 2)
+    graph.add_task(t1)
+
+    # Add a failure callback and then corrupt its graph_id to simulate a mismatch.
+    # add_failure_callback sets graph_id automatically, so we must overwrite it after.
+    failure_handler = Task.si(failing_task)
+    graph.add_failure_callback(t1.task_id, failure_handler)
+    # Corrupt the graph_id on the fail_children entry to simulate a mismatch
+    graph.fail_children[failure_handler.task_id].graph_id = "wrong-graph-id"
+
+    with pytest.raises(BoilermakerAppException) as exc_info:
+        await app.publish_graph(graph)
+
+    assert "All failure callback tasks must have graph_id matching graph" in str(exc_info.value)
+    # Nothing published
+    mockservicebus._sender.assert_not_called()
+
+
 async def test_publish_graph_happy_path(app, mockservicebus, mock_storage):
     """Test that publishing a valid task graph works as expected."""
     app.results_storage = mock_storage
@@ -466,16 +546,29 @@ async def test_publish_graph_happy_path(app, mockservicebus, mock_storage):
     graph.add_task(t1)
     graph.add_task(t2, parent_ids=[t1.task_id])
 
+    # Simulate what blob storage returns after store_graph: a graph with pending results
+    # that carry ETags (required for the ETag-guarded Scheduled write).
+    import copy
+
+    loaded_graph = copy.deepcopy(graph)
+    for result in loaded_graph.generate_pending_results():
+        result.etag = "mock-etag"
+    mock_storage.load_graph = AsyncMock(return_value=loaded_graph)
+
     result = await app.publish_graph(graph)
     # We get the graph back
     assert result is graph
 
-    # One task published
+    # One task published (only t1, since t2 depends on t1)
     assert len(mockservicebus._sender.method_calls) == 1
     publish_success_call = mockservicebus._sender.method_calls[0]
     assert publish_success_call[0] == "schedule_messages"
     # Graph stored
     mock_storage.store_graph.assert_called_with(graph)
+    # Graph reloaded after storing (to obtain ETags for guarded writes)
+    mock_storage.load_graph.assert_called_once_with(graph.graph_id)
+    # Root task written to Scheduled in blob before publishing
+    mock_storage.store_task_result.assert_called_once()
 
     # We should always be able to deserialize the task
     published_task = Task.model_validate_json(str(publish_success_call[1][0]))
@@ -500,6 +593,12 @@ async def test_publish_task_sets_sequence_number(app, mockservicebus):
 
     assert await app.publish_task(task) is task
     assert mockservicebus._sender.send_message.call_count == 1
+
+    # Requirement to pass unique_msg_id to send_message so that ServiceBus can dedupe / idempotently
+    # schedule the message
+    call = mockservicebus._sender.send_message.call_args
+    assert call.kwargs["unique_msg_id"] == str(task.task_id)
+    assert call.args[0] == task.model_dump_json()
 
 
 async def test_publish_task_error_handling(app, mockservicebus):

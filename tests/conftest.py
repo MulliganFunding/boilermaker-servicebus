@@ -83,4 +83,12 @@ def mock_storage():
     storage.store_task_result = mock.AsyncMock()
     storage.load_graph = mock.AsyncMock(return_value=None)
     storage.store_graph = mock.AsyncMock()
+    # Default to None so the idempotent redelivery guard in TaskGraphEvaluator
+    # treats every task as not-yet-terminal and proceeds with normal execution.
+    # Individual tests override this to exercise the redelivery path.
+    storage.load_task_result = mock.AsyncMock(return_value=None)
+    # Lease methods: default to successful acquisition (returns a lease_id string)
+    # and successful release. Individual tests override to exercise lease race paths.
+    storage.try_acquire_lease = mock.AsyncMock(return_value="mock-lease-id")
+    storage.release_lease = mock.AsyncMock()
     return storage

@@ -29,7 +29,7 @@ check:
 # Run mypy checks
 check-types:
     #!/bin/bash -eux
-    uv run mypy boilermaker
+    uv run ty check boilermaker
 
 # Run all tests locally
 test *args:
@@ -47,3 +47,7 @@ docs-build *args:
 # Serve documentation locally with auto-reload
 docs-serve:
     uv run mkdocs serve
+
+# Run an ipython repl
+repl:
+    uv run --extra repl ipython

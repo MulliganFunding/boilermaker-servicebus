@@ -23,9 +23,7 @@ async def raiseretry(state, x):
 
 
 async def raiseretry_custom_policy(state, x):
-    raise RetryExceptionDefaultExponential(
-        "Intentional retry for testing", max_tries=99, delay_max=1000
-    )
+    raise RetryExceptionDefaultExponential("Intentional retry for testing", max_tries=99, delay_max=1000)
 
 
 REGISTRY = {
@@ -130,4 +128,3 @@ async def test_task_handler_retry_custom_policy(retry_custom_policy_task):
     assert result.task_id == retry_custom_policy_task.task_id
     assert result.graph_id is None
     assert retry_custom_policy_task.policy.max_tries == 99
-

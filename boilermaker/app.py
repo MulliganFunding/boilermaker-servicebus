@@ -12,7 +12,7 @@ import typing
 import weakref
 from functools import wraps
 
-from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender  # type: ignore
+from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender
 from anyio import create_task_group, open_signal_receiver
 from anyio.abc import CancelScope
 from azure.servicebus import ServiceBusReceivedMessage
@@ -163,7 +163,7 @@ class Boilermaker:
             raise ValueError(f"Function must be async: {fn_name}")
 
         task = Task.default(fn_name, **options)
-        self.function_registry[fn_name] = fn
+        self.function_registry[fn_name] = typing.cast(TaskHandler, fn)  # why must cast here
         self.task_registry[fn_name] = task
         logger.info(f"Registered background function fn={fn_name}")
         return self
@@ -322,9 +322,7 @@ class Boilermaker:
             await app.apply_async(cleanup_temp_files, delay=300)
         """
         task = self.create_task(fn, *args, policy=policy, **kwargs)
-        return await self.publish_task(
-            task, delay=delay, publish_attempts=publish_attempts
-        )
+        return await self.publish_task(task, delay=delay, publish_attempts=publish_attempts)
 
     @tracer.start_as_current_span("boilermaker.publish-task")
     async def publish_task(
@@ -332,6 +330,7 @@ class Boilermaker:
         task: Task,
         delay: int = 0,
         publish_attempts: int = 1,
+        unique_msg_id: str | None = None,
     ) -> Task:
         """Publish a task to the Azure Service Bus queue.
 
@@ -361,13 +360,12 @@ class Boilermaker:
                 results: list[int] = await self.service_bus_client.send_message(
                     task.model_dump_json(),
                     delay=delay,
+                    unique_msg_id=unique_msg_id or str(task.task_id),
                 )
                 if results and len(results) == 1:
                     sequence_number = results[0]
                     task.mark_published(sequence_number)
-                    logger.debug(
-                        f"Published task {task.task_id} to queue with sequence_number={sequence_number}"
-                    )
+                    logger.debug(f"Published task {task.task_id} to queue with sequence_number={sequence_number}")
                 return task
 
             except (
@@ -406,6 +404,13 @@ class Boilermaker:
                     [f"Expected graph_id={graph.graph_id}, found {task.graph_id=}"],
                 )
 
+        for task in graph.fail_children.values():
+            if task.graph_id != graph.graph_id:
+                raise BoilermakerAppException(
+                    "All failure callback tasks must have graph_id matching graph",
+                    [f"Expected graph_id={graph.graph_id}, found {task.graph_id=}"],
+                )
+
         # Store the graph definition and all pending task results
         # If this graph has already been stored, this should fail.
         try:
@@ -413,9 +418,66 @@ class Boilermaker:
         except BoilermakerStorageError as exc:
             raise BoilermakerAppException("Error storing TaskGraph to storage", [str(exc)]) from exc
 
-        # Publish all ready tasks (should be root nodes with no dependencies)
-        for task in graph.generate_ready_tasks():
-            await self.publish_task(task)
+        # Reload to get ETags on pending result blobs (required for ETag-guarded Scheduled writes)
+        try:
+            loaded_graph = await self.results_storage.load_graph(graph.graph_id)
+        except BoilermakerStorageError as exc:
+            raise BoilermakerAppException("Error loading TaskGraph after storage", [str(exc)]) from exc
+
+        if not loaded_graph:
+            raise BoilermakerAppException("TaskGraph not found after storing — this should not happen", [])
+
+        # Publish root tasks with lease+ETag guard (same protocol as continue_graph)
+        for task in loaded_graph.generate_ready_tasks():
+            task_result_slim = loaded_graph.results.get(task.task_id)
+            lease_id = await self.results_storage.try_acquire_lease(
+                task.task_id,
+                graph.graph_id,
+                etag=task_result_slim.etag if task_result_slim else None,
+            )
+            if lease_id is None:
+                logger.debug(
+                    f"Skipping root task {task.task_id} in graph {graph.graph_id}: "
+                    "lease not acquired (another caller holds it or blob was modified)."
+                )
+                continue
+
+            try:
+                # Step 2: Publish task to SB (message_id = task_id for fan-in dedup).
+                await self.publish_task(task)
+
+                # Step 3: Write Scheduled status. No etag needed — we already
+                # verified the blob was unmodified when we acquired the lease.
+                try:
+                    result = loaded_graph.schedule_task(task.task_id)
+                    await self.results_storage.store_task_result(result, lease_id=lease_id)
+                except BoilermakerStorageError:
+                    logger.warning(
+                        f"Failed to write Scheduled status for root task {task.task_id} in graph "
+                        f"{graph.graph_id} (lease held). "
+                        "Task was already published to Service Bus.",
+                        exc_info=True,
+                    )
+                    continue
+                except ValueError:
+                    logger.error(
+                        f"schedule_task raised ValueError for root task {task.task_id} in graph "
+                        f"{graph.graph_id}. Task was already published; blob write skipped.",
+                        exc_info=True,
+                    )
+                    continue
+            except Exception:
+                logger.error(
+                    f"Failed to publish root task {task.task_id} in graph {graph.graph_id}; "
+                    "task remains in Pending status in blob and will be retried on redelivery "
+                    "via generate_ready_tasks().",
+                    exc_info=True,
+                )
+                continue
+            finally:
+                await self.results_storage.release_lease(
+                    task.task_id, graph.graph_id, lease_id
+                )
 
         return graph
 

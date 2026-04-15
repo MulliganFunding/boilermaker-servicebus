@@ -44,9 +44,7 @@ async def start_span_from_parent_event_async(
     """
     if otel_enabled:
         tracectx = extract(get_traceparent_context(event))
-        with tracer.start_as_current_span(
-            name, context=tracectx, kind=trace.SpanKind.CONSUMER
-        ) as current_span:
+        with tracer.start_as_current_span(name, context=tracectx, kind=trace.SpanKind.CONSUMER) as current_span:
             yield current_span
     else:
         yield None
