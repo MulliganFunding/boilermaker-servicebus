@@ -765,3 +765,59 @@ async def test_close(app, mockservicebus):
     app.service_bus_client = AsyncMock()
     await app.close()
     app.service_bus_client.close.assert_called_once()
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# renew_message_lock
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_renew_message_lock_via_state_app(sbus, mockservicebus, make_message):
+    """Test that tasks can renew the message lock via state.app.renew_message_lock().
+
+    Per docs/api-reference/app.md, tasks should be able to call
+    ``await state.app.renew_message_lock()`` to extend the Service Bus message
+    lock during long-running work:
+
+        @app.task()
+        async def long_running_task(state, file_path: str):
+            ...
+            await state.app.renew_message_lock()
+            ...
+
+    This test will fail if that documented feature is not implemented
+    (i.e. if the line ``self.renew_message_lock = evaluator.renew_message_lock``
+    in ``message_handler`` remains commented out).
+    """
+    import datetime
+
+    class AppState:
+        def __init__(self):
+            self.app = None
+            self.lock_renewed = False
+
+    state = AppState()
+    test_app = Boilermaker(state, sbus)
+    # Wire the back-reference that the documented pattern depends on
+    state.app = test_app
+
+    @test_app.task()
+    async def long_running_task(task_state):
+        # Pattern documented in docs/api-reference/app.md
+        await task_state.app.renew_message_lock()
+        task_state.lock_renewed = True
+        return "done"
+
+    expiry = datetime.datetime(2026, 12, 31, tzinfo=datetime.UTC)
+    mockservicebus._receiver.renew_message_lock.return_value = expiry
+
+    task = test_app.create_task(long_running_task)
+    msg = make_message(task)
+    await test_app.message_handler(msg, mockservicebus._receiver)
+
+    # The task must have completed the lock-renewal call successfully
+    assert state.lock_renewed, (
+        "Task could not call renew_message_lock via state.app — "
+        "the feature documented in docs/api-reference/app.md is not implemented. "
+        "Uncomment `self.renew_message_lock = evaluator.renew_message_lock` in "
+        "Boilermaker.message_handler to fix this."
+    )
+    mockservicebus._receiver.renew_message_lock.assert_awaited_once()

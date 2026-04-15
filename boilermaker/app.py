@@ -587,6 +587,7 @@ class Boilermaker:
                 storage_interface=self.results_storage,
             )
             self._message_evaluators[task.task_id] = evaluator
+            self.renew_message_lock = evaluator.renew_message_lock
             await evaluator()
             del self._message_evaluators[task.task_id]
 
