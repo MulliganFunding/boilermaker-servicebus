@@ -540,3 +540,164 @@ async def test_store_and_load_task_result_round_trip(mock_azureblob, blob_storag
 
     assert loaded is not None, "load_task_result returned None — blob path mismatch between store and load"
     assert loaded.status == sample_task_result.status
+
+
+# Tests for load_graph full=True parameter
+
+
+async def test_load_graph_full_true_returns_task_result_instances(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+    sample_task,
+):
+    """load_graph(full=True) must deserialize task result blobs as TaskResult
+    (not TaskResultSlim), so that rich fields are available to callers.
+    """
+    sample_task_graph.add_task(sample_task)
+    full_result = TaskResult(
+        task_id=sample_task.task_id,
+        graph_id=sample_task.graph_id,
+        status=TaskStatus.Success,
+        result={"key": "value"},
+        errors=None,
+        formatted_exception=None,
+    )
+
+    graph_json = sample_task_graph.model_dump_json()
+    task_result_json = full_result.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(None, side_effect=[graph_json, task_result_json])
+    set_return.list_blobs_returns(
+        [
+            BlobProperties(
+                name=f"task-results/{sample_task_graph.graph_id}/test-task.json",
+                last_modified="2023-01-01T00:00:00Z",
+            ),
+        ]
+    )
+
+    result = await blob_storage.load_graph(sample_task_graph.graph_id, full=True)
+
+    assert result is not None
+    assert sample_task.task_id in result.results
+    task_result = result.results[sample_task.task_id]
+    assert isinstance(task_result, TaskResult)
+    assert task_result.result == {"key": "value"}
+
+
+async def test_load_graph_full_true_includes_rich_fields(
+    mock_azureblob,
+    blob_storage,
+    sample_task,
+):
+    """load_graph(full=True) must round-trip all rich TaskResult fields:
+    result, errors, and formatted_exception for both successful and failed tasks.
+    """
+    # Build a graph with two tasks: one successful, one failed.
+    success_task = sample_task
+    failed_task = Task.default("failing_function", args=[], kwargs={})
+
+    graph = TaskGraph()
+    graph.add_task(success_task)
+    graph.add_task(failed_task)
+
+    success_result = TaskResult(
+        task_id=success_task.task_id,
+        graph_id=success_task.graph_id,
+        status=TaskStatus.Success,
+        result={"key": "value"},
+        errors=None,
+        formatted_exception=None,
+    )
+    failed_result = TaskResult(
+        task_id=failed_task.task_id,
+        graph_id=failed_task.graph_id,
+        status=TaskStatus.Failure,
+        result=None,
+        errors=["something went wrong"],
+        formatted_exception="Traceback (most recent call last):\n  File ...\nValueError: bad",
+    )
+
+    graph_json = graph.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(
+        None,
+        side_effect=[graph_json, success_result.model_dump_json(), failed_result.model_dump_json()],
+    )
+    set_return.list_blobs_returns(
+        [
+            BlobProperties(
+                name=f"task-results/{graph.graph_id}/{success_task.task_id}.json",
+                last_modified="2023-01-01T00:00:00Z",
+            ),
+            BlobProperties(
+                name=f"task-results/{graph.graph_id}/{failed_task.task_id}.json",
+                last_modified="2023-01-01T00:00:00Z",
+            ),
+        ]
+    )
+
+    loaded = await blob_storage.load_graph(graph.graph_id, full=True)
+    assert loaded is not None
+
+    # Verify successful task round-trips correctly
+    sr = loaded.results[success_task.task_id]
+    assert isinstance(sr, TaskResult)
+    assert sr.result == {"key": "value"}
+    assert sr.errors is None
+    assert sr.formatted_exception is None
+
+    # Verify failed task round-trips correctly
+    fr = loaded.results[failed_task.task_id]
+    assert isinstance(fr, TaskResult)
+    assert fr.result is None
+    assert fr.errors == ["something went wrong"]
+    assert fr.formatted_exception == "Traceback (most recent call last):\n  File ...\nValueError: bad"
+
+
+async def test_load_graph_default_still_returns_task_result_slim(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+    sample_task,
+):
+    """load_graph() without the full parameter (default False) must continue to
+    return TaskResultSlim instances, confirming backward compatibility.
+    The rich fields (result, errors, formatted_exception) must NOT be populated.
+    """
+    sample_task_graph.add_task(sample_task)
+    # Provide a full TaskResult JSON blob -- the default path should still
+    # parse it as TaskResultSlim, discarding the extra fields.
+    full_result = TaskResult(
+        task_id=sample_task.task_id,
+        graph_id=sample_task.graph_id,
+        status=TaskStatus.Success,
+        result={"key": "value"},
+        errors=["some error"],
+        formatted_exception="Traceback ...",
+    )
+
+    graph_json = sample_task_graph.model_dump_json()
+    task_result_json = full_result.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(None, side_effect=[graph_json, task_result_json])
+    set_return.list_blobs_returns(
+        [
+            BlobProperties(
+                name=f"task-results/{sample_task_graph.graph_id}/test-task.json",
+                last_modified="2023-01-01T00:00:00Z",
+            ),
+        ]
+    )
+
+    result = await blob_storage.load_graph(sample_task_graph.graph_id)
+
+    assert result is not None
+    assert sample_task.task_id in result.results
+    task_result = result.results[sample_task.task_id]
+    # Must be TaskResultSlim, not TaskResult
+    assert type(task_result) is TaskResultSlim
+    assert not hasattr(task_result, "result") or task_result.__class__ is TaskResultSlim
+    # TaskResultSlim does not have result/errors/formatted_exception fields
+    assert not isinstance(task_result, TaskResult)

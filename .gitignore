@@ -23,9 +23,12 @@ todo*.md
 tmp/
 .bmo/
 .claude/
+docs/tdd/
+docs/ux/
 specs/states/
 specs/*out
 specs/*TTrace*
 specs/*trace*
 specs/*toolbox/
 states/
+.envrc
