@@ -2391,3 +2391,151 @@ def test_mixed_missing_and_pending_results(caplog):
     assert any(t_no_result.task_id in msg for msg in warning_messages), (
         f"Expected warning for task with no result blob. Got: {warning_messages}"
     )
+
+
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ #
+# Coverage gap tests                       #
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ #
+
+def test_schedule_task_raises_when_not_pending():
+    """schedule_task must raise ValueError when the task is already past Pending."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("func1")
+    g.add_task(t1)
+    list(g.generate_pending_results())
+
+    # Manually set to Scheduled so the task is no longer Pending.
+    g.results[t1.task_id].status = task.TaskStatus.Scheduled
+
+    with pytest.raises(ValueError, match="not pending"):
+        g.schedule_task(t1.task_id)
+
+
+def test_is_complete_empty_graph_returns_false():
+    """is_complete must return False when the graph has no children (line 415)."""
+    g = task.TaskGraph()
+    assert g.is_complete() is False
+
+
+def test_is_complete_with_skipped_unreachable_task():
+    """is_complete returns True when a task has no result (status is None) but all its
+    antecedents finished with at least one failure (task will never run — line 427 continue)."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("root")
+    t2 = task.Task.default("child")
+    g.add_task(t1)
+    g.add_task(t2, parent_ids=[t1.task_id])
+
+    # Only populate the result for t1; t2 has no entry in results (status is None).
+    g.results[t1.task_id] = task.TaskResultSlim(
+        task_id=t1.task_id,
+        graph_id=g.graph_id,
+        status=task.TaskStatus.Failure,
+    )
+    # t2 intentionally absent from g.results so get_status returns None.
+
+    assert g.is_complete() is True
+
+
+def test_generate_scheduled_regular_child():
+    """generate_scheduled_tasks must yield regular children that are already Scheduled
+    when all antecedents have succeeded (lines 360-361)."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("root")
+    t2 = task.Task.default("child")
+    g.add_task(t1)
+    g.add_task(t2, parent_ids=[t1.task_id])
+    list(g.generate_pending_results())
+
+    # t1 succeeded, t2 is Scheduled (e.g. SB publish happened but blob write is pending).
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+    g.results[t2.task_id].status = task.TaskStatus.Scheduled
+
+    scheduled = list(g.generate_scheduled_tasks())
+    assert t2 in scheduled
+
+
+def test_generate_already_scheduled_failure_callback():
+    """generate_scheduled_tasks must yield failure callbacks that are
+    already in Scheduled status (lines 371-372)."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("root")
+    cb = task.Task.default("on_fail")
+    g.add_task(t1)
+    g.add_failure_callback(t1.task_id, cb)
+    list(g.generate_pending_results())
+
+    # t1 failed, failure callback is Scheduled.
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+    g.results[cb.task_id].status = task.TaskStatus.Scheduled
+
+    scheduled = list(g.generate_scheduled_tasks())
+    assert cb in scheduled
+
+
+def test_get_reachable_failure_tasks_nested_success_chain():
+    """_get_reachable_failure_tasks follows success edges of failure callback tasks
+    (lines 499-504) when the intermediate task succeeded."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("root")
+    cb1 = task.Task.default("on_fail")
+    cb2 = task.Task.default("after_on_fail")  # success child of cb1
+    g.add_task(t1)
+    g.add_failure_callback(t1.task_id, cb1)
+    # cb2 is a regular child of cb1 (runs when cb1 succeeds).
+    g.add_task(cb2, parent_ids=[cb1.task_id])
+    list(g.generate_pending_results())
+
+    # t1 failed — cb1 is reachable.  cb1 succeeded — cb2 is reachable via success edge.
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+    g.add_result(task.TaskResult(task_id=cb1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+
+    reachable = g._get_reachable_failure_tasks()
+    assert cb1.task_id in reachable
+    assert cb2.task_id in reachable
+
+
+def test_get_reachable_failure_tasks_nested_failure_chain():
+    """_get_reachable_failure_tasks follows fail_edges of failure callback tasks
+    (lines 491-494): a failure callback that itself has a failure callback."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("root")
+    cb1 = task.Task.default("on_fail_1")
+    cb2 = task.Task.default("on_fail_2")  # failure callback of cb1
+    g.add_task(t1)
+    g.add_failure_callback(t1.task_id, cb1)
+    g.add_failure_callback(cb1.task_id, cb2)
+    list(g.generate_pending_results())
+
+    # t1 failed → cb1 reachable.  cb1 also in fail_edges → cb2 reachable via fail edge.
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    reachable = g._get_reachable_failure_tasks()
+    assert cb1.task_id in reachable
+    assert cb2.task_id in reachable
+
+
+def test_cycle_detection_via_fail_edges():
+    """_has_cycle_dfs must detect a cycle introduced through fail_edges (line 122)."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("root")
+    t2 = task.Task.default("cb")
+    g.add_task(t1)
+    g.add_failure_callback(t1.task_id, t2)
+    list(g.generate_pending_results())
+
+    # Manually introduce a cycle in fail_edges: t2's failure callback points back to t1.
+    g.fail_edges[t2.task_id] = {t1.task_id}
+
+    assert g._detect_cycles() is True
+
+
+def test_task_chain_len():
+    """TaskChain.__len__ returns the number of tasks in the chain (line 558)."""
+    from boilermaker.task.graph import TaskChain
+
+    t1 = task.Task.default("a")
+    t2 = task.Task.default("b")
+    t3 = task.Task.default("c")
+    chain = TaskChain(t1, t2, t3)
+    assert len(chain) == 3

@@ -2071,14 +2071,14 @@ async def test_412_scheduled_retry_second_412_sees_terminal_settles(evaluator_co
 
 
 @pytest.mark.parametrize("second_reread_value", [None, "scheduled", "pending"])
-async def test_412_scheduled_retry_second_412_sees_unexpected_settles_with_failure(
+async def test_412_scheduled_retry_second_412_sees_unclaimed_does_not_settle(
     evaluator_context, mock_storage, second_reread_value
 ):
-    """When the retry Started write gets a second 412 and the second re-read returns a
-    status that is neither Started nor terminal (None, Scheduled, Pending), the handler
-    calls complete_message and returns Failure.
+    """When the retry Started write gets a second 412 and the second re-read returns an
+    unclaimed status (None, Scheduled, Pending), the handler does NOT call complete_message
+    — it lets the SB lock expire for redelivery instead of permanently stalling the graph.
 
-    Spec action: RereadAfterRetry (other branch) → Completing.
+    Spec action: RereadAfterRetry412 (Pending/Scheduled) → RereadAfterRetryNoSettle.
     Parameterized over: None, Scheduled, Pending second re-reads.
     """
     from unittest.mock import patch
@@ -2136,11 +2136,12 @@ async def test_412_scheduled_retry_second_412_sees_unexpected_settles_with_failu
 
     assert result is not None
     assert result.status == TaskStatus.Failure, (
-        f"Expected Failure for unexpected second re-read value {second_reread_value!r}, got {result.status}"
+        f"Expected Failure for unclaimed second re-read value {second_reread_value!r}, got {result.status}"
     )
 
-    assert evaluator_context.mockservicebus._receiver.complete_message.called, (
-        "complete_message must be called once even for unexpected second re-read status"
+    assert not evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "complete_message must NOT be called for unclaimed second re-read status — "
+        "let SB redeliver rather than permanently stalling the graph"
     )
 
 
@@ -2367,14 +2368,12 @@ async def test_412_pending_retry_success_falls_through_to_execution(evaluator_co
     )
 
 
-async def test_412_unexpected_status_reread_now_settles(evaluator_context, mock_storage):
-    """When the Started write gets a 412 and the re-read returns a truly unexpected status
-    (e.g. Retry — not None, not terminal, not Started, not Scheduled, not Pending), the
-    catch-all branch calls complete_message before returning Failure.
+async def test_412_retry_reread_settles_and_returns_retry(evaluator_context, mock_storage):
+    """When the Started write gets a 412 and the re-read returns Retry, the handler
+    settles the duplicate message and returns TaskResult(Retry) — another worker already
+    ran the task and published a delayed retry SB message.
 
-    Pending and Scheduled are both handled by the retry path (RetryStartedAfterScheduled).
-    Only statuses that can never legitimately appear on a blob at this point (e.g. Retry,
-    which is only written by the worker after execution) remain in the catch-all.
+    Spec action: WriteStarted412 (Retry re-read) → Completing.
     """
     from unittest.mock import patch
 
@@ -2391,7 +2390,6 @@ async def test_412_unexpected_status_reread_now_settles(evaluator_context, mock_
         status=TaskStatus.Pending,
         etag="W/\"etag-v1\"",
     )
-    # Re-read after 412 returns Retry — a truly unexpected status in the catch-all.
     retry_slim_reread = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
@@ -2413,10 +2411,620 @@ async def test_412_unexpected_status_reread_now_settles(evaluator_context, mock_
     mock_eval_task.assert_not_called()
 
     assert result is not None
-    assert result.status == TaskStatus.Failure, (
-        f"Expected Failure for unexpected re-read status (Retry), got {result.status}"
+    assert result.status == TaskStatus.Retry, (
+        f"Expected Retry for Retry re-read after 412, got {result.status}"
     )
 
     assert evaluator_context.mockservicebus._receiver.complete_message.called, (
-        "complete_message must be called for unexpected re-read status (catch-all always settles)"
+        "complete_message must be called — another worker already owns the retry"
     )
+
+
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ #
+# Coverage gap tests                                                           #
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ #
+
+# ----- Redelivery path (lines 106-116) -----
+
+
+async def test_redelivery_continue_graph_fails_suppresses_settlement(evaluator_context, mock_storage):
+    """On SB redelivery with a terminal blob, if continue_graph raises ContinueGraphError
+    the evaluator must return the terminal result WITHOUT settling (lines 106-112).
+    Suppressing settlement allows SB to redeliver and downstream dispatch to be retried.
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import ContinueGraphError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.return_value = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(ok_task.graph_id),
+        status=TaskStatus.Success,
+    )
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch.object(evaluator_context.evaluator, "continue_graph", side_effect=ContinueGraphError("load failed")):
+        result = await evaluator_context.evaluator()
+
+    assert result.status == TaskStatus.Success
+    assert not evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "must not settle when continue_graph fails on redelivery"
+    )
+
+
+async def test_redelivery_complete_message_fails_still_returns_terminal(evaluator_context, mock_storage):
+    """On SB redelivery with a terminal blob, if complete_message raises the evaluator
+    must still return the terminal result (lines 115-116).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerTaskLeaseLost
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.return_value = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(ok_task.graph_id),
+        status=TaskStatus.Success,
+    )
+
+    evaluator_context.mockservicebus._receiver.complete_message.side_effect = BoilermakerTaskLeaseLost("lost")
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch.object(evaluator_context.evaluator, "continue_graph", return_value=None):
+        result = await evaluator_context.evaluator()
+
+    assert result.status == TaskStatus.Success
+
+
+# ----- Non-412 error on Started write (line 138) -----
+
+
+async def test_non_412_started_write_error_falls_through_to_execution(evaluator_context, mock_storage):
+    """A non-412 storage error on the Started write must be logged and execution must
+    proceed (fail-open, line 138).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.return_value = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(ok_task.graph_id),
+        status=TaskStatus.Pending,
+        etag='W/"e1"',
+    )
+    # First store (Started) raises a 500-style error; second store (result) succeeds.
+    mock_storage.store_task_result.side_effect = [
+        BoilermakerStorageError("500 Internal Server Error", status_code=500),
+        None,
+    ]
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        mock_eval_task.return_value = TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=ok_task.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_called_once()
+    assert result.status == TaskStatus.Success
+
+
+# ----- 412 + re-read also fails (lines 152-158) -----
+
+
+async def test_412_started_write_reread_also_fails_returns_failure(evaluator_context, mock_storage):
+    """When the Started write gets a 412 and the re-read also raises a storage error,
+    the evaluator must return Failure without settling (lines 152-158).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    pending_slim = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(ok_task.graph_id),
+        status=TaskStatus.Pending,
+        etag='W/"e1"',
+    )
+    # First call: idempotency read → Pending. Second call: re-read after 412 → raises.
+    mock_storage.load_task_result.side_effect = [
+        pending_slim,
+        BoilermakerStorageError("503 Service Unavailable", status_code=503),
+    ]
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError("412 Precondition Failed", status_code=412)
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_not_called()
+    assert result.status == TaskStatus.Failure
+    assert not evaluator_context.mockservicebus._receiver.complete_message.called
+
+
+# ----- 412 complete_message failures (lines 189-190, 209-210) -----
+
+
+async def test_412_terminal_reread_complete_message_failure_still_returns_terminal(evaluator_context, mock_storage):
+    """After a 412 + terminal re-read, if complete_message raises the evaluator must
+    still return the terminal status (lines 189-190).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError, BoilermakerTaskLeaseLost
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.side_effect = [
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Pending, etag='W/"e1"'
+        ),
+        TaskResultSlim(task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Success),
+    ]
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError("412", status_code=412)
+    evaluator_context.mockservicebus._receiver.complete_message.side_effect = BoilermakerTaskLeaseLost("lost")
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_not_called()
+    assert result.status == TaskStatus.Success
+
+
+async def test_412_started_reread_complete_message_failure_still_returns_started(evaluator_context, mock_storage):
+    """After a 412 + Started re-read, if complete_message raises the evaluator must
+    still return Started (lines 209-210).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError, BoilermakerTaskLeaseLost
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.side_effect = [
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Pending, etag='W/"e1"'
+        ),
+        TaskResultSlim(task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Started),
+    ]
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError("412", status_code=412)
+    evaluator_context.mockservicebus._receiver.complete_message.side_effect = BoilermakerTaskLeaseLost("lost")
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_not_called()
+    assert result.status == TaskStatus.Started
+
+
+# ----- 412 + Pending/Scheduled re-read with None etag warning (line 237) -----
+
+
+async def test_412_reread_with_none_etag_logs_warning_and_retries(evaluator_context, mock_storage):
+    """When the re-read after a 412 returns Scheduled with a None etag, the evaluator
+    logs a warning and retries the Started write with etag=None (line 237).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.side_effect = [
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Pending, etag='W/"e1"'
+        ),
+        # Re-read has etag=None — triggers the warning log at line 237.
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Scheduled, etag=None
+        ),
+    ]
+    # First store: 412; retry store: succeeds; result store: succeeds.
+    mock_storage.store_task_result.side_effect = [
+        BoilermakerStorageError("412", status_code=412),
+        None,
+        None,
+    ]
+    evaluator_context.graph.add_result(
+        TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=ok_task.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+    )
+    mock_storage.load_graph.return_value = evaluator_context.graph
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        mock_eval_task.return_value = TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=ok_task.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+        result = await evaluator_context.evaluator()
+        assert result.status == TaskStatus.Success
+
+    mock_eval_task.assert_called_once()
+    # Verify that the retry write used None as the etag (unconditional).
+    retry_call = mock_storage.store_task_result.call_args_list[1]
+    assert retry_call.kwargs.get("etag") is None or retry_call.args[1] is None
+
+
+# ----- Second 412 paths (lines 275-283, 290-291, 306-307, 324-336) -----
+
+
+async def test_second_412_reread_also_fails_returns_failure_no_settle(evaluator_context, mock_storage):
+    """When the second 412 + second re-read also raises a storage error, _reread2 is set
+    to None and the evaluator returns Failure without settling (lines 275-283).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.side_effect = [
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Pending, etag='W/"e1"'
+        ),
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Scheduled, etag='W/"e2"'
+        ),
+        BoilermakerStorageError("503", status_code=503),  # re-read2 fails
+    ]
+    mock_storage.store_task_result.side_effect = [
+        BoilermakerStorageError("412", status_code=412),
+        BoilermakerStorageError("412", status_code=412),
+    ]
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_not_called()
+    assert result.status == TaskStatus.Failure
+    assert not evaluator_context.mockservicebus._receiver.complete_message.called
+
+
+async def test_second_412_started_reread2_complete_message_failure(evaluator_context, mock_storage):
+    """After second 412 + Started re-read2, if complete_message raises the evaluator
+    still returns Started (lines 290-291).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError, BoilermakerTaskLeaseLost
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.side_effect = [
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Pending, etag='W/"e1"'
+        ),
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Scheduled, etag='W/"e2"'
+        ),
+        TaskResultSlim(task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Started),
+    ]
+    mock_storage.store_task_result.side_effect = [
+        BoilermakerStorageError("412", status_code=412),
+        BoilermakerStorageError("412", status_code=412),
+    ]
+    evaluator_context.mockservicebus._receiver.complete_message.side_effect = BoilermakerTaskLeaseLost("lost")
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_not_called()
+    assert result.status == TaskStatus.Started
+
+
+async def test_second_412_terminal_reread2_complete_message_failure(evaluator_context, mock_storage):
+    """After second 412 + terminal re-read2, if complete_message raises the evaluator
+    still returns the terminal status (lines 306-307).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError, BoilermakerTaskLeaseLost
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.side_effect = [
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Pending, etag='W/"e1"'
+        ),
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Scheduled, etag='W/"e2"'
+        ),
+        TaskResultSlim(task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Success),
+    ]
+    mock_storage.store_task_result.side_effect = [
+        BoilermakerStorageError("412", status_code=412),
+        BoilermakerStorageError("412", status_code=412),
+    ]
+    evaluator_context.mockservicebus._receiver.complete_message.side_effect = BoilermakerTaskLeaseLost("lost")
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_not_called()
+    assert result.status == TaskStatus.Success
+
+
+async def test_second_412_retry_reread2_complete_message_failure(evaluator_context, mock_storage):
+    """After second 412 + Retry re-read2, if complete_message raises the evaluator still
+    returns Retry (lines 330-331).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError, BoilermakerTaskLeaseLost
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.side_effect = [
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Pending, etag='W/"e1"'
+        ),
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Scheduled, etag='W/"e2"'
+        ),
+        TaskResultSlim(task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Retry),
+    ]
+    mock_storage.store_task_result.side_effect = [
+        BoilermakerStorageError("412", status_code=412),
+        BoilermakerStorageError("412", status_code=412),
+    ]
+    evaluator_context.mockservicebus._receiver.complete_message.side_effect = BoilermakerTaskLeaseLost("lost")
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_not_called()
+    assert result.status == TaskStatus.Retry
+
+
+async def test_second_412_retry_reread2_settles_and_returns_retry(evaluator_context, mock_storage):
+    """After second 412 + Retry re-read2, the evaluator settles and returns Retry
+    (lines 324-336).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.side_effect = [
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Pending, etag='W/"e1"'
+        ),
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Scheduled, etag='W/"e2"'
+        ),
+        TaskResultSlim(task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Retry),
+    ]
+    mock_storage.store_task_result.side_effect = [
+        BoilermakerStorageError("412", status_code=412),
+        BoilermakerStorageError("412", status_code=412),
+    ]
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_not_called()
+    assert result.status == TaskStatus.Retry
+    assert evaluator_context.mockservicebus._receiver.complete_message.called
+
+
+# ----- First 412 Retry, complete_message fails (lines 372-373) -----
+
+
+async def test_412_retry_reread_complete_message_failure_still_returns_retry(evaluator_context, mock_storage):
+    """After first 412 + Retry re-read, if complete_message raises the evaluator still
+    returns Retry (lines 372-373).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError, BoilermakerTaskLeaseLost
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    mock_storage.load_task_result.side_effect = [
+        TaskResultSlim(
+            task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Pending, etag='W/"e1"'
+        ),
+        TaskResultSlim(task_id=ok_task.task_id, graph_id=GraphId(ok_task.graph_id), status=TaskStatus.Retry),
+    ]
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError("412", status_code=412)
+    evaluator_context.mockservicebus._receiver.complete_message.side_effect = BoilermakerTaskLeaseLost("lost")
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_not_called()
+    assert result.status == TaskStatus.Retry
+
+
+# ----- continue_graph: graph blob not found (lines 614-619) -----
+
+
+async def test_continue_graph_graph_not_found_returns_none(evaluator_context, mock_storage):
+    """When load_graph returns None (graph blob missing), continue_graph logs critical and
+    returns None — the main flow settles normally (lines 614-619).
+    """
+    from unittest.mock import patch
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    # Override load_graph to return None (graph missing).
+    mock_storage.load_graph.return_value = None
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        mock_eval_task.return_value = TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=ok_task.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+        result = await evaluator_context.evaluator()
+
+    assert result.status == TaskStatus.Success
+    # Message still settled (continue_graph returned None, not raised).
+    assert evaluator_context.mockservicebus._receiver.complete_message.called
+
+
+# ----- continue_graph: try_acquire_lease unexpected error (lines 651-658) -----
+
+
+async def test_continue_graph_lease_unexpected_error_skips_task(evaluator_context, mock_storage):
+    """When try_acquire_lease raises an unexpected BoilermakerStorageError, the task is
+    skipped and processing continues (lines 651-658).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    # Graph needs a ready task so the lease acquisition code is reached.
+    graph = evaluator_context.graph
+    graph.add_result(
+        TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+    )
+    mock_storage.load_graph.return_value = graph
+
+    # Unexpected error on lease acquisition.
+    mock_storage.try_acquire_lease.side_effect = BoilermakerStorageError("unexpected", status_code=500)
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        mock_eval_task.return_value = TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=ok_task.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+        result = await evaluator_context.evaluator()
+
+    # Evaluator completes normally; the ready task was skipped but no exception raised.
+    assert result.status == TaskStatus.Success
+
+
+async def test_continue_graph_lease_returns_none_skips_task(evaluator_context, mock_storage):
+    """When try_acquire_lease returns None (lease already held or etag mismatch),
+    the task is skipped silently (lines 660-664).
+    """
+    from unittest.mock import patch
+
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = evaluator_context.graph.graph_id
+
+    graph = evaluator_context.graph
+    graph.add_result(
+        TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+    )
+    mock_storage.load_graph.return_value = graph
+
+    # Returning None means lease not acquired — task is skipped.
+    mock_storage.try_acquire_lease.return_value = None
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        mock_eval_task.return_value = TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=ok_task.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+        result = await evaluator_context.evaluator()
+
+    assert result.status == TaskStatus.Success

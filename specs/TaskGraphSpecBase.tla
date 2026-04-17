@@ -121,7 +121,7 @@ VARIABLES
     \*   ReleasingLease        -- releasing the blob lease
     \*   Completing                  -- settling the SB message
     \*   RetryStartedAfterScheduled  -- 412 re-read saw Scheduled; retry Started write with re-read etag
-    \*   RereadAfterRetry412         -- second 412 on retry; re-reading blob to decide settle action
+    \*   RereadAfterRetry412         -- second 412 on retry; settle if claimed/terminal, redeliver if unclaimed
     workerPhase,    \* workerPhase[w]
 
     workerMsg,      \* workerMsg[w]: the SB message the worker holds, or Nil
@@ -402,22 +402,44 @@ RetryStartedWriteNon412Error(w) ==
                     workerReadySet, workerCurrentReady>>
 
 \* ===== RereadAfterRetry =====
-\* Worker got a second 412 on the retry. Re-read the blob to determine what to do.
-\* In all cases: settle the message (complete_message). Never rely on SB redelivery.
+\* Worker got a second 412 on the retry. Re-reads the blob to determine action.
 \*
-\* Outcomes:
-\*   Started  -> Completing (another worker won the CAS; yield)
-\*   terminal -> Completing (task already done; yield)
-\*   other    -> Completing (unexpected forward-only state; still settle)
-RereadAfterRetry(w) ==
+\* Two variants, matching the code fix:
+\*   Started/terminal -> RereadAfterRetrySettle: proceed to Completing (settle msg)
+\*   Pending/Scheduled -> RereadAfterRetryNoSettle: do NOT settle; return message
+\*     to the SB queue so a fresh worker can retry (mirrors LockExpiry).
+\*
+\* Settling when the blob is unclaimed would stall the graph permanently.
+
+\* Settle variant: another worker owns the task or it is already terminal.
+RereadAfterRetrySettle(w) ==
     /\ workerPhase[w] = "RereadAfterRetry412"
-    \* In all branches: settle the message. The blob state determines what we return
-    \* conceptually but the action is always: complete message, reset worker.
+    /\ LET t == workerTask[w]
+       IN blobStatus[t] \in {"Started"} \cup TerminalStatuses
     /\ workerPhase' = [workerPhase EXCEPT ![w] = "Completing"]
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
                     workerMsg, workerTask, workerResult, workerCapturedEtag,
                     workerSnapshot, workerSnapshotEtags,
                     workerReadySet, workerCurrentReady>>
+
+\* No-settle variant: blob is unclaimed (Pending or Scheduled).
+\* Return the SB message to the queue and reset the worker, exactly like LockExpiry.
+RereadAfterRetryNoSettle(w) ==
+    /\ workerPhase[w] = "RereadAfterRetry412"
+    /\ LET t   == workerTask[w]
+           msg == workerMsg[w]
+       IN
+       /\ blobStatus[t] \in {"Pending", "Scheduled"}
+       /\ \/ /\ msg.deliveryCount < MaxDeliveryCount
+             /\ sbMessages' = sbMessages \cup
+                   {[taskId |-> msg.taskId,
+                     deliveryCount |-> msg.deliveryCount + 1]}
+             /\ UNCHANGED blobDeadLettered
+          \/ /\ msg.deliveryCount = MaxDeliveryCount
+             /\ UNCHANGED sbMessages
+             /\ blobDeadLettered' = [blobDeadLettered EXCEPT ![msg.taskId] = TRUE]
+    /\ WorkerReset(w)
+    /\ UNCHANGED <<blobStatus, blobEtag, blobLeased>>
 
 \* Sub-action: non-412 storage error on Started write — proceed anyway (fail-open)
 WriteStartedNon412Error(w) ==
@@ -434,11 +456,10 @@ WriteStartedNon412Error(w) ==
                        workerSnapshot, workerSnapshotEtags,
                        workerReadySet, workerCurrentReady>>
 
-\* NOTE: ReturnFailureSettle / ReturnFailureNoSettle have been REMOVED.
-\* In the fixed protocol every 412 branch settles the message explicitly.
-\* The RetryStartedAfterScheduled path and RereadAfterRetry412 path both
-\* lead to Completing (which calls complete_message). There is no longer any
-\* phase in which a worker exits without settling.
+\* NOTE: Settlement is now conditional on blob state.
+\* RereadAfterRetrySettle leads to Completing (settle) when the blob is claimed/terminal.
+\* RereadAfterRetryNoSettle returns the SB message and resets the worker (no settle)
+\* when the blob is unclaimed (Pending/Scheduled) — stalling would otherwise be permanent.
 
 \* ===== ExecuteTask =====
 \* Nondeterministic task execution outcome: Success or Failure.
@@ -726,7 +747,8 @@ Next ==
         \/ RetryStartedWriteSuccess(w)
         \/ RetryStartedWrite412(w)
         \/ RetryStartedWriteNon412Error(w)
-        \/ RereadAfterRetry(w)
+        \/ RereadAfterRetrySettle(w)
+        \/ RereadAfterRetryNoSettle(w)
         \/ ExecuteTask(w)
         \/ WriteResult(w)
         \/ LoadGraph(w)
@@ -821,7 +843,8 @@ Fairness ==
         /\ WF_vars(RetryStartedWriteSuccess(w))
         /\ WF_vars(RetryStartedWrite412(w))
         /\ WF_vars(RetryStartedWriteNon412Error(w))
-        /\ WF_vars(RereadAfterRetry(w))
+        /\ WF_vars(RereadAfterRetrySettle(w))
+        /\ WF_vars(RereadAfterRetryNoSettle(w))
         /\ WF_vars(ExecuteTask(w))
         /\ WF_vars(WriteResult(w))
         /\ WF_vars(LoadGraph(w))

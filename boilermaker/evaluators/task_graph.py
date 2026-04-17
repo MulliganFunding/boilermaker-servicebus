@@ -262,7 +262,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                         else:
                             # RetryStartedWrite412: another worker moved the blob between
                             # the re-read and the retry.  Re-read a second time to determine
-                            # the current state.  Always settle in every branch from here.
+                            # the current state.
                             # Spec action: RetryStartedWrite412 → RereadAfterRetry412
                             logger.warning(
                                 f"Second 412 on retry Started write for task {self.task.task_id}; "
@@ -273,61 +273,125 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                     self.task.task_id, self.task.graph_id
                                 )
                             except exc.BoilermakerStorageError:
+                                # Blob state unknown — do NOT settle.  Let the SB lock
+                                # expire and redeliver so a fresh worker can retry.
                                 logger.error(
                                     f"Second 412 + re-read also failed for task {self.task.task_id}; "
-                                    "settling and returning Failure",
+                                    "not settling — SB will redeliver",
                                     exc_info=True,
                                 )
                                 _reread2 = None
 
-                            # RereadAfterRetry: ALL branches call complete_message() before returning.
-                            try:
-                                await self.complete_message()
-                            except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
-                                logger.warning(
-                                    f"Failed to complete message after second 412 for task {self.task.task_id}; "
-                                    "SB will redeliver",
-                                    exc_info=True,
-                                )
-
                             if _reread2 is not None and _reread2.status == TaskStatus.Started:
-                                # Another worker won the second CAS — yield to that worker.
+                                # Another worker won the second CAS — settle and yield.
+                                # Spec action: RereadAfterRetry412 (Started) → Completing
+                                try:
+                                    await self.complete_message()
+                                except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                                    logger.warning(
+                                        f"Failed to complete message after second 412 (Started) "
+                                        f"for task {self.task.task_id}; SB will redeliver",
+                                        exc_info=True,
+                                    )
                                 return TaskResult(
                                     task_id=self.task.task_id,
                                     graph_id=self.task.graph_id,
                                     status=TaskStatus.Started,
                                 )
                             elif _reread2 is not None and _reread2.status.finished:
-                                # Task is already terminal — yield to that result.
+                                # Task is already terminal — settle and yield.
+                                # Spec action: RereadAfterRetry412 (terminal) → Completing
+                                try:
+                                    await self.complete_message()
+                                except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                                    logger.warning(
+                                        f"Failed to complete message after second 412 (terminal) "
+                                        f"for task {self.task.task_id}; SB will redeliver",
+                                        exc_info=True,
+                                    )
                                 return TaskResult(
                                     task_id=self.task.task_id,
                                     graph_id=self.task.graph_id,
                                     status=_reread2.status,
                                 )
+                            elif _reread2 is not None and _reread2.status == TaskStatus.Retry:
+                                # Another worker already ran this task and published a delayed
+                                # retry SB message.  Settle our duplicate and yield to the
+                                # retry mechanism — the graph will continue via that message.
+                                # Spec action: RereadAfterRetry412 (Retry) → Completing
+                                # Note: Retry is not modeled as a blob status in the TLA+ spec
+                                # (spec only produces Success/Failure from execution).
+                                logger.warning(
+                                    f"Second 412 + Retry re-read for task {self.task.task_id}; "
+                                    "another worker published a retry message — settling our duplicate"
+                                )
+                                try:
+                                    await self.complete_message()
+                                except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                                    logger.warning(
+                                        f"Failed to complete message after second 412 (Retry) "
+                                        f"for task {self.task.task_id}; SB will redeliver",
+                                        exc_info=True,
+                                    )
+                                return TaskResult(
+                                    task_id=self.task.task_id,
+                                    graph_id=self.task.graph_id,
+                                    status=TaskStatus.Retry,
+                                )
                             else:
-                                # Unexpected state after two 412s (None, Pending, Scheduled, etc).
+                                # Pending, Scheduled, None, or any other unclaimed state:
+                                # no other worker holds Started.  Do NOT settle — let the
+                                # SB lock expire so a fresh worker can retry from scratch.
+                                # Spec action: RereadAfterRetry412 (Pending/Scheduled) → no-settle
+                                _reread2_status = _reread2.status if _reread2 is not None else None
+                                logger.error(
+                                    f"Two 412s on Started write; second re-read returned "
+                                    f"{_reread2_status!r} "
+                                    f"for task {self.task.task_id}. "
+                                    "Not settling — SB will redeliver.",
+                                )
                                 return TaskResult(
                                     task_id=self.task.task_id,
                                     graph_id=self.task.graph_id,
                                     status=TaskStatus.Failure,
-                                    errors=["two 412s on Started write; unexpected state after second re-read"],
+                                    errors=[
+                                        f"two 412s on Started write; second re-read returned {_reread2_status!r}"
+                                    ],
                                 )
-                else:
-                    # Truly unexpected status after 412 (not None, finished, Started, or Scheduled).
-                    # Settle the message to avoid orphaning it on SB lock expiry.
-                    logger.error(
-                        f"412 on Started write but re-read returned unexpected status "
-                        f"{_reread.status!r} for task {self.task.task_id}; "
-                        "settling and returning Failure to avoid stalling the graph."
+                elif _reread.status == TaskStatus.Retry:
+                    # Another worker executed the task and published a delayed retry
+                    # SB message.  Settle our duplicate — the graph will continue via
+                    # the retry message.
+                    # Spec action: WriteStarted412 (Retry) → Completing
+                    logger.warning(
+                        f"412 on Started write; re-read returned Retry for task {self.task.task_id}; "
+                        "another worker already retried — settling our duplicate"
                     )
                     try:
                         await self.complete_message()
                     except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                         logger.warning(
-                            f"Failed to complete message after 412+unexpected status for task {self.task.task_id}; "
+                            f"Failed to complete message after 412+Retry for task {self.task.task_id}; "
                             "SB will redeliver",
                             exc_info=True,
                         )
+                    return TaskResult(
+                        task_id=self.task.task_id,
+                        graph_id=self.task.graph_id,
+                        status=TaskStatus.Retry,
+                    )
+
+                else:
+                    # Truly unexpected status after 412 (not None, finished, Started,
+                    # Scheduled, Pending, or Retry).  Do NOT settle — we don't know
+                    # whether another worker will continue the graph, so stalling here
+                    # is safer than consuming the message and orphaning the task.
+                    # Let the SB lock expire so a fresh worker can retry from scratch.
+                    logger.error(
+                        f"412 on Started write but re-read returned unexpected status "
+                        f"{_reread.status!r} for task {self.task.task_id}; "
+                        "not settling — SB will redeliver."
+                    )
                     return TaskResult(
                         task_id=self.task.task_id,
                         graph_id=self.task.graph_id,
