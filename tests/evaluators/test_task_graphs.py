@@ -3028,3 +3028,230 @@ async def test_continue_graph_lease_returns_none_skips_task(evaluator_context, m
         result = await evaluator_context.evaluator()
 
     assert result.status == TaskStatus.Success
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# all_failed_callback integration tests (BMO-57)
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+def _build_graph_with_all_failed_callback(app):
+    """Helper: build a graph with one main task, one per-task failure callback,
+    and one all_failed_callback. Pending results are pre-populated.
+
+    Returns (graph, main_task, per_task_cb, all_failed_cb).
+    """
+
+    async def afc_main(state):
+        return "main"
+
+    async def afc_per_task_fail(state):
+        return "per_task handled"
+
+    async def afc_all_failed(state):
+        return "all failed"
+
+    app.register_many_async([afc_main, afc_per_task_fail, afc_all_failed])
+
+    main_task = app.create_task(afc_main)
+    per_task_cb = app.create_task(afc_per_task_fail)
+    all_failed_cb = app.create_task(afc_all_failed)
+
+    graph = TaskGraph()
+    graph.add_task(main_task)
+    graph.add_failure_callback(main_task.task_id, per_task_cb)
+    graph.add_all_failed_callback(all_failed_cb)
+    list(graph.generate_pending_results())
+
+    return graph, main_task, per_task_cb, all_failed_cb
+
+
+async def test_continue_graph_dispatches_all_failed_callback(evaluator_context, app):
+    """After the last main task fails and all per-task failure callbacks finish,
+    continue_graph() publishes the all_failed_callback and writes Scheduled."""
+    graph, main_task, per_task_cb, all_failed_cb = _build_graph_with_all_failed_callback(app)
+
+    # Main task failed; per-task callback done
+    graph.add_result(TaskResult(task_id=main_task.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+    graph.add_result(TaskResult(task_id=per_task_cb.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    evaluator_context.graph = graph
+
+    completed = TaskResult(
+        task_id=per_task_cb.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Success,
+    )
+
+    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+
+    # The all_failed_callback must have been published
+    published = evaluator_context.get_scheduled_messages()
+    published_ids = {msg.task.task_id for msg in published}
+    assert all_failed_cb.task_id in published_ids, (
+        "all_failed_callback must be published after graph reaches terminal-failed state"
+    )
+    assert ready_count >= 1
+
+    # Scheduled blob must have been written
+    store_calls = evaluator_context.mock_storage.store_task_result.mock_calls
+    stored_ids_scheduled = {
+        c.args[0].task_id
+        for c in store_calls
+        if hasattr(c.args[0], "status") and c.args[0].status == TaskStatus.Scheduled
+    }
+    assert all_failed_cb.task_id in stored_ids_scheduled, (
+        "all_failed_callback status must be written as Scheduled in blob storage"
+    )
+
+
+async def test_continue_graph_does_not_dispatch_callback_on_success(evaluator_context, app):
+    """When all main tasks succeed, continue_graph() must NOT publish the all_failed_callback."""
+    graph, main_task, per_task_cb, all_failed_cb = _build_graph_with_all_failed_callback(app)
+
+    graph.add_result(TaskResult(task_id=main_task.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    evaluator_context.graph = graph
+
+    completed = TaskResult(
+        task_id=main_task.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Success,
+    )
+
+    await evaluator_context.evaluator.continue_graph(completed)
+
+    published_ids = {msg.task.task_id for msg in evaluator_context.get_scheduled_messages()}
+    assert all_failed_cb.task_id not in published_ids, (
+        "all_failed_callback must NOT be published when graph completes successfully"
+    )
+
+
+async def test_continue_graph_callback_not_double_dispatched(evaluator_context, app):
+    """Two concurrent continue_graph() calls (simulated by returning None from
+    try_acquire_lease on the second attempt) must result in only one publish."""
+    graph, main_task, per_task_cb, all_failed_cb = _build_graph_with_all_failed_callback(app)
+
+    graph.add_result(TaskResult(task_id=main_task.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+    graph.add_result(TaskResult(task_id=per_task_cb.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    evaluator_context.graph = graph
+
+    # First call acquires lease; second call finds it held (returns None).
+    evaluator_context.mock_storage.try_acquire_lease.side_effect = itertools.chain(
+        ["lease-id-1"],   # first worker acquires
+        [None],           # second worker cannot acquire
+    )
+
+    completed = TaskResult(
+        task_id=per_task_cb.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Success,
+    )
+
+    await evaluator_context.evaluator.continue_graph(completed)
+    first_publishes = list(evaluator_context.get_scheduled_messages())
+
+    evaluator_context._published_messages.clear()
+
+    await evaluator_context.evaluator.continue_graph(completed)
+    second_publishes = list(evaluator_context.get_scheduled_messages())
+
+    callback_published_first = sum(1 for m in first_publishes if m.task.task_id == all_failed_cb.task_id)
+    callback_published_second = sum(1 for m in second_publishes if m.task.task_id == all_failed_cb.task_id)
+
+    assert callback_published_first == 1, "First worker must dispatch exactly once"
+    assert callback_published_second == 0, "Second worker must be blocked by lease and skip"
+
+
+async def test_continue_graph_callback_dispatched_after_failure_callback_finishes(evaluator_context, app):
+    """The all_failed_callback is dispatched only once the per-task failure callback
+    completes — not prematurely while it is still Pending/Started."""
+    graph, main_task, per_task_cb, all_failed_cb = _build_graph_with_all_failed_callback(app)
+
+    # main_task failed; per-task callback still Pending (not done yet)
+    graph.add_result(TaskResult(task_id=main_task.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+
+    evaluator_context.graph = graph
+
+    completed_main = TaskResult(
+        task_id=main_task.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Failure,
+    )
+    await evaluator_context.evaluator.continue_graph(completed_main)
+
+    published_after_main = {msg.task.task_id for msg in evaluator_context.get_scheduled_messages()}
+    assert all_failed_cb.task_id not in published_after_main, (
+        "all_failed_callback must NOT be dispatched while per-task failure callback is still pending"
+    )
+
+    # per-task failure callback completes
+    graph.add_result(TaskResult(task_id=per_task_cb.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    completed_per_task = TaskResult(
+        task_id=per_task_cb.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Success,
+    )
+    evaluator_context._published_messages.clear()
+    await evaluator_context.evaluator.continue_graph(completed_per_task)
+
+    published_after_cb = {msg.task.task_id for msg in evaluator_context.get_scheduled_messages()}
+    assert all_failed_cb.task_id in published_after_cb, (
+        "all_failed_callback must be dispatched once per-task failure callback finishes"
+    )
+
+
+async def test_continue_graph_callback_crash_recovery(evaluator_context, app):
+    """Crash-recovery: the all_failed_callback stays Pending in blob storage after a prior
+    crash (publish succeeded but blob write failed). On redelivery, a freshly loaded graph
+    still shows the callback as Pending, so continue_graph() must re-publish it."""
+
+    # Build a graph that is already in terminal-failed state with the callback still Pending.
+    # This simulates the state stored in blob storage after a crash: the callback was published
+    # to Service Bus but Scheduled was never written to the blob.
+
+    async def afc_main_cr(state):
+        return "main"
+
+    async def afc_per_task_fail_cr(state):
+        return "per_task handled"
+
+    async def afc_all_failed_cr(state):
+        return "all failed"
+
+    app.register_many_async([afc_main_cr, afc_per_task_fail_cr, afc_all_failed_cr])
+
+    main_task = app.create_task(afc_main_cr)
+    per_task_cb = app.create_task(afc_per_task_fail_cr)
+    all_failed_cb = app.create_task(afc_all_failed_cr)
+
+    graph = TaskGraph()
+    graph.add_task(main_task)
+    graph.add_failure_callback(main_task.task_id, per_task_cb)
+    graph.add_all_failed_callback(all_failed_cb)
+    list(graph.generate_pending_results())
+
+    # Graph is terminal-failed: main task failed, per-task callback done.
+    # all_failed_cb is still Pending — simulates prior crash after SB publish but before blob write.
+    graph.add_result(TaskResult(task_id=main_task.task_id, graph_id=graph.graph_id, status=TaskStatus.Failure))
+    graph.add_result(TaskResult(task_id=per_task_cb.task_id, graph_id=graph.graph_id, status=TaskStatus.Success))
+
+    evaluator_context.graph = graph
+
+    completed = TaskResult(
+        task_id=per_task_cb.task_id,
+        graph_id=graph.graph_id,
+        status=TaskStatus.Success,
+    )
+
+    # On redelivery the graph is loaded from storage with callback still Pending.
+    # continue_graph() should re-publish it (SB dedup suppresses genuine duplicate delivery).
+    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+
+    published_ids = {msg.task.task_id for msg in evaluator_context.get_scheduled_messages()}
+    assert all_failed_cb.task_id in published_ids, (
+        "Callback must be re-published on redelivery when it remained Pending (crash recovery)"
+    )
+    assert ready_count >= 1

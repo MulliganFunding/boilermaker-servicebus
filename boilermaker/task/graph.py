@@ -70,6 +70,9 @@ class TaskGraph(BaseModel):
     edges: dict[TaskId, set[TaskId]] = Field(default_factory=lambda: defaultdict(set[TaskId]))
     # fail_edges is a mapping of parent task IDs to sets of child task IDs for failure callbacks
     fail_edges: dict[TaskId, set[TaskId]] = Field(default_factory=lambda: defaultdict(set[TaskId]))
+    # all_failed_callback_id is the TaskId of the graph-level fan-in error callback, if registered.
+    # The callback task is stored in fail_children but NOT in fail_edges (no per-task trigger edge).
+    all_failed_callback_id: TaskId | None = Field(default=None)
 
     # Task results go here; these get loaded from JSON files on deserialization.
     # We do not write these back because we write only one time: when first publishing this TaskGraph.
@@ -229,6 +232,57 @@ class TaskGraph(BaseModel):
             self.add_failure_callback(callback_task.task_id, callback_task.on_failure)
             callback_task.on_failure = None
 
+    def add_all_failed_callback(self, callback_task: Task) -> None:
+        """Register a graph-level fan-in error callback.
+
+        The callback fires exactly once after the graph reaches terminal-failed state
+        (all main tasks and per-task failure callbacks have finished, with at least one
+        failure among the main tasks).
+
+        Unlike per-task failure callbacks, this task is stored in ``fail_children`` but
+        is NOT added to ``fail_edges``. That omission is the mechanism that prevents a
+        circular dependency: ``_get_reachable_failure_tasks()`` (and therefore
+        ``is_complete()``) does not wait for this task via the BFS path.
+
+        Args:
+            callback_task: The Task to run when the graph reaches terminal-failed state.
+
+        Raises:
+            ValueError: If a callback is already registered (only one per graph is supported).
+            ValueError: If ``callback_task.task_id`` is already in ``children``
+                        (guards against reusing a main task as the callback).
+            ValueError: If ``callback_task.task_id`` is already in ``fail_children``
+                        (guards against reusing a per-task failure callback).
+        """
+        if self.all_failed_callback_id is not None:
+            raise ValueError(
+                "all_failed_callback is already set; only one is supported per graph."
+            )
+        if callback_task.task_id in self.children:
+            raise ValueError(
+                f"Task {callback_task.task_id!r} is already registered as a main task. "
+                "A task cannot serve as both a main task and the all_failed_callback."
+            )
+        if callback_task.task_id in self.fail_children:
+            raise ValueError(
+                f"Task {callback_task.task_id!r} is already registered as a per-task failure "
+                "callback. A task cannot serve as both a per-task callback and the "
+                "all_failed_callback."
+            )
+
+        callback_task.graph_id = self.graph_id
+        self.fail_children[callback_task.task_id] = callback_task
+        self.all_failed_callback_id = callback_task.task_id
+
+        # Handle on_success / on_failure chaining on the callback task itself.
+        if callback_task.on_success:
+            self.add_task(callback_task.on_success, parent_ids=[callback_task.task_id])
+            callback_task.on_success = None
+
+        if callback_task.on_failure:
+            self.add_failure_callback(callback_task.task_id, callback_task.on_failure)
+            callback_task.on_failure = None
+
     def schedule_task(self, task_id: TaskId) -> TaskResult | TaskResultSlim:
         """Mark a task as scheduled to prevent double-scheduling."""
         if not (task_id in self.children or task_id in self.fail_children):
@@ -339,19 +393,47 @@ class TaskGraph(BaseModel):
                     yield self.fail_children[task_id]
                     break  # Prevent double-yield when multiple parents have failed
 
+    def generate_all_failed_callback_task(self) -> Generator[Task]:
+        """Yield the graph-level all-failed callback task when it is ready to be dispatched.
+
+        Yields the callback task exactly once when:
+        1. An ``all_failed_callback`` is registered (``all_failed_callback_id`` is not None).
+        2. The graph has reached terminal-failed state (``is_terminal_failed()`` is True).
+        3. The callback's result status is ``Pending`` (not yet scheduled or completed).
+
+        Yields nothing if:
+        - No callback is registered.
+        - The graph has not yet settled.
+        - The graph completed without any failures.
+        - The callback has already been scheduled or has finished.
+        - The callback's result blob does not exist yet (treated as not-yet-schedulable,
+          consistent with ``generate_ready_tasks()``).
+        """
+        if self.all_failed_callback_id is None:
+            return
+        cb_id = self.all_failed_callback_id
+        result = self.results.get(cb_id)
+        is_pending = result is not None and result.status == TaskStatus.Pending
+        if self.is_terminal_failed() and is_pending:
+            yield self.fail_children[cb_id]
+
     def generate_scheduled_tasks(self) -> Generator[Task]:
         """Yield tasks already in Scheduled status whose scheduling conditions are still met.
 
-        Used by ``continue_graph`` for crash-recovery: if a prior invocation wrote
+        Intended for crash-recovery in ``continue_graph``: if a prior invocation wrote
         a task to ``Scheduled`` in blob storage but crashed before publishing the
         Service Bus message, this method identifies it on redelivery so that
         ``continue_graph`` can re-publish it without a second blob write.
+
+        NOTE: ``continue_graph`` does not currently call this method. The crash-recovery
+        path is not yet active. See BMO-56 / staff-engineer review Concern 3.
 
         Conditions:
           - Regular child tasks: all antecedents must have succeeded
             (same predicate as ``generate_ready_tasks``).
           - Failure callback tasks: at least one triggering parent must have a
             failed status (same predicate as ``generate_failure_ready_tasks``).
+          - all_failed_callback: ``is_terminal_failed()`` must be True.
         """
         # Regular children already in Scheduled status
         for task_id, task in self.children.items():
@@ -370,6 +452,19 @@ class TaskGraph(BaseModel):
                         if parent_id in self.results and self.results[parent_id].status.failed:
                             yield task
                             break  # Prevent double-yield when multiple parents have failed
+
+        # all_failed_callback crash-recovery: if the callback was written to Scheduled
+        # in blob storage but the Service Bus publish crashed before completing, re-yield
+        # it on redelivery so continue_graph() can re-publish it.
+        #
+        # NOTE: continue_graph() does not currently call generate_scheduled_tasks(), so
+        # this block is not yet reachable from any production code path. It is preserved
+        # here for a follow-on issue that will wire continue_graph() to call this method.
+        if self.all_failed_callback_id is not None:
+            cb_id = self.all_failed_callback_id
+            result = self.results.get(cb_id)
+            if result is not None and result.status == TaskStatus.Scheduled and self.is_terminal_failed():
+                yield self.fail_children[cb_id]
 
     def get_result(self, task_id: TaskId) -> TaskResultSlim | TaskResult | None:
         """Get the result of a completed task."""
@@ -399,16 +494,17 @@ class TaskGraph(BaseModel):
             if self.get_status(task_id) is not None
         )
 
-    def is_complete(self) -> bool:
-        """Check if the graph has finished executing (reached a terminal state).
+    def _is_complete_main_and_failure_tasks(self) -> bool:
+        """Check whether all main tasks and reachable per-task failure callbacks have finished.
 
-        A graph is complete when:
-        1. All main tasks (children) are in finished states, AND
-        2. All reachable failure callback tasks are in finished states
+        This is the shared core of ``is_complete()`` and ``is_terminal_failed()``.  It
+        deliberately does *not* consider the ``all_failed_callback``; that guard lives
+        exclusively in ``is_complete()``.
 
-        We don't expect ALL failure children to be invoked, only those reachable
-        from actual failures. The graph is in a terminal state when we've processed
-        as far as we can in both the main graph and the failure graph.
+        Returns:
+            True if every main task is either in a finished state or unreachable due to
+            failed dependencies, AND every reachable per-task failure callback is finished.
+            False otherwise (including when the graph has no main tasks).
         """
         # If there are no main tasks, the graph is not complete
         if not self.children:
@@ -438,6 +534,45 @@ class TaskGraph(BaseModel):
         for task_id in reachable_failure_tasks:
             status = self.get_status(task_id)
             if status is None or status not in finished_statuses:
+                return False
+
+        return True
+
+    def is_terminal_failed(self) -> bool:
+        """Check if the graph has reached a terminal-failed state.
+
+        Terminal-failed means all main tasks and per-task failure callbacks have
+        settled (same check as the core of ``is_complete()``), AND at least one
+        main task has a failure-type status.
+
+        This is the trigger condition for dispatching the ``all_failed_callback``.
+
+        Returns:
+            True when the graph has fully settled with at least one failure.
+        """
+        return self._is_complete_main_and_failure_tasks() and self.has_failures()
+
+    def is_complete(self) -> bool:
+        """Check if the graph has finished executing (reached a terminal state).
+
+        A graph is complete when:
+        1. All main tasks (children) are in finished states, AND
+        2. All reachable failure callback tasks are in finished states, AND
+        3. If the graph is terminal-failed and an ``all_failed_callback`` is registered,
+           that callback must also have reached a finished state.
+
+        We don't expect ALL failure children to be invoked, only those reachable
+        from actual failures. The graph is in a terminal state when we've processed
+        as far as we can in both the main graph and the failure graph.
+        """
+        if not self._is_complete_main_and_failure_tasks():
+            return False
+
+        # If the graph finished with failures and a callback is registered,
+        # the callback must also have finished before we declare the graph complete.
+        if self.all_failed_callback_id is not None and self.has_failures():
+            cb_status = self.get_status(self.all_failed_callback_id)
+            if cb_status is None or not cb_status.finished:
                 return False
 
         return True
@@ -503,6 +638,11 @@ class TaskGraph(BaseModel):
                             reachable.add(child_id)
                             to_visit.append(child_id)
 
+        # The all_failed_callback is stored in fail_children but has no fail_edge, so it
+        # will never be added to `reachable` by the BFS above.  The discard() call below
+        # is a defensive belt-and-suspenders guard to ensure the invariant holds even if
+        # future code accidentally adds a fail_edge for this task.
+        reachable.discard(self.all_failed_callback_id)
         return reachable
 
 
@@ -609,6 +749,7 @@ class TaskGraphBuilder:
         self._dependencies: dict[TaskId, set[TaskId]] = {}
         self._failure_callbacks: dict[TaskId, set[Task]] = {}
         self._last_added: list[TaskId] = []  # Track recently added tasks for chaining
+        self._all_failed_callback: Task | None = None
 
     def _resolve_dependencies(
         self,
@@ -830,17 +971,54 @@ class TaskGraphBuilder:
 
         return self
 
-    def build(self) -> TaskGraph:
+    def on_all_failed(self, task: Task) -> "TaskGraphBuilder":
+        """Register a graph-level fan-in error callback.
+
+        The callback fires exactly once after the entire graph reaches terminal-failed
+        state (all main tasks and per-task failure callbacks have finished, with at
+        least one main-task failure).
+
+        The task is NOT added to the DAG as a node — it is passed to
+        ``TaskGraph.add_all_failed_callback()`` during ``build()``.
+
+        Args:
+            task: The Task to run when the graph reaches terminal-failed state.
+
+        Returns:
+            Self for method chaining.
+
+        Raises:
+            ValueError: If ``on_all_failed`` has already been called on this builder.
+        """
+        if self._all_failed_callback is not None:
+            raise ValueError("on_all_failed is already set.")
+        self._all_failed_callback = task
+        return self
+
+    def build(self, on_all_failed: Task | None = None) -> TaskGraph:
         """Build and return the final TaskGraph.
+
+        Args:
+            on_all_failed: Optional graph-level fan-in error callback task. Equivalent
+                to calling ``.on_all_failed(task)`` before ``.build()``. Raises
+                ``ValueError`` if both this kwarg and ``.on_all_failed()`` are set.
 
         Returns:
             TaskGraph: Constructed graph with all tasks and dependencies
 
         Raises:
-            ValueError: If the graph would contain cycles
+            ValueError: If the graph would contain cycles.
+            ValueError: If the graph has no tasks.
+            ValueError: If both ``on_all_failed`` kwarg and ``.on_all_failed()`` method
+                        have been used on the same builder.
         """
         if not self._tasks:
             raise ValueError("Cannot build an empty graph. Add at least one task before calling build().")
+
+        if on_all_failed is not None and self._all_failed_callback is not None:
+            raise ValueError(
+                "on_all_failed set via both method and kwarg — use one or the other."
+            )
 
         tg = TaskGraph()
         # Add all tasks with their dependencies
@@ -852,5 +1030,10 @@ class TaskGraphBuilder:
         for parent_task_id, callback_tasks in self._failure_callbacks.items():
             for callback_task in callback_tasks:
                 tg.add_failure_callback(parent_task_id, callback_task)
+
+        # Add the graph-level all-failed callback if one was registered
+        effective_callback = on_all_failed or self._all_failed_callback
+        if effective_callback is not None:
+            tg.add_all_failed_callback(effective_callback)
 
         return tg

@@ -2539,3 +2539,300 @@ def test_task_chain_len():
     t3 = task.Task.default("c")
     chain = TaskChain(t1, t2, t3)
     assert len(chain) == 3
+
+
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ #
+# all_failed_callback unit tests (BMO-57)
+# ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ ~~~~ #
+
+
+def test_all_failed_callback_not_set_by_default():
+    """all_failed_callback_id is None by default; generate_all_failed_callback_task
+    yields nothing; is_complete() is not affected."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    g.add_task(t1)
+
+    # Field is None by default
+    assert g.all_failed_callback_id is None
+
+    # Generator yields nothing (no callback registered)
+    assert list(g.generate_all_failed_callback_task()) == []
+
+    # is_complete() behaves normally (task not finished → False)
+    assert g.is_complete() is False
+
+    # Mark task done → graph completes normally, still no callback interference
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+    assert g.is_complete() is True
+
+
+def test_add_all_failed_callback_stores_in_fail_children():
+    """add_all_failed_callback() sets all_failed_callback_id and stores the task
+    in fail_children, but NOT in fail_edges."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    cb = task.Task.default("cb")
+    g.add_task(t1)
+    g.add_all_failed_callback(cb)
+
+    assert g.all_failed_callback_id == cb.task_id
+    assert cb.task_id in g.fail_children
+    assert g.fail_children[cb.task_id] is cb
+    # Must NOT appear in fail_edges
+    for children in g.fail_edges.values():
+        assert cb.task_id not in children
+
+
+def test_add_all_failed_callback_duplicate_raises():
+    """A second call to add_all_failed_callback() raises ValueError."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    cb1 = task.Task.default("cb1")
+    cb2 = task.Task.default("cb2")
+    g.add_task(t1)
+    g.add_all_failed_callback(cb1)
+
+    with pytest.raises(ValueError, match="already set"):
+        g.add_all_failed_callback(cb2)
+
+
+def test_add_all_failed_callback_rejects_main_task():
+    """add_all_failed_callback() raises ValueError if the task is already a main task."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    g.add_task(t1)
+
+    with pytest.raises(ValueError, match="main task"):
+        g.add_all_failed_callback(t1)
+
+
+def test_add_all_failed_callback_rejects_existing_fail_child():
+    """add_all_failed_callback() raises ValueError if the task is already a per-task failure callback."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    per_task_cb = task.Task.default("per_task_cb")
+    g.add_task(t1)
+    g.add_failure_callback(t1.task_id, per_task_cb)
+
+    with pytest.raises(ValueError, match="per-task failure callback"):
+        g.add_all_failed_callback(per_task_cb)
+
+
+def test_generate_all_failed_callback_not_triggered_on_success():
+    """When the graph completes successfully, the generator yields nothing and
+    the callback status remains Pending."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    cb = task.Task.default("cb")
+    g.add_task(t1)
+    g.add_all_failed_callback(cb)
+    list(g.generate_pending_results())
+
+    # Complete t1 successfully
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+
+    yielded = list(g.generate_all_failed_callback_task())
+    assert yielded == []
+    # Callback is still Pending (never touched)
+    assert g.get_status(cb.task_id) == task.TaskStatus.Pending
+
+
+def test_generate_all_failed_callback_triggered_on_failure():
+    """After a main task fails and per-task failure callbacks finish, the generator
+    yields the callback task exactly once."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    per_task_cb = task.Task.default("per_task_cb")
+    cb = task.Task.default("cb")
+    g.add_task(t1)
+    g.add_failure_callback(t1.task_id, per_task_cb)
+    g.add_all_failed_callback(cb)
+    list(g.generate_pending_results())
+
+    # t1 fails; per-task callback finishes
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+    g.add_result(task.TaskResult(task_id=per_task_cb.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+
+    yielded = list(g.generate_all_failed_callback_task())
+    assert len(yielded) == 1
+    assert yielded[0].task_id == cb.task_id
+
+
+def test_generate_all_failed_callback_not_re_yielded_after_scheduled():
+    """Once the callback reaches Scheduled, Started, or Success, the generator
+    yields nothing on subsequent calls."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    cb = task.Task.default("cb")
+    g.add_task(t1)
+    g.add_all_failed_callback(cb)
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    for non_pending_status in (task.TaskStatus.Scheduled, task.TaskStatus.Started, task.TaskStatus.Success):
+        g.results[cb.task_id].status = non_pending_status
+        assert list(g.generate_all_failed_callback_task()) == [], (
+            f"Expected no yield when callback is {non_pending_status}"
+        )
+
+
+def test_is_terminal_failed_false_when_incomplete():
+    """is_terminal_failed() returns False when some main task is still Pending."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    t2 = task.Task.default("t2")
+    g.add_task(t1)
+    g.add_task(t2)
+    list(g.generate_pending_results())
+
+    # t1 fails but t2 is still Pending
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    assert g.is_terminal_failed() is False
+
+
+def test_is_terminal_failed_false_when_succeeded():
+    """is_terminal_failed() returns False when all main tasks succeeded."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    t2 = task.Task.default("t2")
+    g.add_task(t1)
+    g.add_task(t2)
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+    g.add_result(task.TaskResult(task_id=t2.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+
+    assert g.is_terminal_failed() is False
+
+
+def test_is_terminal_failed_true_when_complete_and_has_failures():
+    """is_terminal_failed() returns True when all main tasks finished, at least one
+    failed, and all reachable per-task failure callbacks finished."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    t2 = task.Task.default("t2")
+    per_task_cb = task.Task.default("per_task_cb")
+    g.add_task(t1)
+    g.add_task(t2)
+    g.add_failure_callback(t1.task_id, per_task_cb)
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+    g.add_result(task.TaskResult(task_id=t2.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+    g.add_result(task.TaskResult(task_id=per_task_cb.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+
+    assert g.is_terminal_failed() is True
+
+
+def test_is_complete_waits_for_callback_when_triggered():
+    """When is_terminal_failed() is True and the callback is still Pending,
+    is_complete() returns False."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    cb = task.Task.default("cb")
+    g.add_task(t1)
+    g.add_all_failed_callback(cb)
+    list(g.generate_pending_results())
+
+    # t1 fails; callback is still Pending
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    assert g.is_terminal_failed() is True
+    assert g.is_complete() is False
+
+
+def test_is_complete_after_callback_finishes():
+    """is_complete() returns True once the callback reaches Success or Failure."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    cb = task.Task.default("cb")
+    g.add_task(t1)
+    g.add_all_failed_callback(cb)
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    for finished_status in (task.TaskStatus.Success, task.TaskStatus.Failure):
+        g.results[cb.task_id] = task.TaskResult(
+            task_id=cb.task_id, graph_id=g.graph_id, status=finished_status
+        )
+        assert g.is_complete() is True, f"Expected is_complete()=True when callback is {finished_status}"
+
+
+def test_is_complete_succeeds_without_callback_triggered():
+    """When there are no failures, is_complete() does not wait for the registered
+    callback — it returns True immediately."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    cb = task.Task.default("cb")
+    g.add_task(t1)
+    g.add_all_failed_callback(cb)
+    list(g.generate_pending_results())
+
+    # Graph succeeds — callback is Pending but should not block completion
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+
+    assert g.is_complete() is True
+
+
+def test_get_reachable_failure_tasks_excludes_all_failed_callback():
+    """_get_reachable_failure_tasks() never includes all_failed_callback_id,
+    even when it is stored in fail_children."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    per_task_cb = task.Task.default("per_task_cb")
+    cb = task.Task.default("cb")
+    g.add_task(t1)
+    g.add_failure_callback(t1.task_id, per_task_cb)
+    g.add_all_failed_callback(cb)
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    reachable = g._get_reachable_failure_tasks()
+    assert per_task_cb.task_id in reachable
+    assert cb.task_id not in reachable
+
+
+def test_builder_on_all_failed_method():
+    """builder.on_all_failed(task).build() sets tg.all_failed_callback_id."""
+    from boilermaker.task.graph import TaskGraphBuilder
+
+    t1 = task.Task.default("t1")
+    cb = task.Task.default("cb")
+
+    tg = TaskGraphBuilder().add(t1, depends_on=None).on_all_failed(cb).build()
+
+    assert tg.all_failed_callback_id == cb.task_id
+    assert cb.task_id in tg.fail_children
+
+
+def test_builder_build_kwarg():
+    """builder.build(on_all_failed=task) sets tg.all_failed_callback_id,
+    equivalent to calling on_all_failed() first."""
+    from boilermaker.task.graph import TaskGraphBuilder
+
+    t1 = task.Task.default("t1")
+    cb = task.Task.default("cb")
+
+    tg = TaskGraphBuilder().add(t1, depends_on=None).build(on_all_failed=cb)
+
+    assert tg.all_failed_callback_id == cb.task_id
+    assert cb.task_id in tg.fail_children
+
+
+def test_builder_conflict_raises():
+    """Using both on_all_failed() method and on_all_failed= kwarg raises ValueError."""
+    from boilermaker.task.graph import TaskGraphBuilder
+
+    t1 = task.Task.default("t1")
+    cb1 = task.Task.default("cb1")
+    cb2 = task.Task.default("cb2")
+
+    builder = TaskGraphBuilder().add(t1, depends_on=None).on_all_failed(cb1)
+
+    with pytest.raises(ValueError, match="on_all_failed"):
+        builder.build(on_all_failed=cb2)
