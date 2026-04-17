@@ -218,20 +218,28 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                         status=TaskStatus.Started,
                     )
 
-                if _reread.status == TaskStatus.Scheduled:
-                    # The scheduler wrote Scheduled and released its lease before the
-                    # SB message was consumed.  No other worker holds Started yet —
-                    # this worker should claim execution by retrying the Started write
-                    # using the etag from the Scheduled blob.
-                    # Spec action: WriteStarted412 (Scheduled branch) →
+                if _reread.status in (TaskStatus.Scheduled, TaskStatus.Pending):
+                    # No other worker holds Started yet — retry the CAS with the
+                    # re-read etag.
+                    #
+                    # Scheduled: normal publish-before-store window; scheduler wrote
+                    #   Scheduled and released its lease before this worker consumed
+                    #   the SB message.
+                    # Pending:   lease acquire bumped the blob ETag (Azure advances the
+                    #   ETag on BlobLeaseClient.acquire() even without a content write)
+                    #   but the scheduler has not yet written Scheduled (or
+                    #   WriteScheduledFail left the blob Pending).  Either way no other
+                    #   worker holds Started, so this worker is the legitimate claimant.
+                    #
+                    # Spec action: WriteStarted412 (Scheduled/Pending branch) →
                     #              RetryStartedAfterScheduled
                     if _reread.etag is None:
                         logger.warning(
-                            f"412 + Scheduled re-read for task {self.task.task_id}: "
+                            f"412 + {_reread.status.value} re-read for task {self.task.task_id}: "
                             "re-read etag is None — degraded to unconditional retry write"
                         )
                     logger.warning(
-                        f"412 + Scheduled for task {self.task.task_id}; "
+                        f"412 + {_reread.status.value} for task {self.task.task_id}; "
                         "retrying Started write with re-read etag"
                     )
                     try:
@@ -304,7 +312,6 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                     status=TaskStatus.Failure,
                                     errors=["two 412s on Started write; unexpected state after second re-read"],
                                 )
-
                 else:
                     # Truly unexpected status after 412 (not None, finished, Started, or Scheduled).
                     # Settle the message to avoid orphaning it on SB lock expiry.

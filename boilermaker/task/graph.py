@@ -61,7 +61,7 @@ class TaskGraph(BaseModel):
     StorageName: typing.ClassVar[str] = "graph.json"
 
     # The graph has an ID
-    graph_id: GraphId = ident_field()
+    graph_id: GraphId = GraphId(ident_field())
     # Children is a mapping of task IDs to tasks
     children: dict[TaskId, Task] = Field(default_factory=dict)
     # Failure children is a mapping of task IDs to tasks

@@ -2215,13 +2215,15 @@ async def test_412_scheduled_retry_non412_error_proceeds_to_execution(evaluator_
     )
 
 
-async def test_412_unexpected_status_reread_now_settles(evaluator_context, mock_storage):
-    """When the Started write gets a 412 and the re-read returns a truly unexpected status
-    (Pending — not None, not terminal, not Started, not Scheduled), the catch-all branch
-    calls complete_message before returning Failure.
+async def test_412_pending_reread_retries_started_write_with_new_etag(evaluator_context, mock_storage):
+    """When the Started write gets a 412 and the re-read shows Pending, the retry must use
+    the etag from the re-read (not the original etag, not None).
 
-    This is a regression guard for the catch-all fix: the old code returned Failure without
-    settling, which would leave an orphaned SB message. The fix always settles.
+    This models the production race: the scheduler's BlobLeaseClient.acquire() bumped the
+    blob ETag without changing the status, so the re-read returns Pending with a new etag.
+    The handler must treat this identically to the Scheduled case and retry the CAS.
+
+    Spec action: WriteStarted412 (Pending branch) → RetryStartedAfterScheduled.
     """
     from unittest.mock import patch
 
@@ -2238,14 +2240,165 @@ async def test_412_unexpected_status_reread_now_settles(evaluator_context, mock_
         status=TaskStatus.Pending,
         etag="W/\"etag-v1\"",
     )
-    # Re-read after 412 returns Pending again — an unexpected state the old catch-all handled.
+    # Re-read after 412 returns Pending with a NEW etag — lease acquire bumped it.
     pending_slim_reread = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v3\"",
+        etag="W/\"etag-v2\"",
     )
     mock_storage.load_task_result.side_effect = [pending_slim, pending_slim_reread]
+
+    # First store raises 412; retry succeeds; result write also succeeds.
+    mock_storage.store_task_result.side_effect = [
+        BoilermakerStorageError("412 Precondition Failed", status_code=412),
+        None,
+        None,
+    ]
+
+    graph.add_result(
+        TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+    )
+    mock_storage.load_graph.return_value = graph
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        mock_eval_task.return_value = TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+        await evaluator_context.evaluator()
+
+    assert mock_storage.store_task_result.call_count >= 2, (
+        "store_task_result must be called at least twice (Started write + retry)"
+    )
+    retry_call = mock_storage.store_task_result.call_args_list[1]
+    actual_etag = retry_call.kwargs.get("etag") or (
+        retry_call.args[1] if len(retry_call.args) > 1 else None
+    )
+    assert actual_etag == "W/\"etag-v2\"", (
+        f"Retry Started write must use the re-read Pending blob etag 'W/\"etag-v2\"', got {actual_etag!r}"
+    )
+
+
+async def test_412_pending_retry_success_falls_through_to_execution(evaluator_context, mock_storage):
+    """When the retry Started write succeeds after a Pending re-read, the task executes
+    normally: eval_task is called, the result is stored, and complete_message is called.
+
+    This is the expected recovery path when the scheduler's lease acquire bumped the ETag
+    but the worker can still claim the task by retrying with the new etag.
+
+    Spec action: RetryStartedWriteSuccess → Executing (same path as WriteStartedSuccess).
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    graph = evaluator_context.graph
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = graph.graph_id
+
+    pending_slim = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(graph.graph_id),
+        status=TaskStatus.Pending,
+        etag="W/\"etag-v1\"",
+    )
+    pending_slim_reread = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(graph.graph_id),
+        status=TaskStatus.Pending,
+        etag="W/\"etag-v2\"",
+    )
+    mock_storage.load_task_result.side_effect = [pending_slim, pending_slim_reread]
+
+    # First store raises 412; retry succeeds; result write also succeeds.
+    mock_storage.store_task_result.side_effect = [
+        BoilermakerStorageError("412 Precondition Failed", status_code=412),
+        None,
+        None,
+    ]
+
+    graph.add_result(
+        TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+    )
+    mock_storage.load_graph.return_value = graph
+
+    evaluator_context.evaluator.task = ok_task
+    ok_task.msg = evaluator_context.make_message(ok_task)
+
+    with patch("boilermaker.evaluators.task_graph.eval_task") as mock_eval_task:
+        mock_eval_task.return_value = TaskResult(
+            task_id=ok_task.task_id,
+            graph_id=graph.graph_id,
+            status=TaskStatus.Success,
+            result="OK",
+        )
+        result = await evaluator_context.evaluator()
+
+    mock_eval_task.assert_called_once()
+
+    assert mock_storage.store_task_result.call_count >= 2, (
+        "store_task_result must be called at least twice (Started retry + result write)"
+    )
+
+    assert result is not None
+    assert result.status == TaskStatus.Success, (
+        f"Expected Success after Pending retry success + execution, got {result.status}"
+    )
+
+    assert evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "complete_message must be called via the normal execution path after retry success"
+    )
+
+
+async def test_412_unexpected_status_reread_now_settles(evaluator_context, mock_storage):
+    """When the Started write gets a 412 and the re-read returns a truly unexpected status
+    (e.g. Retry — not None, not terminal, not Started, not Scheduled, not Pending), the
+    catch-all branch calls complete_message before returning Failure.
+
+    Pending and Scheduled are both handled by the retry path (RetryStartedAfterScheduled).
+    Only statuses that can never legitimately appear on a blob at this point (e.g. Retry,
+    which is only written by the worker after execution) remain in the catch-all.
+    """
+    from unittest.mock import patch
+
+    from boilermaker.exc import BoilermakerStorageError
+    from boilermaker.task import GraphId, TaskResultSlim
+
+    graph = evaluator_context.graph
+    ok_task = evaluator_context.ok_task
+    ok_task.graph_id = graph.graph_id
+
+    pending_slim = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(graph.graph_id),
+        status=TaskStatus.Pending,
+        etag="W/\"etag-v1\"",
+    )
+    # Re-read after 412 returns Retry — a truly unexpected status in the catch-all.
+    retry_slim_reread = TaskResultSlim(
+        task_id=ok_task.task_id,
+        graph_id=GraphId(graph.graph_id),
+        status=TaskStatus.Retry,
+        etag="W/\"etag-v2\"",
+    )
+    mock_storage.load_task_result.side_effect = [pending_slim, retry_slim_reread]
 
     mock_storage.store_task_result.side_effect = BoilermakerStorageError(
         "412 Precondition Failed", status_code=412
@@ -2261,9 +2414,9 @@ async def test_412_unexpected_status_reread_now_settles(evaluator_context, mock_
 
     assert result is not None
     assert result.status == TaskStatus.Failure, (
-        f"Expected Failure for unexpected re-read status (Pending), got {result.status}"
+        f"Expected Failure for unexpected re-read status (Retry), got {result.status}"
     )
 
     assert evaluator_context.mockservicebus._receiver.complete_message.called, (
-        "complete_message must be called for unexpected re-read status (catch-all fix)"
+        "complete_message must be called for unexpected re-read status (catch-all always settles)"
     )
