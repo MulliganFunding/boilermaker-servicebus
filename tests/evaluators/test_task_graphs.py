@@ -2071,14 +2071,14 @@ async def test_412_scheduled_retry_second_412_sees_terminal_settles(evaluator_co
 
 
 @pytest.mark.parametrize("second_reread_value", [None, "scheduled", "pending"])
-async def test_412_scheduled_retry_second_412_sees_unexpected_settles_with_failure(
+async def test_412_scheduled_retry_second_412_sees_unclaimed_does_not_settle(
     evaluator_context, mock_storage, second_reread_value
 ):
-    """When the retry Started write gets a second 412 and the second re-read returns a
-    status that is neither Started nor terminal (None, Scheduled, Pending), the handler
-    calls complete_message and returns Failure.
+    """When the retry Started write gets a second 412 and the second re-read returns an
+    unclaimed status (None, Scheduled, Pending), the handler does NOT call complete_message
+    — it lets the SB lock expire for redelivery instead of permanently stalling the graph.
 
-    Spec action: RereadAfterRetry (other branch) → Completing.
+    Spec action: RereadAfterRetry412 (Pending/Scheduled) → RereadAfterRetryNoSettle.
     Parameterized over: None, Scheduled, Pending second re-reads.
     """
     from unittest.mock import patch
@@ -2136,11 +2136,12 @@ async def test_412_scheduled_retry_second_412_sees_unexpected_settles_with_failu
 
     assert result is not None
     assert result.status == TaskStatus.Failure, (
-        f"Expected Failure for unexpected second re-read value {second_reread_value!r}, got {result.status}"
+        f"Expected Failure for unclaimed second re-read value {second_reread_value!r}, got {result.status}"
     )
 
-    assert evaluator_context.mockservicebus._receiver.complete_message.called, (
-        "complete_message must be called once even for unexpected second re-read status"
+    assert not evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "complete_message must NOT be called for unclaimed second re-read status — "
+        "let SB redeliver rather than permanently stalling the graph"
     )
 
 
@@ -2367,14 +2368,12 @@ async def test_412_pending_retry_success_falls_through_to_execution(evaluator_co
     )
 
 
-async def test_412_unexpected_status_reread_now_settles(evaluator_context, mock_storage):
-    """When the Started write gets a 412 and the re-read returns a truly unexpected status
-    (e.g. Retry — not None, not terminal, not Started, not Scheduled, not Pending), the
-    catch-all branch calls complete_message before returning Failure.
+async def test_412_retry_reread_settles_and_returns_retry(evaluator_context, mock_storage):
+    """When the Started write gets a 412 and the re-read returns Retry, the handler
+    settles the duplicate message and returns TaskResult(Retry) — another worker already
+    ran the task and published a delayed retry SB message.
 
-    Pending and Scheduled are both handled by the retry path (RetryStartedAfterScheduled).
-    Only statuses that can never legitimately appear on a blob at this point (e.g. Retry,
-    which is only written by the worker after execution) remain in the catch-all.
+    Spec action: WriteStarted412 (Retry re-read) → Completing.
     """
     from unittest.mock import patch
 
@@ -2391,7 +2390,6 @@ async def test_412_unexpected_status_reread_now_settles(evaluator_context, mock_
         status=TaskStatus.Pending,
         etag="W/\"etag-v1\"",
     )
-    # Re-read after 412 returns Retry — a truly unexpected status in the catch-all.
     retry_slim_reread = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
@@ -2413,10 +2411,10 @@ async def test_412_unexpected_status_reread_now_settles(evaluator_context, mock_
     mock_eval_task.assert_not_called()
 
     assert result is not None
-    assert result.status == TaskStatus.Failure, (
-        f"Expected Failure for unexpected re-read status (Retry), got {result.status}"
+    assert result.status == TaskStatus.Retry, (
+        f"Expected Retry for Retry re-read after 412, got {result.status}"
     )
 
     assert evaluator_context.mockservicebus._receiver.complete_message.called, (
-        "complete_message must be called for unexpected re-read status (catch-all always settles)"
+        "complete_message must be called — another worker already owns the retry"
     )
