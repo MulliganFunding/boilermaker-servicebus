@@ -350,7 +350,7 @@ wheels = [
 
 [[package]]
 name = "boilermaker-servicebus"
-version = "1.0.1a3"
+version = "1.0.1a4"
 source = { editable = "." }
 dependencies = [
     { name = "aio-azure-clients-toolbox" },
