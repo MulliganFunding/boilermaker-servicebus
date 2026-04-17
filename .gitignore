@@ -27,4 +27,5 @@ specs/states/
 specs/*out
 specs/*TTrace*
 specs/*trace*
+specs/*toolbox/
 states/
