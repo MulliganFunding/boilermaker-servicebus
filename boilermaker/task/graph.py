@@ -249,8 +249,10 @@ class TaskGraph(BaseModel):
 
         Raises:
             ValueError: If a callback is already registered (only one per graph is supported).
+            ValueError: If ``callback_task.task_id`` is already in ``children``
+                        (guards against reusing a main task as the callback).
             ValueError: If ``callback_task.task_id`` is already in ``fail_children``
-                        (guards against accidentally reusing a per-task callback task).
+                        (guards against reusing a per-task failure callback).
         """
         if self.all_failed_callback_id is not None:
             raise ValueError(

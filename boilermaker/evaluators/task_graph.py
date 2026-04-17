@@ -688,7 +688,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             )
             return False
         if lease_id is None:
-            logger.info(
+            logger.debug(
                 f"[Graph {graph_id}] Skipping task {task.task_id}: "
                 "lease not acquired (another worker holds it or blob was modified)."
             )

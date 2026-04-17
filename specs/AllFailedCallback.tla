@@ -188,11 +188,6 @@ ExecuteCallback_Failure ==
     /\ cb_status' = "Failure"
     /\ UNCHANGED <<main_status, published_to_sb, dispatched_count>>
 
-\* --- Stuttering / no-op ---
-
-\* Stuttering step (required for liveness with WF).
-Stutter == UNCHANGED vars
-
 \* --------------------------------------------------------------------------
 \* Next-state relation
 \* --------------------------------------------------------------------------
@@ -296,8 +291,10 @@ EventuallyComplete ==
 \*
 \* The model must not deadlock. TLC checks this by default (no deadlock means
 \* Next is always enabled, or Spec allows stuttering via UNCHANGED vars).
-\* Because we include Stutter in Next, TLC will not report a deadlock if the
-\* system is in a state where no action fires — but the liveness properties
-\* above ensure progress anyway.
+\* The temporal formula [][Next]_vars permits stuttering steps (steps where
+\* vars remain unchanged) even though Next itself does not include an explicit
+\* stutter action. Therefore TLC will not report a deadlock when the system
+\* reaches a quiescent state where no action is enabled. The liveness
+\* properties above ensure that meaningful progress is still made.
 
 =============================================================================
