@@ -244,7 +244,7 @@ def render_visual_html(
     }});
   </script>
 </body>
-</html>"""
+</html>"""  # noqa: E501
 
 
 def open_visual(
