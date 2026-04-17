@@ -738,10 +738,10 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 try:
                     result = graph.schedule_task(callback_task.task_id)
                     await self.storage_interface.store_task_result(result, lease_id=lease_id)
-                except exc.BoilermakerStorageError:
+                except exc.BoilermakerStorageError as err:
                     logger.warning(
-                        f"[Graph {graph_id}] Failed to write Scheduled for all_failed_callback {callback_task.task_id} "
-                        f"(lease held). Task published to Service Bus.",
+                        f"[Graph {graph_id}] Failed to write Scheduled for all_failed_callback "
+                        f"{callback_task.task_id}. Task published to Service Bus. Error: {err}",
                         exc_info=True,
                     )
                     continue
@@ -754,7 +754,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     continue
             except Exception:
                 logger.error(
-                    f"Failed to publish all_failed_callback {callback_task.task_id} in graph {graph_id}; "
+                    f"[Graph {graph_id}] Failed to publish all_failed_callback {callback_task.task_id}; "
                     "remains Pending, will retry on redelivery.",
                     exc_info=True,
                 )

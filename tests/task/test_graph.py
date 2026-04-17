@@ -2597,6 +2597,28 @@ def test_add_all_failed_callback_duplicate_raises():
         g.add_all_failed_callback(cb2)
 
 
+def test_add_all_failed_callback_rejects_main_task():
+    """add_all_failed_callback() raises ValueError if the task is already a main task."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    g.add_task(t1)
+
+    with pytest.raises(ValueError, match="main task"):
+        g.add_all_failed_callback(t1)
+
+
+def test_add_all_failed_callback_rejects_existing_fail_child():
+    """add_all_failed_callback() raises ValueError if the task is already a per-task failure callback."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    per_task_cb = task.Task.default("per_task_cb")
+    g.add_task(t1)
+    g.add_failure_callback(t1.task_id, per_task_cb)
+
+    with pytest.raises(ValueError, match="per-task failure callback"):
+        g.add_all_failed_callback(per_task_cb)
+
+
 def test_generate_all_failed_callback_not_triggered_on_success():
     """When the graph completes successfully, the generator yields nothing and
     the callback status remains Pending."""

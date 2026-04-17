@@ -256,6 +256,11 @@ class TaskGraph(BaseModel):
             raise ValueError(
                 "all_failed_callback is already set; only one is supported per graph."
             )
+        if callback_task.task_id in self.children:
+            raise ValueError(
+                f"Task {callback_task.task_id!r} is already registered as a main task. "
+                "A task cannot serve as both a main task and the all_failed_callback."
+            )
         if callback_task.task_id in self.fail_children:
             raise ValueError(
                 f"Task {callback_task.task_id!r} is already registered as a per-task failure "
@@ -413,16 +418,20 @@ class TaskGraph(BaseModel):
     def generate_scheduled_tasks(self) -> Generator[Task]:
         """Yield tasks already in Scheduled status whose scheduling conditions are still met.
 
-        Used by ``continue_graph`` for crash-recovery: if a prior invocation wrote
+        Intended for crash-recovery in ``continue_graph``: if a prior invocation wrote
         a task to ``Scheduled`` in blob storage but crashed before publishing the
         Service Bus message, this method identifies it on redelivery so that
         ``continue_graph`` can re-publish it without a second blob write.
+
+        NOTE: ``continue_graph`` does not currently call this method. The crash-recovery
+        path is not yet active. See BMO-56 / staff-engineer review Concern 3.
 
         Conditions:
           - Regular child tasks: all antecedents must have succeeded
             (same predicate as ``generate_ready_tasks``).
           - Failure callback tasks: at least one triggering parent must have a
             failed status (same predicate as ``generate_failure_ready_tasks``).
+          - all_failed_callback: ``is_terminal_failed()`` must be True.
         """
         # Regular children already in Scheduled status
         for task_id, task in self.children.items():
@@ -449,7 +458,6 @@ class TaskGraph(BaseModel):
         # NOTE: continue_graph() does not currently call generate_scheduled_tasks(), so
         # this block is not yet reachable from any production code path. It is preserved
         # here for a follow-on issue that will wire continue_graph() to call this method.
-        # See BMO-56 / staff-engineer review Concern 3.
         if self.all_failed_callback_id is not None:
             cb_id = self.all_failed_callback_id
             result = self.results.get(cb_id)
