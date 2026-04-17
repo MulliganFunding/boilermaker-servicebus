@@ -77,6 +77,11 @@ def _add_inspect_subparser(subparsers: argparse._SubParsersAction) -> None:  # n
         action="store_true",
         help="Output JSON instead of Rich-formatted output",
     )
+    inspect_parser.add_argument(
+        "--visual",
+        action="store_true",
+        help="Generate an HTML DAG visualization and open in browser (requires --graph)",
+    )
 
 
 def _add_recover_subparser(subparsers: argparse._SubParsersAction) -> None:  # noqa: SLF001
@@ -158,6 +163,13 @@ def _validate_inspect_args(args: argparse.Namespace, parser: argparse.ArgumentPa
         parser.error("inspect: one of --graph or --task is required")
     if args.task is not None and args.graph is None:
         parser.error("inspect: --task requires --graph")
+    if hasattr(args, "visual") and args.visual:
+        if args.graph is None:
+            parser.error("inspect: --visual requires --graph")
+        if args.json:
+            parser.error("inspect: --visual and --json are mutually exclusive")
+        if args.task is not None:
+            parser.error("inspect: --visual and --task are mutually exclusive")
 
 
 def main() -> None:
@@ -192,6 +204,7 @@ def main() -> None:
                     console=console,
                     output_json=args.json,
                     task_id=args.task,
+                    visual=getattr(args, "visual", False),
                 )
             if args.command == "recover":
                 return await run_recover(

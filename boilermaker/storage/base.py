@@ -10,12 +10,18 @@ class StorageInterface(ABC):
     """Interface for storage operations related to TaskGraph and TaskResult objects."""
 
     @abstractmethod
-    async def load_graph(self, graph_id: GraphId) -> TaskGraph | None:
+    async def load_graph(self, graph_id: GraphId, full: bool = False) -> TaskGraph | None:
         """
         Loads a TaskGraph from storage.
 
         Args:
             graph_id: The GraphId of the TaskGraph to load.
+            full: When True, task result blobs are deserialized as TaskResult
+                (with result, errors, formatted_exception fields) instead of
+                TaskResultSlim. The full blob data is already downloaded in
+                both cases; this flag only controls which Pydantic model is
+                used for parsing. Defaults to False for memory-efficient
+                status-only loading.
 
         Returns:
             The loaded TaskGraph instance, or None if not found.

@@ -4,7 +4,7 @@ from functools import partial
 
 from aio_azure_clients_toolbox import AzureBlobStorageClient
 from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
-from anyio import create_task_group
+from anyio import CapacityLimiter, create_task_group
 from azure.core import MatchConditions
 from azure.core.exceptions import (
     HttpResponseError,
@@ -44,11 +44,15 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             credentials=credentials,
         )
 
-    async def load_graph(self, graph_id: GraphId) -> TaskGraph | None:
+    async def load_graph(self, graph_id: GraphId, full: bool = False) -> TaskGraph | None:
         """Loads a TaskGraph from Azure Blob Storage.
 
         Args:
             graph_id: The GraphId to filter TaskResult instances by.
+            full: When True, task result blobs are deserialized as TaskResult
+                (with result, errors, formatted_exception fields) instead of
+                TaskResultSlim. Defaults to False for memory-efficient
+                status-only loading.
         Returns:
             The loaded TaskGraph instance, or None if not found.
         Raises:
@@ -81,23 +85,23 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                     status_code=None,
                 ) from e
 
-            # Load all TaskResultSlim instances associated with this graph
-            # We don't want to load *all* return values into memory. Just the statuses.
-            try:
-                async for blob in self.list_blobs(prefix=graph_dir):
-                    # DO NOT REDOWNLOAD GRAPH
-                    if blob.name == graph_path:
-                        continue
+            # Load all task result instances associated with this graph.
+            # Downloads run concurrently (up to 10 at a time) for speed.
+            model = TaskResult if full else TaskResultSlim
+            limiter = CapacityLimiter(10)
+
+            async def _download_result(blob_name: str) -> None:
+                async with limiter:
                     try:
-                        async with self.get_blob_download_stream(blob.name) as stream:
+                        async with self.get_blob_download_stream(blob_name) as stream:
                             blob_etag = stream.properties.etag
                             contents = await stream.readall()
-                        tr = TaskResultSlim.model_validate_json(contents)
+                        tr = model.model_validate_json(contents)
                         tr.etag = blob_etag
                     except AzureBlobError as exc:
                         raise BoilermakerStorageError(
-                            f"Failed to load task result blob {blob.name} in graph {graph_id}",
-                            name=blob.name,
+                            f"Failed to load task result blob {blob_name} in graph {graph_id}",
+                            name=blob_name,
                             graph_id=graph_id,
                             status_code=exc.status_code,
                             reason=exc.reason,
@@ -105,7 +109,7 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                     except ValidationError as e:
                         raise BoilermakerStorageError(
                             f"Failed to deserialize task result in graph {graph_id}: {e}",
-                            name=blob.name,
+                            name=blob_name,
                             graph_id=graph_id,
                             status_code=None,
                             reason="DeserializationError",
@@ -117,6 +121,15 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                         logger.warning(
                             f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!"
                         )
+
+            # Collect blob names first (sequential), then download concurrently.
+            # This keeps list_blobs errors outside the task group so they are
+            # caught by the existing AzureBlobError/HttpResponseError handlers.
+            try:
+                blob_names: list[str] = []
+                async for blob in self.list_blobs(prefix=graph_dir):
+                    if blob.name != graph_path:
+                        blob_names.append(blob.name)
             except AzureBlobError as exc:
                 raise BoilermakerStorageError(
                     f"Failed to list blobs for graph {graph_id}",
@@ -131,6 +144,17 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                     status_code=exc.status_code,
                     reason=str(exc),
                 ) from exc
+
+            # Download result blobs concurrently (up to 10 at a time).
+            try:
+                async with create_task_group() as tg:
+                    for blob_name in blob_names:
+                        tg.start_soon(_download_result, blob_name)
+            except* BoilermakerStorageError as exc_group:
+                # Unwrap the ExceptionGroup — raise the first storage error
+                # directly to preserve the existing API contract.
+                raise exc_group.exceptions[0] from exc_group.exceptions[0].__cause__
+
             return graph
 
     async def try_acquire_lease(
