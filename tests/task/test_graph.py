@@ -2836,3 +2836,218 @@ def test_builder_conflict_raises():
 
     with pytest.raises(ValueError, match="on_all_failed"):
         builder.build(on_all_failed=cb2)
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# _is_task_blocked and transitive unreachability tests
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+def test_is_task_blocked_root_task_is_not_blocked():
+    """A root task (no parents) is never blocked."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    g.add_task(t1)
+    list(g.generate_pending_results())
+
+    assert g._is_task_blocked(t1.task_id) is False
+
+
+def test_is_task_blocked_direct_parent_failed():
+    """A task whose direct parent has failed is blocked."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    t2 = task.Task.default("t2")
+    g.add_task(t1)
+    g.add_task(t2, parent_ids=[t1.task_id])
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    assert g._is_task_blocked(t2.task_id) is True
+
+
+def test_is_task_blocked_transitive_chain():
+    """A → B → C: A fails, B and C are both Pending. C is transitively blocked."""
+    g = task.TaskGraph()
+    a = task.Task.default("a")
+    b = task.Task.default("b")
+    c = task.Task.default("c")
+    g.add_task(a)
+    g.add_task(b, parent_ids=[a.task_id])
+    g.add_task(c, parent_ids=[b.task_id])
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=a.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    assert g._is_task_blocked(b.task_id) is True
+    assert g._is_task_blocked(c.task_id) is True
+
+
+def test_is_task_blocked_parent_succeeded_is_not_blocked():
+    """A task whose parent succeeded is not blocked."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    t2 = task.Task.default("t2")
+    g.add_task(t1)
+    g.add_task(t2, parent_ids=[t1.task_id])
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+
+    assert g._is_task_blocked(t2.task_id) is False
+
+
+def test_is_task_blocked_fan_in_one_path_failed():
+    """Fan-in: C depends on both A and B. A succeeds, B fails → C is blocked."""
+    g = task.TaskGraph()
+    a = task.Task.default("a")
+    b = task.Task.default("b")
+    c = task.Task.default("c")
+    g.add_task(a)
+    g.add_task(b)
+    g.add_task(c, parent_ids=[a.task_id, b.task_id])
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=a.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+    g.add_result(task.TaskResult(task_id=b.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    assert g._is_task_blocked(c.task_id) is True
+
+
+def test_is_terminal_failed_chain_with_pending_descendants():
+    """The exact scenario from the bug: two parallel chains fan into a final task.
+    One chain fails early; the other completes. Pending descendants of the failed
+    chain should not prevent is_terminal_failed() from returning True."""
+    g = task.TaskGraph()
+
+    # Business chain: search → callback → pdf
+    biz_search = task.Task.default("biz_search")
+    biz_callback = task.Task.default("biz_callback")
+    biz_pdf = task.Task.default("biz_pdf")
+
+    # Individual chain: search → callback → pdf
+    ind_search = task.Task.default("ind_search")
+    ind_callback = task.Task.default("ind_callback")
+    ind_pdf = task.Task.default("ind_pdf")
+
+    # Fan-in notify
+    notify = task.Task.default("notify")
+
+    g.add_task(biz_search)
+    g.add_task(biz_callback, parent_ids=[biz_search.task_id])
+    g.add_task(biz_pdf, parent_ids=[biz_callback.task_id])
+    g.add_task(ind_search)
+    g.add_task(ind_callback, parent_ids=[ind_search.task_id])
+    g.add_task(ind_pdf, parent_ids=[ind_callback.task_id])
+    g.add_task(notify, parent_ids=[biz_pdf.task_id, ind_pdf.task_id])
+    list(g.generate_pending_results())
+
+    # Business chain all succeeded
+    g.add_result(task.TaskResult(task_id=biz_search.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+    g.add_result(task.TaskResult(task_id=biz_callback.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+    g.add_result(task.TaskResult(task_id=biz_pdf.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+
+    # Individual chain: search failed, rest still Pending
+    g.add_result(task.TaskResult(task_id=ind_search.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    assert g.has_failures() is True
+    assert g._is_task_blocked(ind_callback.task_id) is True
+    assert g._is_task_blocked(ind_pdf.task_id) is True
+    assert g._is_task_blocked(notify.task_id) is True
+    assert g.is_terminal_failed() is True
+
+
+def test_is_terminal_failed_chain_with_all_failed_callback():
+    """Same chain topology but with an all_failed_callback registered.
+    The callback should be yielded by generate_all_failed_callback_task()."""
+    g = task.TaskGraph()
+
+    chain_a = task.Task.default("chain_a")
+    chain_b = task.Task.default("chain_b")
+    chain_c = task.Task.default("chain_c")  # depends on chain_b
+    cb = task.Task.default("all_failed_cb")
+
+    g.add_task(chain_a)
+    g.add_task(chain_b)
+    g.add_task(chain_c, parent_ids=[chain_b.task_id])
+    g.add_all_failed_callback(cb)
+    list(g.generate_pending_results())
+
+    # chain_a fails, chain_b succeeds, chain_c still Pending (blocked by nothing — has no dep on chain_a)
+    # Wait, chain_c depends on chain_b, not chain_a. Let me adjust:
+    # chain_a (fails), chain_b depends on chain_a → Pending (blocked), chain_c depends on chain_b → Pending (blocked)
+    g = task.TaskGraph()
+    chain_a = task.Task.default("chain_a2")
+    chain_b = task.Task.default("chain_b2")
+    chain_c = task.Task.default("chain_c2")
+    cb = task.Task.default("all_failed_cb2")
+
+    g.add_task(chain_a)
+    g.add_task(chain_b, parent_ids=[chain_a.task_id])
+    g.add_task(chain_c, parent_ids=[chain_b.task_id])
+    g.add_all_failed_callback(cb)
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=chain_a.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    assert g.is_terminal_failed() is True
+    yielded = list(g.generate_all_failed_callback_task())
+    assert len(yielded) == 1
+    assert yielded[0].task_id == cb.task_id
+
+
+def test_is_complete_chain_blocked_tasks_with_callback():
+    """is_complete() requires the all_failed_callback to finish, even when main tasks
+    are blocked (Pending with failed ancestors)."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    t2 = task.Task.default("t2")
+    cb = task.Task.default("cb")
+
+    g.add_task(t1)
+    g.add_task(t2, parent_ids=[t1.task_id])
+    g.add_all_failed_callback(cb)
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.Failure))
+
+    # Terminal-failed, but callback hasn't run yet
+    assert g.is_terminal_failed() is True
+    assert g.is_complete() is False
+
+    # Callback finishes
+    g.add_result(task.TaskResult(task_id=cb.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+    assert g.is_complete() is True
+
+
+def test_is_terminal_failed_not_triggered_when_chain_still_running():
+    """A → B → C: A succeeded, B is Started → graph is NOT terminal-failed."""
+    g = task.TaskGraph()
+    a = task.Task.default("a")
+    b = task.Task.default("b")
+    c = task.Task.default("c")
+    g.add_task(a)
+    g.add_task(b, parent_ids=[a.task_id])
+    g.add_task(c, parent_ids=[b.task_id])
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=a.task_id, graph_id=g.graph_id, status=task.TaskStatus.Success))
+    g.add_result(task.TaskResult(task_id=b.task_id, graph_id=g.graph_id, status=task.TaskStatus.Started))
+
+    assert g.is_terminal_failed() is False
+
+
+def test_is_task_blocked_retries_exhausted_parent():
+    """A parent with RetriesExhausted also blocks downstream tasks."""
+    g = task.TaskGraph()
+    t1 = task.Task.default("t1")
+    t2 = task.Task.default("t2")
+    g.add_task(t1)
+    g.add_task(t2, parent_ids=[t1.task_id])
+    list(g.generate_pending_results())
+
+    g.add_result(task.TaskResult(task_id=t1.task_id, graph_id=g.graph_id, status=task.TaskStatus.RetriesExhausted))
+
+    assert g._is_task_blocked(t2.task_id) is True
+    assert g.is_terminal_failed() is True

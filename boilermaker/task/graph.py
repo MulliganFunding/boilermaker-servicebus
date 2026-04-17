@@ -494,6 +494,33 @@ class TaskGraph(BaseModel):
             if self.get_status(task_id) is not None
         )
 
+    def _is_task_blocked(self, task_id: TaskId, _visited: set[TaskId] | None = None) -> bool:
+        """Check if a task will never execute because an ancestor has failed.
+
+        A task is blocked if at least one of its direct antecedents has either:
+        - A failed status (Failure, RetriesExhausted, Deadlettered), or
+        - Is itself blocked (transitive unreachability).
+
+        This handles chains like A(failed) → B(pending) → C(pending) where C is
+        blocked even though its direct parent B hasn't failed — B will never run
+        because A failed.
+        """
+        if _visited is None:
+            _visited = set()
+        if task_id in _visited:
+            return False  # cycle guard (should not happen in a DAG)
+        _visited.add(task_id)
+
+        for parent_id, children_ids in self.edges.items():
+            if task_id in children_ids:
+                parent_status = self.get_status(parent_id)
+                if parent_status is not None and parent_status.failed:
+                    return True
+                if parent_status is not None and not parent_status.succeeded:
+                    if self._is_task_blocked(parent_id, _visited):
+                        return True
+        return False
+
     def _is_complete_main_and_failure_tasks(self) -> bool:
         """Check whether all main tasks and reachable per-task failure callbacks have finished.
 
@@ -515,17 +542,14 @@ class TaskGraph(BaseModel):
         # Check that all main tasks are either finished OR cannot run due to failed dependencies
         for task_id in self.children.keys():
             status = self.get_status(task_id)
-            if status is None:
-                # Task hasn't run - check if it CAN run (all antecedents finished successfully)
-                # If it can't run due to failed dependencies, that's OK for completion
-                if self.all_antecedents_finished(task_id) and not self.all_antecedents_succeeded(task_id):
-                    # All antecedents finished but at least one failed - this task will never run
-                    continue
-                else:
-                    # Task could still run but hasn't - graph not complete
-                    return False
-            elif status not in finished_statuses:
-                return False
+            if status in finished_statuses:
+                continue
+            # Task is not in a terminal state (None, Pending, Scheduled, Started, Retry).
+            # It may still be "settled" for graph-completion purposes if it will never
+            # execute because an ancestor has failed (transitive unreachability).
+            if self._is_task_blocked(task_id):
+                continue
+            return False
 
         # Find all reachable failure callback tasks
         reachable_failure_tasks = self._get_reachable_failure_tasks()
