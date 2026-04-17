@@ -10,7 +10,7 @@ from boilermaker.task.result import TaskResult
 from boilermaker.task.task_id import TaskId
 
 # ---------------------------------------------------------------------------
-# Color mapping (from UX spec docs/ux/dag-visualization.md)
+# Color mapping
 # ---------------------------------------------------------------------------
 
 _STATUS_COLORS: dict[str, tuple[str, str, str]] = {
@@ -46,6 +46,11 @@ _STATUS_TO_CLASS: dict[TaskStatus, str] = {
 def _sanitize_id(task_id: TaskId) -> str:
     """Replace hyphens with underscores for valid Mermaid node IDs."""
     return str(task_id).replace("-", "_")
+
+
+def _escape_label(text: str) -> str:
+    """Escape text for use inside a Mermaid quoted label."""
+    return text.replace("\\", "\\\\").replace('"', "#quot;").replace("\n", " ")
 
 
 def _short_task_id(task_id: TaskId) -> str:
@@ -97,7 +102,7 @@ def generate_mermaid(graph: TaskGraph, stalled_task_ids: set[TaskId]) -> str:
         is_stalled = task_id in stalled_task_ids
         cls = _node_class(status, is_stalled, has_blob)
 
-        label_parts = [task.function_name]
+        label_parts = [_escape_label(task.function_name)]
         if not has_blob:
             label_parts.append("NO BLOB")
         label_parts.append(f"...{_short_task_id(task_id)}")
@@ -116,9 +121,9 @@ def generate_mermaid(graph: TaskGraph, stalled_task_ids: set[TaskId]) -> str:
         cls = _node_class(status, is_stalled, has_blob)
 
         if task_id == graph.all_failed_callback_id:
-            label_parts = ["on_all_failed", task.function_name]
+            label_parts = ["on_all_failed", _escape_label(task.function_name)]
         else:
-            label_parts = [task.function_name]
+            label_parts = [_escape_label(task.function_name)]
 
         if not has_blob:
             label_parts.append("NO BLOB")

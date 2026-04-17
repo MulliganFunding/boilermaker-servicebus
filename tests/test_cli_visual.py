@@ -1,6 +1,7 @@
 """Tests for boilermaker.cli._visual — HTML template, browser integration, and CLI wiring."""
 
 import json
+import os
 from io import StringIO
 from unittest import mock
 
@@ -461,12 +462,15 @@ class TestOpenVisual:
 
         path = open_visual(graph, set(), console)
 
-        assert path.endswith(".html")
-        assert "boilermaker-dag-" in path
-        mock_browser_open.assert_called_once()
-        call_url = mock_browser_open.call_args[0][0]
-        assert call_url.startswith("file://")
-        assert path in call_url
+        try:
+            assert path.endswith(".html")
+            assert "boilermaker-dag-" in path
+            mock_browser_open.assert_called_once()
+            call_url = mock_browser_open.call_args[0][0]
+            assert call_url.startswith("file:///")
+            assert call_url.endswith(".html")
+        finally:
+            os.unlink(path)
 
     @mock.patch("webbrowser.open")
     @mock.patch("boilermaker.cli._mermaid.generate_mermaid", return_value="flowchart LR\n    A-->B")
@@ -483,10 +487,13 @@ class TestOpenVisual:
 
         path = open_visual(graph, set(), console)
 
-        output = buf.getvalue()
-        assert "Opening DAG visualization in browser..." in output
-        assert path in output
-        assert "HTML file:" in output
+        try:
+            output = buf.getvalue()
+            assert "Opening DAG visualization in browser..." in output
+            assert path in output
+            assert "HTML file:" in output
+        finally:
+            os.unlink(path)
 
     @mock.patch("webbrowser.open")
     @mock.patch("boilermaker.cli._mermaid.generate_mermaid", return_value="flowchart LR\n    A-->B")
@@ -502,10 +509,13 @@ class TestOpenVisual:
 
         path = open_visual(graph, set(), console)
 
-        with open(path, encoding="utf-8") as f:
-            content = f.read()
-        assert "<html" in content
-        assert "mermaid" in content
+        try:
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+            assert "<html" in content
+            assert "mermaid" in content
+        finally:
+            os.unlink(path)
 
     @mock.patch("webbrowser.open")
     @mock.patch("boilermaker.cli._mermaid.generate_mermaid", return_value="flowchart LR\n    A-->B")
@@ -521,8 +531,11 @@ class TestOpenVisual:
 
         path = open_visual(graph, set(), console)
 
-        assert isinstance(path, str)
-        assert len(path) > 0
+        try:
+            assert isinstance(path, str)
+            assert len(path) > 0
+        finally:
+            os.unlink(path)
 
 
 # ---------------------------------------------------------------------------

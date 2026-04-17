@@ -282,6 +282,8 @@ def open_visual(
 
     console.print("Opening DAG visualization in browser...")
     console.print(f"HTML file: {path}")
-    webbrowser.open(f"file://{path}")
+    from pathlib import Path
+
+    webbrowser.open(Path(path).resolve().as_uri())
 
     return path
