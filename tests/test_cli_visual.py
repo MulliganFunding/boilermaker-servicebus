@@ -5,19 +5,16 @@ from io import StringIO
 from unittest import mock
 
 import pytest
-from rich.console import Console
-
-from boilermaker.cli import build_parser, _validate_inspect_args
+from boilermaker.cli import _validate_inspect_args, build_parser
 from boilermaker.cli._globals import EXIT_ERROR, EXIT_HEALTHY, EXIT_STALLED
 from boilermaker.cli._visual import (
     MERMAID_CDN_URL,
-    render_visual_html,
     open_visual,
+    render_visual_html,
 )
 from boilermaker.cli.inspect import run_inspect
 from boilermaker.task import Task, TaskGraph, TaskResultSlim, TaskStatus
-from boilermaker.task.task_id import TaskId
-
+from rich.console import Console
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -505,7 +502,7 @@ class TestOpenVisual:
 
         path = open_visual(graph, set(), console)
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             content = f.read()
         assert "<html" in content
         assert "mermaid" in content

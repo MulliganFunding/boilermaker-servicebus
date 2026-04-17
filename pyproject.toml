@@ -99,3 +99,4 @@ ignore = ["N818", "N805"] # exception naming
 [tool.ruff.lint.isort]
 force-single-line = false
 order-by-type = false
+

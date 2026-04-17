@@ -6,9 +6,8 @@ import json
 from typing import Any
 
 from boilermaker.task import TaskGraph, TaskStatus
-from boilermaker.task.result import TaskResult, TaskResultSlim
+from boilermaker.task.result import TaskResult
 from boilermaker.task.task_id import TaskId
-
 
 # ---------------------------------------------------------------------------
 # Color mapping (from UX spec docs/ux/dag-visualization.md)
@@ -169,13 +168,10 @@ def generate_mermaid(graph: TaskGraph, stalled_task_ids: set[TaskId]) -> str:
         lines.append(f"    classDef {cls_name} fill:{fill},stroke:{stroke},color:{color}")
 
     # Stalled composite classes: preserve status fill color, add dashed stroke overlay
-    _STALLED_OVERLAY = "stroke-dasharray:5,stroke-width:3px,stroke:#333"
+    _stalled_overlay = "stroke-dasharray:5,stroke-width:3px,stroke:#333"
     for cls_name, (fill, stroke, color) in _STATUS_COLORS.items():
         composite = f"stalled{cls_name[0].upper()}{cls_name[1:]}"
-        lines.append(
-            f"    classDef {composite} fill:{fill},stroke:{stroke},color:{color},"
-            f"{_STALLED_OVERLAY}"
-        )
+        lines.append(f"    classDef {composite} fill:{fill},stroke:{stroke},color:{color},{_stalled_overlay}")
 
     return "\n".join(lines)
 

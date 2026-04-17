@@ -8,6 +8,7 @@ import webbrowser
 
 from rich.console import Console
 
+from boilermaker.cli._mermaid import build_task_data_json, generate_mermaid
 from boilermaker.task import TaskGraph, TaskStatus
 from boilermaker.task.task_id import TaskId
 
@@ -112,6 +113,12 @@ def render_visual_html(
     # This is the standard mitigation for inline JSON in script elements.
     safe_task_data_json = task_data_json.replace("</", r"<\/")
 
+    status_line = (
+        f"Status: {html.escape(str(summary['overall']))} "
+        f"| Tasks: {summary['complete_tasks']}/{summary['total_tasks']} "
+        f"| Failures: {summary['failure_count']} | Stalled: {summary['stalled_count']}"
+    )
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -157,7 +164,9 @@ def render_visual_html(
 <body>
   <header>
     <h1>Graph: {graph_id}</h1>
-    <div class="summary">Status: {html.escape(str(summary["overall"]))} | Tasks: {summary["complete_tasks"]}/{summary["total_tasks"]} | Failures: {summary["failure_count"]} | Stalled: {summary["stalled_count"]}</div>
+    <div class="summary">
+      Status: {status_line}
+    </div>
   </header>
   {legend_html}
   <div class="mermaid">
@@ -257,8 +266,6 @@ def open_visual(
     Returns:
         The absolute path to the generated HTML file.
     """
-    from boilermaker.cli._mermaid import build_task_data_json, generate_mermaid
-
     mermaid_text = generate_mermaid(graph, stalled_task_ids)
     task_data_json = build_task_data_json(graph, stalled_task_ids)
     html_content = render_visual_html(mermaid_text, task_data_json, graph)

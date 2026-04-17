@@ -10,6 +10,10 @@ from boilermaker.cli._mermaid import (
     build_task_data_json,
     generate_mermaid,
 )
+from boilermaker.task import Task, TaskGraph, TaskStatus
+from boilermaker.task.result import TaskResult, TaskResultSlim
+from boilermaker.task.task_id import TaskId
+
 
 # Helper to look up an entry in the dict-keyed task data JSON by function name.
 def _find_entry_by_func(parsed: dict, func_name: str) -> dict:
@@ -18,10 +22,6 @@ def _find_entry_by_func(parsed: dict, func_name: str) -> dict:
         if entry["function_name"] == func_name:
             return entry
     raise KeyError(f"No entry with function_name={func_name!r}")
-from boilermaker.task import Task, TaskGraph, TaskStatus
-from boilermaker.task.result import TaskResult, TaskResultSlim
-from boilermaker.task.task_id import TaskId
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -95,7 +95,7 @@ class TestShortTaskId:
 
 
 class TestNodeClass:
-    def test_no_blob_returns_noBlob(self):
+    def test_no_blob_returns_no_blob(self):
         assert _node_class(None, False, False) == "noBlob"
 
     def test_stalled_returns_composite_class(self):
@@ -107,7 +107,7 @@ class TestNodeClass:
     def test_failure_returns_failure(self):
         assert _node_class(TaskStatus.Failure, False, True) == "failure"
 
-    def test_retries_exhausted_returns_retriesExhausted(self):
+    def test_retries_exhausted_returns_retries_exhausted(self):
         assert _node_class(TaskStatus.RetriesExhausted, False, True) == "retriesExhausted"
 
     def test_deadlettered_returns_deadlettered(self):
@@ -125,7 +125,7 @@ class TestNodeClass:
     def test_retry_returns_retry(self):
         assert _node_class(TaskStatus.Retry, False, True) == "retry"
 
-    def test_has_blob_none_status_returns_noBlob(self):
+    def test_has_blob_none_status_returns_no_blob(self):
         # blob exists but status is None (edge case)
         assert _node_class(None, False, True) == "noBlob"
 
@@ -267,7 +267,7 @@ class TestDiamond:
         assert f"{a_san} --> {b_san}" in mermaid or f"{a_san} --> {c_san}" in mermaid
         assert f"{b_san} --> {d_san}" in mermaid or f"{c_san} --> {d_san}" in mermaid
         # 4 edges total
-        edge_lines = [l for l in mermaid.splitlines() if " --> " in l]
+        edge_lines = [ln for ln in mermaid.splitlines() if " --> " in ln]
         assert len(edge_lines) == 4
 
 
@@ -325,10 +325,10 @@ class TestSharedFailureCallback:
 
         handler_san = _sanitize_id(handler.task_id)
         # Two dashed edges to the same handler
-        dashed_to_handler = [l for l in mermaid.splitlines() if f"-.-> {handler_san}" in l]
+        dashed_to_handler = [ln for ln in mermaid.splitlines() if f"-.-> {handler_san}" in ln]
         assert len(dashed_to_handler) == 2
         # Only one node definition for the handler
-        node_defs = [l for l in mermaid.splitlines() if l.strip().startswith(handler_san + "{{")]
+        node_defs = [ln for ln in mermaid.splitlines() if ln.strip().startswith(handler_san + "{{")]
         assert len(node_defs) == 1
 
 
@@ -359,7 +359,7 @@ class TestAllFailedCallbackPresent:
         # Function name in label
         assert "notify_admins" in mermaid
         # No incoming edges to the callback
-        edges_to_cb = [l for l in mermaid.splitlines() if f"--> {cb_san}" in l or f"-.-> {cb_san}" in l]
+        edges_to_cb = [ln for ln in mermaid.splitlines() if f"--> {cb_san}" in ln or f"-.-> {cb_san}" in ln]
         assert len(edges_to_cb) == 0
 
 
