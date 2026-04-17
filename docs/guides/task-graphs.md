@@ -202,6 +202,94 @@ graph = (
 )
 ```
 
+## All-Failed Callback
+
+### What it is
+
+`all_failed_callback` is a single graph-scoped error handler that fires exactly once after the
+entire graph has settled with at least one failure. It is the graph-level counterpart to the
+per-task `on_failure=` parameter.
+
+**Use `all_failed_callback` when** you want to run one piece of cleanup or notification logic
+after your workflow has finished and something went wrong — regardless of which task failed or
+how many did.
+
+**Use per-task `on_failure=` when** you need task-specific handling: cleaning up a resource
+created by a particular task, retrying with different arguments for a specific step, or
+emitting an alert scoped to a single failure point.
+
+The two mechanisms can coexist. Per-task failure callbacks run as their respective tasks fail;
+the `all_failed_callback` runs only after all main tasks and all per-task failure callbacks
+have finished.
+
+### When it fires
+
+The callback fires when the graph reaches **terminal-failed state**:
+
+1. All main tasks have reached a finished state (succeeded, failed, or were skipped because a
+   dependency failed).
+2. All reachable per-task failure callbacks have reached a finished state.
+3. At least one main task has a failure-type status (`Failure`, `RetriesExhausted`, or
+   `Deadlettered`).
+
+If the graph completes without any failures, the callback is never scheduled.
+
+### Usage
+
+Two equivalent styles are supported:
+
+```python
+# Style 1: kwarg on build()
+graph = (
+    TaskGraphBuilder()
+    .add(task_a)
+    .add(task_b)
+    .build(on_all_failed=handle_graph_failure)
+)
+
+# Style 2: chainable method
+graph = (
+    TaskGraphBuilder()
+    .add(task_a)
+    .add(task_b)
+    .on_all_failed(handle_graph_failure)
+    .build()
+)
+```
+
+Only one callback per graph is supported. Registering a second one (via either style, or by
+calling `TaskGraph.add_all_failed_callback()` directly) raises `ValueError`.
+
+### The callback task's own failure handler
+
+The callback task itself can have an `on_failure` set on it. If the callback task fails, its
+own `on_failure` handler will run normally.
+
+```python
+graph = (
+    TaskGraphBuilder()
+    .add(task_a)
+    .build(on_all_failed=Task.si(
+        handle_graph_failure,
+        on_failure=Task.si(handle_callback_failure)
+    ))
+)
+```
+
+### Limitations and known issues
+
+- Only one `all_failed_callback` per graph is supported.
+- `has_failures()` inspects only the main task `children`, not `fail_children`. If a main
+  task succeeds but its per-task failure callback fails, `has_failures()` returns `False` and
+  the `all_failed_callback` will not fire. This is a pre-existing limitation tracked in
+  issue #16.
+- `generate_scheduled_tasks()` includes crash-recovery logic for the `all_failed_callback`,
+  but `continue_graph()` does not yet call `generate_scheduled_tasks()`. In the event of a
+  worker crash after the Service Bus publish but before the `Scheduled` blob write, the
+  callback will be re-dispatched on redelivery via `generate_all_failed_callback_task()` and
+  Service Bus deduplication will suppress the duplicate message. Full crash-recovery parity
+  via `generate_scheduled_tasks()` is tracked as a follow-on issue.
+
 ## Cursor Semantics
 
 The builder maintains an internal cursor tracking the most recently added task(s). Methods

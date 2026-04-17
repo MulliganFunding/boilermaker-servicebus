@@ -622,12 +622,12 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         loaded_task_status = graph.get_status(completed_task_result.task_id)
         if loaded_task_status != completed_task_result.status:
             logger.error(
-                f"Task status mismatch in continue_graph for graph {graph_id}: "
+                f"[Graph {graph_id}] Task status mismatch: "
                 f"expected {completed_task_result.task_id} to be {completed_task_result.status}, "
                 f"but got {loaded_task_status}. Suppressing settlement to allow redelivery."
             )
             raise exc.ContinueGraphError(
-                f"Status mismatch for task {completed_task_result.task_id} in graph {graph_id}: "
+                f"[Graph {graph_id}] Status mismatch for task {completed_task_result.task_id}: "
                 f"expected {completed_task_result.status}, got {loaded_task_status}"
             )
 
@@ -642,6 +642,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             #   - The blob hasn't changed since load_graph (412 if etag mismatch)
             # If either check fails, skip — nothing to do.
             task_result_slim = graph.results.get(ready_task.task_id)
+            lease_id = None
             try:
                 lease_id = await self.storage_interface.try_acquire_lease(
                     ready_task.task_id,
@@ -650,15 +651,14 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 )
             except exc.BoilermakerStorageError:
                 logger.warning(
-                    f"try_acquire_lease raised an unexpected error for ready task "
-                    f"{ready_task.task_id} in graph {graph_id}; "
-                    "skipping task — it will be retried on redelivery.",
+                    f"[Graph {graph_id}] try_acquire_lease raised an unexpected error for ready task "
+                    f"{ready_task.task_id}; skipping task — it will be retried on redelivery.",
                     exc_info=True,
                 )
                 continue
             if lease_id is None:
                 logger.debug(
-                    f"Skipping task {ready_task.task_id} in graph {graph_id}: "
+                    f"[Graph {graph_id}] Skipping task {ready_task.task_id}: "
                     "lease not acquired (another worker holds it or blob was modified)."
                 )
                 continue
@@ -667,10 +667,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 # Step 2: Publish task to SB (message_id = task_id for fan-in dedup).
                 await self.publish_task(ready_task)
                 ready_count += 1
-                logger.info(
-                    f"Publishing ready task {ready_task.task_id} in graph {graph_id} "
-                    f"total={ready_count}"
-                )
+                logger.info(f"[Graph {graph_id}] Publishing ready task {ready_task.task_id} total={ready_count}")
 
                 # Step 3: Write Scheduled status. No etag needed — we already
                 # verified the blob was unmodified when we acquired the lease.
@@ -707,11 +704,66 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 continue
             finally:
                 # Step 4: Always release the lease.
-                await self.storage_interface.release_lease(
-                    ready_task.task_id, graph_id, lease_id
+                if lease_id is not None:
+                    await self.storage_interface.release_lease(ready_task.task_id, graph_id, lease_id)
+
+        for callback_task in graph.generate_all_failed_callback_task():
+            task_result_slim = graph.results.get(callback_task.task_id)
+            lease_id = None
+            try:
+                lease_id = await self.storage_interface.try_acquire_lease(
+                    callback_task.task_id,
+                    graph_id,
+                    etag=task_result_slim.etag if task_result_slim else None,
                 )
+            except exc.BoilermakerStorageError:
+                logger.warning(
+                    f"[Graph {graph_id}] try_acquire_lease raised unexpected error for all_failed_callback "
+                    f"{callback_task.task_id}; skipping.",
+                    exc_info=True,
+                )
+                continue
+            if lease_id is None:
+                logger.debug(
+                    f"[Graph {graph_id}] Skipping all_failed_callback {callback_task.task_id}: "
+                    "lease not acquired (another worker holds it or blob was modified)."
+                )
+                continue
+            try:
+                await self.publish_task(callback_task)
+                ready_count += 1
+                logger.info(
+                    f"[Graph {graph_id}] Publishing all_failed_callback {callback_task.task_id} total={ready_count}"
+                )
+                try:
+                    result = graph.schedule_task(callback_task.task_id)
+                    await self.storage_interface.store_task_result(result, lease_id=lease_id)
+                except exc.BoilermakerStorageError:
+                    logger.warning(
+                        f"[Graph {graph_id}] Failed to write Scheduled for all_failed_callback {callback_task.task_id} "
+                        f"(lease held). Task published to Service Bus.",
+                        exc_info=True,
+                    )
+                    continue
+                except ValueError:
+                    logger.error(
+                        f"[Graph {graph_id}] schedule_task raised ValueError for all_failed_callback "
+                        f" {callback_task.task_id} Task published; blob write skipped.",
+                        exc_info=True,
+                    )
+                    continue
+            except Exception:
+                logger.error(
+                    f"Failed to publish all_failed_callback {callback_task.task_id} in graph {graph_id}; "
+                    "remains Pending, will retry on redelivery.",
+                    exc_info=True,
+                )
+                continue
+            finally:
+                if lease_id is not None:
+                    await self.storage_interface.release_lease(callback_task.task_id, graph_id, lease_id)
 
         if ready_count == 0:
-            logger.info(f"No new tasks ready in graph {graph_id} after task {completed_task_result.task_id}")
+            logger.info(f"[Graph {graph_id}] No new tasks ready after task {completed_task_result.task_id}")
 
         return ready_count
