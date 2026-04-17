@@ -295,22 +295,24 @@ WriteStartedSuccess(w) ==
                        workerSnapshot, workerSnapshotEtags,
                        workerReadySet, workerCurrentReady>>
 
-\* Sub-action: 412 — etag mismatch; re-read blob and branch (FIXED)
+\* Sub-action: 412 — etag mismatch; re-read blob and branch
 \* We model the re-read as instantaneous (reading current blobStatus).
 \* The 412 branch covers all cases:
 \*   None      -> Completing (blob vanished — unexpected; always settle)
 \*   terminal  -> Completing (complete message)
 \*   Started   -> Completing (complete message; another worker won)
-\*   Scheduled -> RetryStartedAfterScheduled [THE FIX: retry with re-read etag]
+\*   Scheduled -> RetryStartedAfterScheduled (retry with re-read etag)
+\*   Pending   -> RetryStartedAfterScheduled (retry with re-read etag; same as Scheduled)
+\*               Lease acquire bumped the ETag without changing content.  No other
+\*               worker holds Started, so this worker is the legitimate claimant.
 \*   other     -> Completing (always settle)
 \*
 \* Since blobStatus[t] is always defined (never None) in this model, the
-\* "blob vanished" branch is unreachable. The Scheduled branch now retries
-\* instead of returning Failure without settling.
+\* "blob vanished" branch is unreachable.
 \*
 \* IMPORTANT: when transitioning to RetryStartedAfterScheduled, we capture the
-\* current blob etag (the etag from the Scheduled write) into workerCapturedEtag.
-\* The retry will use this etag for the second CAS attempt.
+\* current blob etag into workerCapturedEtag.  The retry will use this etag for
+\* the second CAS attempt.
 WriteStarted412(w) ==
     /\ workerPhase[w] = "WroteStarted"
     /\ LET t    == workerTask[w]
@@ -330,18 +332,22 @@ WriteStarted412(w) ==
                              workerMsg, workerTask, workerResult, workerCapturedEtag,
                              workerSnapshot, workerSnapshotEtags,
                              workerReadySet, workerCurrentReady>>
-          \/ \* Re-read is Scheduled: THE FIX — retry Started write with re-read etag
-             /\ rereadStatus = "Scheduled"
+          \/ \* Re-read is Scheduled or Pending: no worker owns Started yet —
+             \* retry the Started write with the re-read etag.
+             \* Pending:   lease acquire bumped the ETag (AcquireLeaseSuccess) but the
+             \*             Scheduled write has not yet happened (or WriteScheduledFail).
+             \* Scheduled: normal publish-before-store window.
+             /\ rereadStatus \in {"Scheduled", "Pending"}
              /\ workerPhase' = [workerPhase EXCEPT ![w] = "RetryStartedAfterScheduled"]
-             \* Capture the re-read etag (from the Scheduled blob) for the retry CAS
+             \* Capture the re-read etag for the retry CAS
              /\ workerCapturedEtag' = [workerCapturedEtag EXCEPT ![w] = rereadEtag]
              /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
                              workerMsg, workerTask, workerResult,
                              workerSnapshot, workerSnapshotEtags,
                              workerReadySet, workerCurrentReady>>
-          \/ \* Re-read is some other non-terminal, non-Started, non-Scheduled status:
+          \/ \* Re-read is some other non-terminal, non-Started, non-Scheduled, non-Pending status:
              \* always settle (complete message, return Failure)
-             /\ rereadStatus \notin TerminalStatuses \cup {"Started", "Scheduled"}
+             /\ rereadStatus \notin TerminalStatuses \cup {"Started", "Scheduled", "Pending"}
              /\ workerPhase' = [workerPhase EXCEPT ![w] = "Completing"]
              /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
                              workerMsg, workerTask, workerResult, workerCapturedEtag,
@@ -349,12 +355,13 @@ WriteStarted412(w) ==
                              workerReadySet, workerCurrentReady>>
 
 \* ===== RetryStartedWrite =====
-\* Worker retries the Started write using the etag captured from the Scheduled re-read.
-\* This is the core of the fix: the Scheduled -> Started transition is the legitimate
-\* forward move; we own the SB message, so we should try to make progress.
+\* Worker retries the Started write using the etag captured from the re-read.
+\* Entered from WriteStarted412 when the re-read status is Scheduled or Pending.
+\* In both cases no other worker holds Started, so this worker is the legitimate
+\* claimant and should try to make progress.
 \*
 \* Three outcomes:
-\*   CAS succeeds (etag still matches Scheduled write): blob -> Started, proceed to Executing.
+\*   CAS succeeds (etag still matches re-read etag): blob -> Started, proceed to Executing.
 \*   CAS 412 again (someone else mutated blob): proceed to RereadAfterRetry412.
 \*   Non-412 storage error: proceed to Executing anyway (fail-open, same as original).
 RetryStartedWriteSuccess(w) ==
@@ -525,6 +532,13 @@ StatusMismatchCheck(w) ==
 \* On success: move to PublishingTask with workerCurrentReady set.
 \* On failure: remove from readySet (skip), stay in AcquiringLease.
 \* When readySet is empty: transition to Completing.
+\*
+\* ETag bump on lease acquire: Azure Blob Storage advances the blob's ETag when
+\* BlobLeaseClient.acquire() succeeds, even though the blob content (status) does
+\* not change.  We model this as blobEtag[child] + 1.  This is the root cause of
+\* the 412+Pending race: a worker that read the blob before the lease acquire will
+\* hold a stale ETag and get a 412 on its Started write, with the re-read returning
+\* Pending (status unchanged by the lease acquire).  See WriteStarted412 below.
 
 AcquireLeaseSuccess(w) ==
     /\ workerPhase[w] = "AcquiringLease"
@@ -537,10 +551,12 @@ AcquireLeaseSuccess(w) ==
         /\ blobStatus[child] = "Pending"
         /\ ~blobLeased[child]
         /\ blobLeased' = [blobLeased EXCEPT ![child] = TRUE]
+        \* Azure bumps the ETag on lease acquire even with no content change.
+        /\ blobEtag'   = [blobEtag   EXCEPT ![child] = blobEtag[child] + 1]
         /\ workerCurrentReady' = [workerCurrentReady EXCEPT ![w] = child]
         /\ workerReadySet' = [workerReadySet EXCEPT ![w] = workerReadySet[w] \ {child}]
         /\ workerPhase' = [workerPhase EXCEPT ![w] = "PublishingTask"]
-        /\ UNCHANGED <<blobStatus, blobEtag, blobDeadLettered, sbMessages, workerMsg, workerTask,
+        /\ UNCHANGED <<blobStatus, blobDeadLettered, sbMessages, workerMsg, workerTask,
                         workerResult, workerCapturedEtag,
                         workerSnapshot, workerSnapshotEtags>>
 
