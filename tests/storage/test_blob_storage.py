@@ -1,4 +1,6 @@
+import re
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -701,3 +703,249 @@ async def test_load_graph_default_still_returns_task_result_slim(
     assert not hasattr(task_result, "result") or task_result.__class__ is TaskResultSlim
     # TaskResultSlim does not have result/errors/formatted_exception fields
     assert not isinstance(task_result, TaskResult)
+
+
+# Tests for created_date tag presence
+
+
+async def test_store_task_result_includes_created_date_tag(mock_azureblob, blob_storage, sample_task_result):
+    """store_task_result must include a created_date tag in YYYY-MM-DD format
+    matching today's UTC date on every blob write."""
+    _container_client, mockblobc, _ = mock_azureblob
+    mockblobc.upload_blob.return_value = {"status": "success"}
+
+    await blob_storage.store_task_result(sample_task_result)
+
+    assert mockblobc.upload_blob.call_count == 1
+    tags = mockblobc.upload_blob.call_args.kwargs["tags"]
+
+    assert "created_date" in tags
+    # Must be YYYY-MM-DD format
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", tags["created_date"])
+    # Must match today's UTC date
+    assert tags["created_date"] == datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+async def test_store_graph_graph_json_includes_created_date_tag(mock_azureblob, blob_storage, sample_task_graph):
+    """store_graph must tag the graph.json upload with both graph_id and created_date."""
+    container_client, _mockblobc, _ = mock_azureblob
+
+    await blob_storage.store_graph(sample_task_graph)
+
+    # First call is the graph.json upload
+    upload_graph_call = container_client.mock_calls[0]
+    assert upload_graph_call[0] == "upload_blob"
+
+    tags = upload_graph_call.kwargs["tags"]
+    assert "graph_id" in tags
+    assert tags["graph_id"] == str(sample_task_graph.graph_id)
+    assert "created_date" in tags
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", tags["created_date"])
+    assert tags["created_date"] == datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+async def test_store_graph_pending_results_include_created_date_tag(
+    mock_azureblob, blob_storage, sample_task_graph
+):
+    """Pending result uploads in store_graph must include graph_id, status, and
+    created_date tags."""
+    container_client, _mockblobc, _ = mock_azureblob
+
+    await blob_storage.store_graph(sample_task_graph)
+
+    # The graph has one child, so we expect: graph.json upload + 1 pending result upload
+    assert len(container_client.mock_calls) == 2
+    pending_result_call = container_client.mock_calls[1]
+    assert pending_result_call[0] == "upload_blob"
+
+    tags = pending_result_call.kwargs["tags"]
+    assert "graph_id" in tags
+    assert "status" in tags
+    assert "created_date" in tags
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", tags["created_date"])
+    assert tags["created_date"] == datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+async def test_store_graph_created_date_consistent_across_all_uploads(
+    mock_azureblob, blob_storage, sample_task_graph
+):
+    """All created_date values within a single store_graph call must be identical,
+    because the date is computed once at the top of the method."""
+    container_client, _mockblobc, _ = mock_azureblob
+
+    await blob_storage.store_graph(sample_task_graph)
+
+    # Collect created_date from every upload_blob call on the container_client
+    created_dates = []
+    for call in container_client.mock_calls:
+        if call[0] == "upload_blob" and "tags" in call.kwargs:
+            created_dates.append(call.kwargs["tags"]["created_date"])
+
+    # At least the graph.json + 1 pending result = 2 uploads
+    assert len(created_dates) >= 2
+    # All dates must be the same value
+    assert len(set(created_dates)) == 1, (
+        f"Expected all created_date tags to be identical, got: {created_dates}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for delete_blobs_batch method
+# ---------------------------------------------------------------------------
+
+
+class _AsyncDeleteResults:
+    """Helper that wraps a list of dicts as an async iterator, returned by
+    an awaitable (to match container_client.delete_blobs() semantics)."""
+
+    def __init__(self, results: list[dict]):
+        self._results = results
+
+    def __await__(self):
+        async def _noop():
+            return self
+        return _noop().__await__()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._results:
+            raise StopAsyncIteration
+        return self._results.pop(0)
+
+
+class TestDeleteBlobsBatch:
+    async def test_successful_batch_delete(self, mock_azureblob, blob_storage):
+        """Pass a few blob names, mock delete_blobs to return success responses.
+        Verify returned failure list is empty."""
+        container_client, _, _ = mock_azureblob
+        blob_names = ["blob-a", "blob-b", "blob-c"]
+        container_client.delete_blobs.return_value = _AsyncDeleteResults(
+            [{}, {}, {}]
+        )
+
+        failures = await blob_storage.delete_blobs_batch(blob_names)
+
+        assert failures == []
+        container_client.delete_blobs.assert_called_once_with(*blob_names)
+
+    async def test_batch_chunking_at_256(self, mock_azureblob, blob_storage):
+        """Pass 300 blob names. Verify delete_blobs is called twice:
+        first with 256, second with 44."""
+        container_client, _, _ = mock_azureblob
+        blob_names = [f"blob-{i}" for i in range(300)]
+
+        # Each call returns success responses matching the chunk size
+        container_client.delete_blobs.side_effect = [
+            _AsyncDeleteResults([{}] * 256),
+            _AsyncDeleteResults([{}] * 44),
+        ]
+
+        failures = await blob_storage.delete_blobs_batch(blob_names)
+
+        assert failures == []
+        assert container_client.delete_blobs.call_count == 2
+
+        first_call_args = container_client.delete_blobs.call_args_list[0].args
+        second_call_args = container_client.delete_blobs.call_args_list[1].args
+        assert len(first_call_args) == 256
+        assert len(second_call_args) == 44
+
+    async def test_404_treated_as_success(self, mock_azureblob, blob_storage):
+        """Mock response with BlobNotFound error_code. Verify NOT in failure list."""
+        container_client, _, _ = mock_azureblob
+        blob_names = ["blob-gone"]
+        container_client.delete_blobs.return_value = _AsyncDeleteResults(
+            [{"error_code": "BlobNotFound"}]
+        )
+
+        failures = await blob_storage.delete_blobs_batch(blob_names)
+
+        assert failures == []
+
+    async def test_non_404_failure_returned(self, mock_azureblob, blob_storage):
+        """Mock response with InternalError error_code. Verify blob name IS in failure list."""
+        container_client, _, _ = mock_azureblob
+        blob_names = ["blob-broken"]
+        container_client.delete_blobs.return_value = _AsyncDeleteResults(
+            [{"error_code": "InternalError"}]
+        )
+
+        failures = await blob_storage.delete_blobs_batch(blob_names)
+
+        assert failures == ["blob-broken"]
+
+    async def test_empty_input(self, mock_azureblob, blob_storage):
+        """Pass empty list. Verify no calls and empty result."""
+        container_client, _, _ = mock_azureblob
+
+        failures = await blob_storage.delete_blobs_batch([])
+
+        assert failures == []
+        container_client.delete_blobs.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests for find_blobs_by_tags method
+# ---------------------------------------------------------------------------
+
+
+class _AsyncTagResults:
+    """Helper that wraps a list of BlobProperties as an async iterator,
+    matching the signature of container_client.find_blobs_by_tags()."""
+
+    def __init__(self, blobs: list):
+        self._blobs = list(blobs)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._blobs:
+            raise StopAsyncIteration
+        return self._blobs.pop(0)
+
+
+class TestFindBlobsByTags:
+    async def test_yields_matching_blobs(self, mock_azureblob, blob_storage):
+        """find_blobs_by_tags yields blobs returned by the container client."""
+        container_client, _, _ = mock_azureblob
+        blob_a = BlobProperties(name="task-results/graph-1/task.json")
+        blob_b = BlobProperties(name="task-results/graph-2/task.json")
+        container_client.find_blobs_by_tags.return_value = _AsyncTagResults(
+            [blob_a, blob_b]
+        )
+
+        filter_expr = "\"created_date\" < '2026-04-10'"
+        results = []
+        async for blob in blob_storage.find_blobs_by_tags(filter_expr):
+            results.append(blob)
+
+        assert len(results) == 2
+        assert results[0].name == "task-results/graph-1/task.json"
+        assert results[1].name == "task-results/graph-2/task.json"
+
+    async def test_filter_expression_passed_through(self, mock_azureblob, blob_storage):
+        """Verify the OData filter expression reaches the Azure SDK call."""
+        container_client, _, _ = mock_azureblob
+        container_client.find_blobs_by_tags.return_value = _AsyncTagResults([])
+
+        filter_expr = "\"created_date\" < '2026-04-10'"
+        async for _ in blob_storage.find_blobs_by_tags(filter_expr):
+            pass
+
+        container_client.find_blobs_by_tags.assert_called_once_with(
+            filter_expression=filter_expr
+        )
+
+    async def test_empty_result_set(self, mock_azureblob, blob_storage):
+        """Empty result from tag query completes without error."""
+        container_client, _, _ = mock_azureblob
+        container_client.find_blobs_by_tags.return_value = _AsyncTagResults([])
+
+        results = []
+        async for blob in blob_storage.find_blobs_by_tags("\"created_date\" < '2026-01-01'"):
+            results.append(blob)
+
+        assert results == []

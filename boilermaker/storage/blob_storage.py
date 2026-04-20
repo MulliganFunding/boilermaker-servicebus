@@ -1,5 +1,7 @@
 import logging
 import traceback
+from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from functools import partial
 
 from aio_azure_clients_toolbox import AzureBlobStorageClient
@@ -12,6 +14,7 @@ from azure.core.exceptions import (
     ResourceNotFoundError,
 )
 from azure.identity.aio import DefaultAzureCredential
+from azure.storage.blob import BlobProperties
 from azure.storage.blob.aio import BlobLeaseClient
 from opentelemetry import trace
 from pydantic import ValidationError
@@ -22,6 +25,8 @@ from boilermaker.task import GraphId, TaskGraph, TaskId, TaskResult, TaskResultS
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
+
+BATCH_DELETE_MAX = 256
 
 
 class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
@@ -229,6 +234,7 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             graph: The TaskGraph instance to store.
         """
         with tracer.start_as_current_span("store_graph"):
+            created_date_tag = datetime.now(UTC).strftime("%Y-%m-%d")
             lease = None
             async with self.get_blob_service_client() as blob_service_client:
                 container_client = blob_service_client.get_container_client(self.container_name)
@@ -239,6 +245,7 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                         fname,
                         graph.model_dump_json(),
                         blob_type="BlockBlob",
+                        tags={"graph_id": str(graph.graph_id), "created_date": created_date_tag},
                     )
                 except (
                     ResourceNotFoundError,
@@ -266,6 +273,11 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                                 fname_pr,
                                 pending_result.model_dump_json(),
                                 blob_type="BlockBlob",
+                                tags={
+                                    "graph_id": pending_result.graph_id or "none",
+                                    "status": pending_result.status,
+                                    "created_date": created_date_tag,
+                                },
                             )
                             tg.start_soon(uploader)
                 except* Exception as excgroup:
@@ -349,6 +361,7 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             blob_tags = {
                 "graph_id": task_result.graph_id or "none",
                 "status": task_result.status,
+                "created_date": datetime.now(UTC).strftime("%Y-%m-%d"),
             }
             concurrency_kwargs: dict[str, str | int | MatchConditions] = {}
             if etag:
@@ -375,3 +388,46 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                     status_code=exc.status_code,
                     reason=exc.reason,
                 ) from exc
+
+    async def delete_blobs_batch(self, blob_names: list[str]) -> list[str]:
+        """Delete blobs in batches of up to 256. Returns list of blob names
+        that failed to delete (non-404 errors). 404s are treated as success.
+        """
+        failed: list[str] = []
+        async with self.get_blob_service_client() as blob_service_client:
+            container_client = blob_service_client.get_container_client(self.container_name)
+            for i in range(0, len(blob_names), BATCH_DELETE_MAX):
+                chunk = blob_names[i : i + BATCH_DELETE_MAX]
+                idx = 0
+                async for result in await container_client.delete_blobs(*chunk):
+                    error_code = result.get("error_code")
+                    if error_code and error_code != "BlobNotFound":
+                        failed.append(chunk[idx])
+                    idx += 1
+                if idx != len(chunk):
+                    logger.warning(
+                        "Batch delete returned %d results for %d blobs; "
+                        "failure attribution may be inaccurate.",
+                        idx, len(chunk),
+                    )
+        return failed
+
+    async def find_blobs_by_tags(
+        self, filter_expression: str
+    ) -> AsyncGenerator[BlobProperties, None]:
+        """Query blobs using Azure Blob Storage tag index.
+
+        Args:
+            filter_expression: OData-style filter string, e.g.
+                '"created_date" < '2026-04-13''
+        Yields:
+            BlobProperties for each matching blob.
+        """
+        async with self.get_blob_service_client() as blob_service_client:
+            container_client = blob_service_client.get_container_client(
+                self.container_name
+            )
+            async for blob in container_client.find_blobs_by_tags(
+                filter_expression=filter_expression
+            ):
+                yield blob

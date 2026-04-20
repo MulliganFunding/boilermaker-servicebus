@@ -6,12 +6,11 @@ from datetime import datetime, timedelta, UTC
 from unittest import mock
 
 import pytest
-from azure.core.exceptions import HttpResponseError
 from boilermaker.cli import build_parser
 from boilermaker.cli._globals import EXIT_ERROR, EXIT_HEALTHY, EXIT_STALLED
 from boilermaker.cli._output import _short_task_id, format_graph_table
 from boilermaker.cli.inspect import run_inspect
-from boilermaker.cli.purge import _validate_older_than, run_purge
+from boilermaker.cli.purge import _stream_eligible_graphs, _validate_older_than, run_purge
 from boilermaker.cli.recover import run_recover
 from boilermaker.task import Task, TaskGraph, TaskResultSlim, TaskStatus
 from boilermaker.task.task_id import TaskId
@@ -410,17 +409,6 @@ def _make_blob(name: str, last_modified: datetime) -> mock.MagicMock:
     return blob
 
 
-def _make_azure_blob_error(status_code: int) -> mock.MagicMock:
-    """Build an AzureBlobError mock with the given HTTP status code."""
-    from aio_azure_clients_toolbox.clients.azure_blobs import AzureBlobError
-
-    http_error = mock.MagicMock(spec=HttpResponseError)
-    http_error.reason = "Not Found"
-    http_error.status_code = status_code
-    http_error.message = f"HTTP {status_code}"
-    return AzureBlobError(http_error)
-
-
 async def _async_gen(items):
     for item in items:
         yield item
@@ -434,13 +422,22 @@ def _make_purge_storage(
 
     list_blobs returns the blob_list as an async generator.
     load_graph returns the graph (or None).
-    delete_blob does nothing by default.
+    delete_blobs_batch returns empty list (no failures) by default.
     """
     storage = mock.AsyncMock()
     storage.task_result_prefix = "task-results"
     storage.list_blobs = lambda prefix: _async_gen(blob_list)
     storage.load_graph = mock.AsyncMock(return_value=graph)
     storage.delete_blob = mock.AsyncMock()
+    storage.delete_blobs_batch = mock.AsyncMock(return_value=[])
+
+    # find_blobs_by_tags raises by default so existing tests exercise the
+    # full-fallback (legacy) path in _stream_eligible_graphs.
+    async def _failing_tag_query(filter_expression):
+        raise RuntimeError("blob tag indexing not enabled")
+        yield  # noqa: unreachable — makes this an async generator
+
+    storage.find_blobs_by_tags = _failing_tag_query
     return storage
 
 
@@ -724,6 +721,13 @@ class TestPurgeInProgressSafetyCheck:
             side_effect=lambda gid: graph_eligible if str(gid) == graph_eligible_id else graph_in_progress
         )
         storage.delete_blob = mock.AsyncMock()
+        storage.delete_blobs_batch = mock.AsyncMock(return_value=[])
+
+        async def _failing_tag_query(filter_expression):
+            raise RuntimeError("blob tag indexing not enabled")
+            yield  # noqa: unreachable — makes this an async generator
+
+        storage.find_blobs_by_tags = _failing_tag_query
 
         code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_STALLED
@@ -754,7 +758,7 @@ class TestPurgeDryRun:
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
         code = await run_purge(storage, older_than_days=7, dry_run=True)
         assert code == EXIT_HEALTHY
-        storage.delete_blob.assert_not_called()
+        storage.delete_blobs_batch.assert_not_called()
 
     async def test_dry_run_output_contains_dry_run_marker(self, capsys):
         graph = self._make_complete_graph()
@@ -804,9 +808,13 @@ class TestPurgeDeletionOrder:
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
         await run_purge(storage, older_than_days=7)
 
-        delete_calls = [call.args[0] for call in storage.delete_blob.call_args_list]
-        assert delete_calls[-1] == graph_json_path
-        assert task_blob_path in delete_calls[:-1]
+        # Batch deletion: first call deletes result blobs, second call deletes graph.json
+        calls = storage.delete_blobs_batch.call_args_list
+        assert len(calls) == 2
+        result_batch = calls[0].args[0]
+        graph_batch = calls[1].args[0]
+        assert task_blob_path in result_batch
+        assert graph_json_path in graph_batch
 
     async def test_successful_deletion_summary_on_stdout(self, capsys):
         graph = self._make_complete_graph()
@@ -848,25 +856,32 @@ class TestPurge404NoOp:
         return graph
 
     async def test_404_on_delete_is_treated_as_success(self):
+        """404 errors are handled by delete_blobs_batch (returns empty list for 404s).
+        When batch returns no failures, the graph counts as successfully handled."""
         graph = self._make_complete_graph()
         graph_id = str(graph.graph_id)
         blobs = [
             _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        storage.delete_blob.side_effect = _make_azure_blob_error(404)
+        # delete_blobs_batch returns [] by default (no failures, 404s handled internally)
         code = await run_purge(storage, older_than_days=7)
-        # 404 is a no-op; the graph still counts as successfully handled
         assert code == EXIT_HEALTHY
 
     async def test_non_404_error_logged_as_warning(self, capsys):
+        """Non-404 batch failures are returned by delete_blobs_batch and reported as warnings."""
         graph = self._make_complete_graph()
         graph_id = str(graph.graph_id)
+        graph_json_path = f"task-results/{graph_id}/graph.json"
         blobs = [
-            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+            _make_blob(graph_json_path, _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        storage.delete_blob.side_effect = _make_azure_blob_error(500)
+        # Simulate batch failure: delete_blobs_batch returns the failed blob names
+        # First call is for result blobs (empty list), second call is for graph.json
+        storage.delete_blobs_batch = mock.AsyncMock(
+            side_effect=[[], [graph_json_path]]
+        )
         code = await run_purge(storage, older_than_days=7)
         captured = capsys.readouterr()
         assert "WARNING" in captured.err or "Failed" in captured.err
@@ -888,8 +903,308 @@ class TestPurgeListingError:
             raise RuntimeError("network failure")
             yield  # make it a generator
 
+        async def _failing_tag_query(filter_expression):
+            raise RuntimeError("blob tag indexing not enabled")
+            yield  # noqa: unreachable — makes this an async generator
+
         storage.list_blobs = _failing_gen
+        storage.find_blobs_by_tags = _failing_tag_query
         code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_ERROR
         captured = capsys.readouterr()
         assert "ERROR" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# _stream_eligible_graphs: streaming generator tests
+# ---------------------------------------------------------------------------
+
+
+class TestStreamEligibleGraphs:
+    async def test_stream_eligible_graphs_yields_old_groups(self):
+        """Create blobs for 2 graph_ids (one old, one new).
+        Verify only the old group is yielded."""
+        old_graph_id = "aaaa-old-graph"
+        new_graph_id = "bbbb-new-graph"
+        blobs = [
+            _make_blob(f"task-results/{old_graph_id}/graph.json", _old(10)),
+            _make_blob(f"task-results/{old_graph_id}/task-1.json", _old(10)),
+            _make_blob(f"task-results/{new_graph_id}/graph.json", _new(1)),
+            _make_blob(f"task-results/{new_graph_id}/task-1.json", _new(1)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs)
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        yielded = []
+        async for graph_id, group_blobs in _stream_eligible_graphs(storage, cutoff):
+            yielded.append((graph_id, group_blobs))
+
+        assert len(yielded) == 1
+        assert yielded[0][0] == old_graph_id
+        assert len(yielded[0][1]) == 2
+
+    async def test_stream_eligible_graphs_empty_listing(self):
+        """Empty async gen. Verify no yields."""
+        storage = _make_purge_storage(blob_list=[])
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        yielded = []
+        async for graph_id, group_blobs in _stream_eligible_graphs(storage, cutoff):
+            yielded.append((graph_id, group_blobs))
+
+        assert yielded == []
+
+    async def test_stream_eligible_graphs_final_group_emitted(self):
+        """Single graph_id, all old. Verify it's yielded (tests the
+        final-group logic after the loop)."""
+        graph_id = "cccc-only-graph"
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(15)),
+            _make_blob(f"task-results/{graph_id}/task-1.json", _old(15)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs)
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        yielded = []
+        async for gid, group_blobs in _stream_eligible_graphs(storage, cutoff):
+            yielded.append((gid, group_blobs))
+
+        assert len(yielded) == 1
+        assert yielded[0][0] == graph_id
+        assert len(yielded[0][1]) == 2
+
+
+# ---------------------------------------------------------------------------
+# run_purge: batch deletion ordering and failure warnings
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeBatchDeletion:
+    def _make_complete_graph(self) -> TaskGraph:
+        graph = TaskGraph()
+        task = Task.default("do_work")
+        graph.add_task(task)
+        _set_result(graph, task, TaskStatus.Success)
+        return graph
+
+    async def test_batch_deletion_ordering(self):
+        """Verify delete_blobs_batch is called twice: first with result blob
+        names, second with graph.json names."""
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        graph_json_path = f"task-results/{graph_id}/graph.json"
+        task_blob_path = f"task-results/{graph_id}/task-1.json"
+        blobs = [
+            _make_blob(graph_json_path, _old(10)),
+            _make_blob(task_blob_path, _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        await run_purge(storage, older_than_days=7)
+
+        calls = storage.delete_blobs_batch.call_args_list
+        assert len(calls) == 2
+        # First call: result blobs (non-graph.json)
+        result_batch = calls[0].args[0]
+        assert task_blob_path in result_batch
+        assert graph_json_path not in result_batch
+        # Second call: graph.json blobs
+        graph_batch = calls[1].args[0]
+        assert graph_json_path in graph_batch
+        assert task_blob_path not in graph_batch
+
+    async def test_batch_failure_warnings(self, capsys):
+        """Mock delete_blobs_batch to return failed names. Verify warnings
+        printed to stderr."""
+        graph = self._make_complete_graph()
+        graph_id = str(graph.graph_id)
+        graph_json_path = f"task-results/{graph_id}/graph.json"
+        task_blob_path = f"task-results/{graph_id}/task-1.json"
+        blobs = [
+            _make_blob(graph_json_path, _old(10)),
+            _make_blob(task_blob_path, _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+        # First batch (result blobs) returns a failure; second batch succeeds
+        storage.delete_blobs_batch = mock.AsyncMock(
+            side_effect=[[task_blob_path], []]
+        )
+
+        await run_purge(storage, older_than_days=7)
+
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert task_blob_path in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Dual-path purge: tag-based discovery, legacy fallback, deduplication
+# ---------------------------------------------------------------------------
+
+
+async def _tag_gen(blobs):
+    """Async generator that yields blobs — simulates find_blobs_by_tags success."""
+    for b in blobs:
+        yield b
+
+
+def _make_list_blobs(all_blobs):
+    """Return a list_blobs mock that filters by prefix."""
+    async def _list_blobs(prefix):
+        for b in all_blobs:
+            if b.name.startswith(prefix):
+                yield b
+    return _list_blobs
+
+
+class TestDualPathPurge:
+    """Tests for the dual-path discovery logic in _stream_eligible_graphs:
+    tagged path (find_blobs_by_tags succeeds), legacy untagged path,
+    deduplication, per-graph relisting, and failure fallback."""
+
+    async def test_tag_query_discovers_candidates(self):
+        """find_blobs_by_tags yields blobs from 2 old graph_ids.
+        No untagged blobs. Verify both graphs are yielded."""
+        graph_id_1 = "graph-1"
+        graph_id_2 = "graph-2"
+
+        # Tagged blobs returned by find_blobs_by_tags
+        tagged_blob_1 = _make_blob(f"task-results/{graph_id_1}/task.json", _old(10))
+        tagged_blob_1.tag_count = 3
+        tagged_blob_2 = _make_blob(f"task-results/{graph_id_2}/task.json", _old(10))
+        tagged_blob_2.tag_count = 3
+
+        # Full blob sets for per-graph relisting (all old)
+        full_blobs = [
+            _make_blob(f"task-results/{graph_id_1}/graph.json", _old(10)),
+            _make_blob(f"task-results/{graph_id_1}/task.json", _old(10)),
+            _make_blob(f"task-results/{graph_id_2}/graph.json", _old(10)),
+            _make_blob(f"task-results/{graph_id_2}/task.json", _old(10)),
+        ]
+        # All blobs have tags, so the untagged scan finds nothing
+        for b in full_blobs:
+            b.tag_count = 3
+
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+        storage.find_blobs_by_tags = lambda filter_expression: _tag_gen(
+            [tagged_blob_1, tagged_blob_2]
+        )
+        storage.list_blobs = _make_list_blobs(full_blobs)
+
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+        yielded = []
+        async for graph_id, blobs in _stream_eligible_graphs(storage, cutoff):
+            yielded.append(graph_id)
+
+        assert sorted(yielded) == ["graph-1", "graph-2"]
+
+    async def test_untagged_blobs_discovered_via_list_blobs(self):
+        """find_blobs_by_tags yields nothing. list_blobs has untagged blobs
+        (tag_count=0) for one old graph. Verify that graph is discovered."""
+        graph_id = "untagged-graph"
+
+        # All blobs — untagged and old
+        all_blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+            _make_blob(f"task-results/{graph_id}/task.json", _old(10)),
+        ]
+        for b in all_blobs:
+            b.tag_count = 0
+
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+        storage.find_blobs_by_tags = lambda filter_expression: _tag_gen([])
+        storage.list_blobs = _make_list_blobs(all_blobs)
+
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+        yielded = []
+        async for graph_id_out, blobs in _stream_eligible_graphs(storage, cutoff):
+            yielded.append(graph_id_out)
+
+        assert yielded == ["untagged-graph"]
+
+    async def test_deduplication_of_candidates(self):
+        """A graph_id appears in BOTH the tagged results AND the untagged scan.
+        Verify it's only yielded once (set deduplication)."""
+        graph_id = "dup-graph"
+
+        # Tagged blob
+        tagged_blob = _make_blob(f"task-results/{graph_id}/task-tagged.json", _old(10))
+        tagged_blob.tag_count = 3
+
+        # Full blob set: one tagged, one untagged — both old
+        blob_tagged = _make_blob(f"task-results/{graph_id}/task-tagged.json", _old(10))
+        blob_tagged.tag_count = 3
+        blob_untagged = _make_blob(f"task-results/{graph_id}/task-untagged.json", _old(10))
+        blob_untagged.tag_count = 0
+        blob_graph = _make_blob(f"task-results/{graph_id}/graph.json", _old(10))
+        blob_graph.tag_count = 0
+
+        all_blobs = [blob_graph, blob_tagged, blob_untagged]
+
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+        storage.find_blobs_by_tags = lambda filter_expression: _tag_gen([tagged_blob])
+        storage.list_blobs = _make_list_blobs(all_blobs)
+
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+        yielded = []
+        async for graph_id_out, blobs in _stream_eligible_graphs(storage, cutoff):
+            yielded.append(graph_id_out)
+
+        # The graph appears from both tag query and untagged scan, but
+        # should only be yielded once thanks to set deduplication.
+        assert yielded == ["dup-graph"]
+
+    async def test_per_graph_relisting_filters_by_age(self):
+        """find_blobs_by_tags returns a candidate graph_id, but when we re-list
+        all its blobs, the most recent is NEWER than cutoff. Verify it's NOT yielded."""
+        graph_id = "mixed-age-graph"
+
+        # Tagged blob is old (makes this graph a candidate)
+        tagged_blob = _make_blob(f"task-results/{graph_id}/old-task.json", _old(10))
+        tagged_blob.tag_count = 3
+
+        # Full listing: one old, one new — max(last_modified) is recent
+        all_blobs = [
+            _make_blob(f"task-results/{graph_id}/old-task.json", _old(10)),
+            _make_blob(f"task-results/{graph_id}/new-task.json", _new(1)),
+        ]
+        for b in all_blobs:
+            b.tag_count = 3
+
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+        storage.find_blobs_by_tags = lambda filter_expression: _tag_gen([tagged_blob])
+        storage.list_blobs = _make_list_blobs(all_blobs)
+
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+        yielded = []
+        async for graph_id_out, blobs in _stream_eligible_graphs(storage, cutoff):
+            yielded.append(graph_id_out)
+
+        assert yielded == []
+
+    async def test_find_blobs_by_tags_failure_falls_back_with_warning(self, caplog):
+        """When find_blobs_by_tags raises, the fallback path is used and a
+        warning is logged."""
+        import logging
+
+        graph_id = "fallback-graph"
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+            _make_blob(f"task-results/{graph_id}/task.json", _old(10)),
+        ]
+
+        storage = _make_purge_storage(blob_list=blobs)
+
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+        with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
+            yielded = []
+            async for graph_id_out, group_blobs in _stream_eligible_graphs(storage, cutoff):
+                yielded.append(graph_id_out)
+
+        # Fallback path should still discover the graph
+        assert yielded == [graph_id]
+        # Warning about find_blobs_by_tags failure should be logged
+        assert any("find_blobs_by_tags failed" in record.message for record in caplog.records)
