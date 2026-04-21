@@ -238,13 +238,13 @@ boilermaker --storage-url <url> --container <name> purge \
 boilermaker \
     --storage-url "$AZURE_STORAGE_URL" \
     --container "$CONTAINER_NAME" \
-    purge --task-results --older-than 7 --dry-run
+    purge --older-than 7 --dry-run
 
 # Step 2: execute after confirming the plan
 boilermaker \
     --storage-url "$AZURE_STORAGE_URL" \
     --container "$CONTAINER_NAME" \
-    purge --task-results --older-than 7
+    purge --older-than 7
 ```
 
 **Dry-run output**

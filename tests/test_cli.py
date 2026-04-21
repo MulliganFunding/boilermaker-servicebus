@@ -435,7 +435,8 @@ def _make_purge_storage(
     # full-fallback (legacy) path in _stream_eligible_graphs.
     async def _failing_tag_query(filter_expression):
         raise RuntimeError("blob tag indexing not enabled")
-        yield  # noqa: unreachable — makes this an async generator
+        # unreachable — makes this an async generator
+        yield  # noqa
 
     storage.find_blobs_by_tags = _failing_tag_query
     return storage
@@ -482,7 +483,6 @@ class TestPurgeArgumentParsing:
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
             "purge",
-            "--task-results",
             "--older-than", "7",
         ])
         assert args.command == "purge"
@@ -498,7 +498,6 @@ class TestPurgeArgumentParsing:
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
             "purge",
-            "--task-results",
             "--older-than", "7",
             "--dry-run",
         ])
@@ -511,7 +510,6 @@ class TestPurgeArgumentParsing:
             "--container", "my-container",
             "-v",
             "purge",
-            "--task-results",
             "--older-than", "7",
         ])
         assert args.verbose is True
@@ -523,8 +521,7 @@ class TestPurgeArgumentParsing:
                 "--storage-url", "https://example.blob.core.windows.net",
                 "--container", "my-container",
                 "purge",
-                "--task-results",
-                "--older-than", "0",
+                    "--older-than", "0",
             ])
 
     def test_older_than_thirty_one_causes_parse_error(self):
@@ -534,8 +531,7 @@ class TestPurgeArgumentParsing:
                 "--storage-url", "https://example.blob.core.windows.net",
                 "--container", "my-container",
                 "purge",
-                "--task-results",
-                "--older-than", "31",
+                    "--older-than", "31",
             ])
 
     def test_older_than_non_integer_causes_parse_error(self):
@@ -545,8 +541,7 @@ class TestPurgeArgumentParsing:
                 "--storage-url", "https://example.blob.core.windows.net",
                 "--container", "my-container",
                 "purge",
-                "--task-results",
-                "--older-than", "abc",
+                    "--older-than", "abc",
             ])
 
 
@@ -725,7 +720,8 @@ class TestPurgeInProgressSafetyCheck:
 
         async def _failing_tag_query(filter_expression):
             raise RuntimeError("blob tag indexing not enabled")
-            yield  # noqa: unreachable — makes this an async generator
+            # unreachable — makes this an async generator
+            yield  # noqa
 
         storage.find_blobs_by_tags = _failing_tag_query
 
@@ -905,7 +901,8 @@ class TestPurgeListingError:
 
         async def _failing_tag_query(filter_expression):
             raise RuntimeError("blob tag indexing not enabled")
-            yield  # noqa: unreachable — makes this an async generator
+            # unreachable — makes this an async generator
+            yield  # noqa
 
         storage.list_blobs = _failing_gen
         storage.find_blobs_by_tags = _failing_tag_query
@@ -1354,7 +1351,6 @@ class TestPurgeAllGraphsArgumentParsing:
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
             "purge",
-            "--task-results",
             "--older-than", "7",
             "--all-graphs",
         ])
@@ -1366,7 +1362,6 @@ class TestPurgeAllGraphsArgumentParsing:
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
             "purge",
-            "--task-results",
             "--older-than", "7",
         ])
         assert args.all_graphs is False
@@ -1377,7 +1372,6 @@ class TestPurgeAllGraphsArgumentParsing:
             "--storage-url", "https://example.blob.core.windows.net",
             "--container", "my-container",
             "purge",
-            "--task-results",
             "--older-than", "7",
             "--all-graphs",
             "--dry-run",

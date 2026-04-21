@@ -104,12 +104,6 @@ def _add_recover_subparser(subparsers: argparse._SubParsersAction) -> None:  # n
 def _add_purge_subparser(subparsers: argparse._SubParsersAction) -> None:  # noqa: SLF001
     purge_parser = subparsers.add_parser("purge", help="Delete old task-result blobs from Azure Blob Storage")
     purge_parser.add_argument(
-        "--task-results",
-        action="store_true",
-        required=True,
-        help="Purge task-result blobs (required for explicitness)",
-    )
-    purge_parser.add_argument(
         "--older-than",
         required=True,
         type=_validate_older_than,
