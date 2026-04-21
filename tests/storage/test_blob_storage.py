@@ -794,11 +794,17 @@ async def test_store_graph_created_date_consistent_across_all_uploads(
 # ---------------------------------------------------------------------------
 
 
-class _AsyncDeleteResults:
-    """Helper that wraps a list of dicts as an async iterator, returned by
-    an awaitable (to match container_client.delete_blobs() semantics)."""
+class _DeleteResult:
+    """Minimal response object matching what the Azure SDK returns from delete_blobs."""
+    def __init__(self, status_code: int):
+        self.status_code = status_code
 
-    def __init__(self, results: list[dict]):
+
+class _AsyncDeleteResults:
+    """Helper that wraps a list of _DeleteResult objects as an async iterator,
+    returned by an awaitable (to match container_client.delete_blobs() semantics)."""
+
+    def __init__(self, results: list):
         self._results = results
 
     def __await__(self):
@@ -817,12 +823,12 @@ class _AsyncDeleteResults:
 
 class TestDeleteBlobsBatch:
     async def test_successful_batch_delete(self, mock_azureblob, blob_storage):
-        """Pass a few blob names, mock delete_blobs to return success responses.
+        """Pass a few blob names, mock delete_blobs to return 202 success responses.
         Verify returned failure list is empty."""
         container_client, _, _ = mock_azureblob
         blob_names = ["blob-a", "blob-b", "blob-c"]
         container_client.delete_blobs.return_value = _AsyncDeleteResults(
-            [{}, {}, {}]
+            [_DeleteResult(202)] * 3
         )
 
         failures = await blob_storage.delete_blobs_batch(blob_names)
@@ -836,10 +842,9 @@ class TestDeleteBlobsBatch:
         container_client, _, _ = mock_azureblob
         blob_names = [f"blob-{i}" for i in range(300)]
 
-        # Each call returns success responses matching the chunk size
         container_client.delete_blobs.side_effect = [
-            _AsyncDeleteResults([{}] * 256),
-            _AsyncDeleteResults([{}] * 44),
+            _AsyncDeleteResults([_DeleteResult(202)] * 256),
+            _AsyncDeleteResults([_DeleteResult(202)] * 44),
         ]
 
         failures = await blob_storage.delete_blobs_batch(blob_names)
@@ -853,11 +858,11 @@ class TestDeleteBlobsBatch:
         assert len(second_call_args) == 44
 
     async def test_404_treated_as_success(self, mock_azureblob, blob_storage):
-        """Mock response with BlobNotFound error_code. Verify NOT in failure list."""
+        """404 response (blob already gone) must NOT appear in the failure list."""
         container_client, _, _ = mock_azureblob
         blob_names = ["blob-gone"]
         container_client.delete_blobs.return_value = _AsyncDeleteResults(
-            [{"error_code": "BlobNotFound"}]
+            [_DeleteResult(404)]
         )
 
         failures = await blob_storage.delete_blobs_batch(blob_names)
@@ -865,11 +870,11 @@ class TestDeleteBlobsBatch:
         assert failures == []
 
     async def test_non_404_failure_returned(self, mock_azureblob, blob_storage):
-        """Mock response with InternalError error_code. Verify blob name IS in failure list."""
+        """A non-202/404 status code means failure; blob name must appear in failure list."""
         container_client, _, _ = mock_azureblob
         blob_names = ["blob-broken"]
         container_client.delete_blobs.return_value = _AsyncDeleteResults(
-            [{"error_code": "InternalError"}]
+            [_DeleteResult(500)]
         )
 
         failures = await blob_storage.delete_blobs_batch(blob_names)
