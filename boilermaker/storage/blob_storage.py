@@ -400,8 +400,8 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                 chunk = blob_names[i : i + BATCH_DELETE_MAX]
                 idx = 0
                 async for result in await container_client.delete_blobs(*chunk):
-                    error_code = result.get("error_code")
-                    if error_code and error_code != "BlobNotFound":
+                    status_code = result.status_code
+                    if status_code not in (202, 404):
                         failed.append(chunk[idx])
                     idx += 1
                 if idx != len(chunk):

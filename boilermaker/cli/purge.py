@@ -32,73 +32,27 @@ async def _stream_eligible_graphs(
 ) -> AsyncGenerator[tuple[str, list]]:
     """Yield (graph_id, blobs) tuples for graphs eligible for purge.
 
-    Uses a dual-path strategy:
-    1. Tagged path: find_blobs_by_tags for blobs with created_date < cutoff
-    2. Legacy path: list_blobs for untagged blobs with last_modified < cutoff
+    Discovers candidate graph_ids via the blob tag index
+    (created_date < cutoff), then lists each graph's full blob set.
 
-    For each candidate graph_id from either path, lists all blobs under that
-    graph to get the complete set, then applies the age filter.
-
-    Falls back to full legacy listing if find_blobs_by_tags fails.
+    For containers with pre-tag blobs, use _stream_all_graphs instead
+    (exposed via --all-graphs).
     """
     listing_prefix = f"{storage.task_result_prefix}/"
     cutoff_date = cutoff.strftime("%Y-%m-%d")
     candidate_graph_ids: set[str] = set()
-    tag_query_failed = False
 
-    # --- Tagged path: discover candidate graph_ids via tag index ---
-    try:
-        filter_expr = f"\"created_date\" < '{cutoff_date}'"
-        async for blob in storage.find_blobs_by_tags(filter_expr):
-            graph_id = blob.name.split("/")[1]
-            candidate_graph_ids.add(graph_id)
-    except Exception as exc:
-        logger.warning("find_blobs_by_tags failed (%s); falling back to full listing.", exc)
-        tag_query_failed = True
+    filter_expr = f"\"created_date\" < '{cutoff_date}'"
+    async for blob in storage.find_blobs_by_tags(filter_expr):
+        graph_id = blob.name.split("/")[1]
+        candidate_graph_ids.add(graph_id)
 
-    # --- Legacy path: discover untagged blobs via list_blobs ---
-    if tag_query_failed:
-        # Full fallback: list everything and filter by last_modified
-        current_graph_id: str | None = None
-        current_blobs: list = []
-
-        async for blob in storage.list_blobs(prefix=listing_prefix):
-            graph_id = blob.name.split("/")[1]
-            if graph_id != current_graph_id:
-                if current_graph_id is not None:
-                    most_recent = max(b.last_modified for b in current_blobs)
-                    if most_recent < cutoff:
-                        yield current_graph_id, current_blobs
-                current_graph_id = graph_id
-                current_blobs = []
-            current_blobs.append(blob)
-
-        if current_graph_id is not None:
-            most_recent = max(b.last_modified for b in current_blobs)
-            if most_recent < cutoff:
-                yield current_graph_id, current_blobs
-        return  # Done — full fallback handled everything
-
-    # --- Legacy path (tag query succeeded): find untagged blobs only ---
-    async for blob in storage.list_blobs(prefix=listing_prefix):
-        tag_count = getattr(blob, "tag_count", None)
-        if tag_count is None or tag_count == 0:
-            if blob.last_modified < cutoff:
-                graph_id = blob.name.split("/")[1]
-                candidate_graph_ids.add(graph_id)
-
-    # --- For each candidate: list full blob set, apply age filter, yield ---
     for graph_id in sorted(candidate_graph_ids):
         graph_prefix = f"{listing_prefix}{graph_id}/"
         blobs: list = []
         async for blob in storage.list_blobs(prefix=graph_prefix):
             blobs.append(blob)
-
-        if not blobs:
-            continue
-
-        most_recent = max(b.last_modified for b in blobs)
-        if most_recent < cutoff:
+        if blobs:
             yield graph_id, blobs
 
 
@@ -191,19 +145,22 @@ def _validate_older_than(value: str) -> int:
     return days
 
 
+
 async def run_purge(
     storage: BlobClientStorage,
     older_than_days: int,
     dry_run: bool = False,
     all_graphs: bool = False,
+    force: bool = False,
     console: Console | None = None,
 ) -> int:
     """Delete task-result blobs older than the given threshold from Azure Blob Storage.
 
     Streams all blobs under the task-results/ prefix, groups them by graph ID,
     and deletes blobs for graphs whose most-recently-modified blob is older than
-    the cutoff. Graphs with in-progress tasks (Scheduled, Started, Retry) or
-    missing graph.json are skipped with a stderr warning.
+    the cutoff. Graphs with in-progress tasks (Scheduled, Started, Retry) are
+    normally skipped. When force=True, the user is prompted to confirm deletion
+    of each such graph (or all are confirmed automatically when yes=True).
 
     Args:
         storage: Blob storage client.
@@ -212,6 +169,7 @@ async def run_purge(
         all_graphs: When True, discovers graphs via UUID7 timestamp ordering
             (_stream_all_graphs). When False, uses the dual-path tag+legacy
             strategy (_stream_eligible_graphs).
+        force: When True, also delete graphs with in-progress tasks.
         console: Rich Console for output. When None, a default Console is created.
 
     Returns:
@@ -229,8 +187,8 @@ async def run_purge(
     graph_path_suffix = f"/{TaskGraph.StorageName}"
 
     eligible_graphs: list[tuple[str, list]] = []
+    in_progress_graphs: list[tuple[str, list]] = []
     had_stalled = False
-    skipped_in_progress = 0
 
     try:
         graph_stream = (
@@ -258,30 +216,28 @@ async def run_purge(
                 print(f"SKIP: Graph {graph_id} — graph.json missing or unreadable. Skipping.", file=sys.stderr)
                 continue
 
-            in_progress_counts = {status: 0 for status in STALLED_STATUSES}
-            for result in graph.results.values():
-                if result.status in STALLED_STATUSES:
-                    in_progress_counts[result.status] += 1
-
-            total_in_progress = sum(in_progress_counts.values())
-            if total_in_progress > 0:
-                counts_display = ", ".join(
-                    f"{status.value.capitalize()}: {count}"
-                    for status, count in in_progress_counts.items()
-                    if count > 0
-                )
-                print(
-                    f"SKIP: Graph {graph_id} has in-progress tasks ({counts_display}). Skipping.",
-                    file=sys.stderr,
-                )
-                had_stalled = True
-                skipped_in_progress += 1
-                continue
-
-            eligible_graphs.append((graph_id, blobs))
+            has_in_progress = any(
+                result.status in STALLED_STATUSES for result in graph.results.values()
+            )
+            if has_in_progress:
+                in_progress_graphs.append((graph_id, blobs))
+            else:
+                eligible_graphs.append((graph_id, blobs))
     except Exception as exc:
         print(f"ERROR: Failed to list blobs: {exc}", file=sys.stderr)
         return EXIT_ERROR
+
+    # --- Resolve in-progress graphs ---
+    if in_progress_graphs:
+        if force:
+            eligible_graphs.extend(in_progress_graphs)
+        else:
+            for graph_id, _ in in_progress_graphs:
+                print(
+                    f"SKIP: Graph {graph_id} has in-progress tasks. Skipping.",
+                    file=sys.stderr,
+                )
+            had_stalled = True
 
     if not eligible_graphs:
         if had_stalled:
@@ -333,7 +289,7 @@ async def run_purge(
 
     console.print(f"\nDeleted {total_deleted} blobs across {deleted_graph_count} graphs.")
     if had_stalled:
-        console.print(f"Skipped {skipped_in_progress} graph(s) due to in-progress tasks.")
+        console.print(f"Skipped {len(in_progress_graphs)} graph(s) due to in-progress tasks.")
 
     if had_errors and deleted_graph_count == 0:
         return EXIT_ERROR

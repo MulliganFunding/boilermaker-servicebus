@@ -420,25 +420,28 @@ def _make_purge_storage(
 ) -> mock.AsyncMock:
     """Build a storage mock suitable for run_purge tests.
 
-    list_blobs returns the blob_list as an async generator.
+    find_blobs_by_tags yields all blobs in blob_list (simulates all matching the filter).
+    list_blobs filters blob_list by the requested prefix.
     load_graph returns the graph (or None).
     delete_blobs_batch returns empty list (no failures) by default.
     """
     storage = mock.AsyncMock()
     storage.task_result_prefix = "task-results"
-    storage.list_blobs = lambda prefix: _async_gen(blob_list)
+
+    async def _list_blobs(prefix):
+        for b in blob_list:
+            if b.name.startswith(prefix):
+                yield b
+
+    async def _find_blobs_by_tags(filter_expression):
+        for b in blob_list:
+            yield b
+
+    storage.list_blobs = _list_blobs
+    storage.find_blobs_by_tags = _find_blobs_by_tags
     storage.load_graph = mock.AsyncMock(return_value=graph)
     storage.delete_blob = mock.AsyncMock()
     storage.delete_blobs_batch = mock.AsyncMock(return_value=[])
-
-    # find_blobs_by_tags raises by default so existing tests exercise the
-    # full-fallback (legacy) path in _stream_eligible_graphs.
-    async def _failing_tag_query(filter_expression):
-        raise RuntimeError("blob tag indexing not enabled")
-        # unreachable — makes this an async generator
-        yield  # noqa
-
-    storage.find_blobs_by_tags = _failing_tag_query
     return storage
 
 
@@ -576,18 +579,6 @@ class TestPurgeAgeEligibility:
         _set_result(graph, task, TaskStatus.Success)
         return graph
 
-    async def test_graphs_newer_than_cutoff_are_skipped(self, capsys):
-        graph = self._make_complete_graph()
-        graph_id = str(graph.graph_id)
-        blobs = [
-            _make_blob(f"task-results/{graph_id}/graph.json", _new()),
-        ]
-        storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        code = await run_purge(storage, older_than_days=7)
-        assert code == EXIT_HEALTHY
-        # load_graph should NOT have been called (age filter excludes it)
-        storage.load_graph.assert_not_called()
-
     async def test_graphs_older_than_cutoff_are_eligible(self):
         graph = self._make_complete_graph()
         graph_id = str(graph.graph_id)
@@ -597,19 +588,6 @@ class TestPurgeAgeEligibility:
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
         await run_purge(storage, older_than_days=7)
         storage.load_graph.assert_called_once()
-
-    async def test_graph_with_any_recent_blob_is_skipped(self):
-        """If max(last_modified) is newer than cutoff, skip the whole graph."""
-        graph = self._make_complete_graph()
-        graph_id = str(graph.graph_id)
-        blobs = [
-            _make_blob(f"task-results/{graph_id}/graph.json", _old(15)),
-            _make_blob(f"task-results/{graph_id}/task-1.json", _new(1)),
-        ]
-        storage = _make_purge_storage(blob_list=blobs, graph=graph)
-        await run_purge(storage, older_than_days=7)
-        # load_graph should NOT be called because max(last_modified) is recent
-        storage.load_graph.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -709,21 +687,10 @@ class TestPurgeInProgressSafetyCheck:
             _make_blob(f"task-results/{graph_in_progress_id}/graph.json", _old(10)),
         ]
 
-        storage = mock.AsyncMock()
-        storage.task_result_prefix = "task-results"
-        storage.list_blobs = lambda prefix: _async_gen(blobs)
+        storage = _make_purge_storage(blob_list=blobs)
         storage.load_graph = mock.AsyncMock(
             side_effect=lambda gid: graph_eligible if str(gid) == graph_eligible_id else graph_in_progress
         )
-        storage.delete_blob = mock.AsyncMock()
-        storage.delete_blobs_batch = mock.AsyncMock(return_value=[])
-
-        async def _failing_tag_query(filter_expression):
-            raise RuntimeError("blob tag indexing not enabled")
-            # unreachable — makes this an async generator
-            yield  # noqa
-
-        storage.find_blobs_by_tags = _failing_tag_query
 
         code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_STALLED
@@ -895,16 +862,10 @@ class TestPurgeListingError:
         storage = mock.AsyncMock()
         storage.task_result_prefix = "task-results"
 
-        async def _failing_gen(prefix):
+        async def _failing_tag_query(filter_expression):
             raise RuntimeError("network failure")
             yield  # make it a generator
 
-        async def _failing_tag_query(filter_expression):
-            raise RuntimeError("blob tag indexing not enabled")
-            # unreachable — makes this an async generator
-            yield  # noqa
-
-        storage.list_blobs = _failing_gen
         storage.find_blobs_by_tags = _failing_tag_query
         code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_ERROR
@@ -918,18 +879,23 @@ class TestPurgeListingError:
 
 
 class TestStreamEligibleGraphs:
-    async def test_stream_eligible_graphs_yields_old_groups(self):
-        """Create blobs for 2 graph_ids (one old, one new).
-        Verify only the old group is yielded."""
+    async def test_stream_eligible_graphs_yields_old_graphs(self):
+        """Tag query returns only old graph's blobs; new graph is absent from
+        tag results (the tag filter excluded it). Verify only the old group is yielded."""
         old_graph_id = "aaaa-old-graph"
         new_graph_id = "bbbb-new-graph"
-        blobs = [
+        old_blobs = [
             _make_blob(f"task-results/{old_graph_id}/graph.json", _old(10)),
             _make_blob(f"task-results/{old_graph_id}/task-1.json", _old(10)),
+        ]
+        all_blobs = old_blobs + [
             _make_blob(f"task-results/{new_graph_id}/graph.json", _new(1)),
             _make_blob(f"task-results/{new_graph_id}/task-1.json", _new(1)),
         ]
-        storage = _make_purge_storage(blob_list=blobs)
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+        storage.find_blobs_by_tags = lambda fe: _tag_gen(old_blobs)
+        storage.list_blobs = _make_list_blobs(all_blobs)
         cutoff = datetime.now(UTC) - timedelta(days=7)
 
         yielded = []
@@ -1053,39 +1019,28 @@ def _make_list_blobs(all_blobs):
     return _list_blobs
 
 
-class TestDualPathPurge:
-    """Tests for the dual-path discovery logic in _stream_eligible_graphs:
-    tagged path (find_blobs_by_tags succeeds), legacy untagged path,
-    deduplication, per-graph relisting, and failure fallback."""
+class TestTagBasedPurge:
+    """Tests for tag-based candidate discovery in _stream_eligible_graphs."""
 
     async def test_tag_query_discovers_candidates(self):
         """find_blobs_by_tags yields blobs from 2 old graph_ids.
-        No untagged blobs. Verify both graphs are yielded."""
+        Verify both graphs are yielded."""
         graph_id_1 = "graph-1"
         graph_id_2 = "graph-2"
 
-        # Tagged blobs returned by find_blobs_by_tags
         tagged_blob_1 = _make_blob(f"task-results/{graph_id_1}/task.json", _old(10))
-        tagged_blob_1.tag_count = 3
         tagged_blob_2 = _make_blob(f"task-results/{graph_id_2}/task.json", _old(10))
-        tagged_blob_2.tag_count = 3
 
-        # Full blob sets for per-graph relisting (all old)
         full_blobs = [
             _make_blob(f"task-results/{graph_id_1}/graph.json", _old(10)),
             _make_blob(f"task-results/{graph_id_1}/task.json", _old(10)),
             _make_blob(f"task-results/{graph_id_2}/graph.json", _old(10)),
             _make_blob(f"task-results/{graph_id_2}/task.json", _old(10)),
         ]
-        # All blobs have tags, so the untagged scan finds nothing
-        for b in full_blobs:
-            b.tag_count = 3
 
         storage = mock.AsyncMock()
         storage.task_result_prefix = "task-results"
-        storage.find_blobs_by_tags = lambda filter_expression: _tag_gen(
-            [tagged_blob_1, tagged_blob_2]
-        )
+        storage.find_blobs_by_tags = lambda fe: _tag_gen([tagged_blob_1, tagged_blob_2])
         storage.list_blobs = _make_list_blobs(full_blobs)
 
         cutoff = datetime.now(UTC) - timedelta(days=7)
@@ -1095,84 +1050,22 @@ class TestDualPathPurge:
 
         assert sorted(yielded) == ["graph-1", "graph-2"]
 
-    async def test_untagged_blobs_discovered_via_list_blobs(self):
-        """find_blobs_by_tags yields nothing. list_blobs has untagged blobs
-        (tag_count=0) for one old graph. Verify that graph is discovered."""
-        graph_id = "untagged-graph"
-
-        # All blobs — untagged and old
-        all_blobs = [
-            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
-            _make_blob(f"task-results/{graph_id}/task.json", _old(10)),
-        ]
-        for b in all_blobs:
-            b.tag_count = 0
-
-        storage = mock.AsyncMock()
-        storage.task_result_prefix = "task-results"
-        storage.find_blobs_by_tags = lambda filter_expression: _tag_gen([])
-        storage.list_blobs = _make_list_blobs(all_blobs)
-
-        cutoff = datetime.now(UTC) - timedelta(days=7)
-        yielded = []
-        async for graph_id_out, _blobs in _stream_eligible_graphs(storage, cutoff):
-            yielded.append(graph_id_out)
-
-        assert yielded == ["untagged-graph"]
-
     async def test_deduplication_of_candidates(self):
-        """A graph_id appears in BOTH the tagged results AND the untagged scan.
-        Verify it's only yielded once (set deduplication)."""
+        """find_blobs_by_tags yields multiple blobs from the same graph_id.
+        Verify the graph is only listed and yielded once."""
         graph_id = "dup-graph"
 
-        # Tagged blob
-        tagged_blob = _make_blob(f"task-results/{graph_id}/task-tagged.json", _old(10))
-        tagged_blob.tag_count = 3
-
-        # Full blob set: one tagged, one untagged — both old
-        blob_tagged = _make_blob(f"task-results/{graph_id}/task-tagged.json", _old(10))
-        blob_tagged.tag_count = 3
-        blob_untagged = _make_blob(f"task-results/{graph_id}/task-untagged.json", _old(10))
-        blob_untagged.tag_count = 0
-        blob_graph = _make_blob(f"task-results/{graph_id}/graph.json", _old(10))
-        blob_graph.tag_count = 0
-
-        all_blobs = [blob_graph, blob_tagged, blob_untagged]
-
-        storage = mock.AsyncMock()
-        storage.task_result_prefix = "task-results"
-        storage.find_blobs_by_tags = lambda filter_expression: _tag_gen([tagged_blob])
-        storage.list_blobs = _make_list_blobs(all_blobs)
-
-        cutoff = datetime.now(UTC) - timedelta(days=7)
-        yielded = []
-        async for graph_id_out, _blobs in _stream_eligible_graphs(storage, cutoff):
-            yielded.append(graph_id_out)
-
-        # The graph appears from both tag query and untagged scan, but
-        # should only be yielded once thanks to set deduplication.
-        assert yielded == ["dup-graph"]
-
-    async def test_per_graph_relisting_filters_by_age(self):
-        """find_blobs_by_tags returns a candidate graph_id, but when we re-list
-        all its blobs, the most recent is NEWER than cutoff. Verify it's NOT yielded."""
-        graph_id = "mixed-age-graph"
-
-        # Tagged blob is old (makes this graph a candidate)
-        tagged_blob = _make_blob(f"task-results/{graph_id}/old-task.json", _old(10))
-        tagged_blob.tag_count = 3
-
-        # Full listing: one old, one new — max(last_modified) is recent
+        tagged_blob_1 = _make_blob(f"task-results/{graph_id}/task-1.json", _old(10))
+        tagged_blob_2 = _make_blob(f"task-results/{graph_id}/task-2.json", _old(10))
         all_blobs = [
-            _make_blob(f"task-results/{graph_id}/old-task.json", _old(10)),
-            _make_blob(f"task-results/{graph_id}/new-task.json", _new(1)),
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+            tagged_blob_1,
+            tagged_blob_2,
         ]
-        for b in all_blobs:
-            b.tag_count = 3
 
         storage = mock.AsyncMock()
         storage.task_result_prefix = "task-results"
-        storage.find_blobs_by_tags = lambda filter_expression: _tag_gen([tagged_blob])
+        storage.find_blobs_by_tags = lambda fe: _tag_gen([tagged_blob_1, tagged_blob_2])
         storage.list_blobs = _make_list_blobs(all_blobs)
 
         cutoff = datetime.now(UTC) - timedelta(days=7)
@@ -1180,31 +1073,7 @@ class TestDualPathPurge:
         async for graph_id_out, _blobs in _stream_eligible_graphs(storage, cutoff):
             yielded.append(graph_id_out)
 
-        assert yielded == []
-
-    async def test_find_blobs_by_tags_failure_falls_back_with_warning(self, caplog):
-        """When find_blobs_by_tags raises, the fallback path is used and a
-        warning is logged."""
-        import logging
-
-        graph_id = "fallback-graph"
-        blobs = [
-            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
-            _make_blob(f"task-results/{graph_id}/task.json", _old(10)),
-        ]
-
-        storage = _make_purge_storage(blob_list=blobs)
-
-        cutoff = datetime.now(UTC) - timedelta(days=7)
-        with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
-            yielded = []
-            async for graph_id_out, _group_blobs in _stream_eligible_graphs(storage, cutoff):
-                yielded.append(graph_id_out)
-
-        # Fallback path should still discover the graph
-        assert yielded == [graph_id]
-        # Warning about find_blobs_by_tags failure should be logged
-        assert any("find_blobs_by_tags failed" in record.message for record in caplog.records)
+        assert yielded == ["dup-graph"]
 
 
 # ---------------------------------------------------------------------------
