@@ -218,18 +218,20 @@ Delete old task-result blobs from Azure Blob Storage. Graphs with in-progress ta
 
 ```sh
 boilermaker --storage-url <url> --container <name> purge \
-    --task-results \
     --older-than <days> \
-    [--dry-run]
+    [--dry-run] \
+    [--force] \
+    [--all-graphs]
 ```
 
 **Options**
 
 | Option | Required | Description |
 |---|---|---|
-| `--task-results` | Yes | Required flag to confirm intent to purge task results |
-| `--older-than DAYS` | Yes | Delete blobs last modified more than `DAYS` days ago (1–30 inclusive) |
+| `--older-than DAYS` | Yes | Delete graphs older than `DAYS` days, based on `created_date` tags (1–30 inclusive) |
 | `--dry-run` | No | Print what would be deleted without deleting any blobs |
+| `--force` | No | Also delete graphs that have in-progress tasks |
+| `--all-graphs` | No | Discover graphs by UUID7 timestamp instead of tag index — use for containers with pre-tag blobs |
 
 **Example — dry run first, then execute**
 
@@ -250,7 +252,7 @@ boilermaker \
 **Dry-run output**
 
 ```
-Purge plan: blobs last modified before 2026-04-07 (older than 7 days)
+Purge plan: graphs with created_date before 2026-04-07 (older than 7 days)
 
  Graph ID                                    Blobs
  ──────────────────────────────────────────  ─────
@@ -263,7 +265,7 @@ Purge plan: blobs last modified before 2026-04-07 (older than 7 days)
 Graphs with in-progress tasks are printed to stderr and excluded from the plan:
 
 ```
-SKIP: Graph 019d8c0c-... has in-progress tasks (Scheduled: 1, Started: 0, Retry: 2). Skipping.
+SKIP: Graph 019d8c0c-... has in-progress tasks. Skipping.
 ```
 
 **Post-deletion output**

@@ -29,7 +29,7 @@ logger = logging.getLogger("boilermaker.cli")
 async def _stream_eligible_graphs(
     storage: BlobClientStorage,
     cutoff: datetime,
-) -> AsyncGenerator[tuple[str, list]]:
+) -> AsyncGenerator[tuple[str, list], None]:
     """Yield (graph_id, blobs) tuples for graphs eligible for purge.
 
     Discovers candidate graph_ids via the blob tag index
@@ -59,7 +59,7 @@ async def _stream_eligible_graphs(
 async def _stream_all_graphs(
     storage: BlobClientStorage,
     cutoff: datetime,
-) -> AsyncGenerator[tuple[str, list]]:
+) -> AsyncGenerator[tuple[str, list], None]:
     """Yield (graph_id, blobs) for all graphs created before *cutoff*.
 
     Discovers graphs by listing all blobs under the task-results/ prefix and
@@ -156,19 +156,18 @@ async def run_purge(
 ) -> int:
     """Delete task-result blobs older than the given threshold from Azure Blob Storage.
 
-    Streams all blobs under the task-results/ prefix, groups them by graph ID,
-    and deletes blobs for graphs whose most-recently-modified blob is older than
-    the cutoff. Graphs with in-progress tasks (Scheduled, Started, Retry) are
-    normally skipped. When force=True, the user is prompted to confirm deletion
-    of each such graph (or all are confirmed automatically when yes=True).
+    Discovers eligible graphs via blob tag index (created_date < cutoff) or UUID7
+    timestamp ordering (when all_graphs=True), then deletes their blobs. Graphs
+    with in-progress tasks (Scheduled, Started, Retry) are skipped unless
+    force=True.
 
     Args:
         storage: Blob storage client.
-        older_than_days: Number of days; graphs last modified before this cutoff are eligible.
+        older_than_days: Number of days; graphs created before this cutoff are eligible.
         dry_run: When True, prints the deletion plan but does not delete any blobs.
         all_graphs: When True, discovers graphs via UUID7 timestamp ordering
-            (_stream_all_graphs). When False, uses the dual-path tag+legacy
-            strategy (_stream_eligible_graphs).
+            (_stream_all_graphs). When False, uses tag-based discovery
+            (_stream_eligible_graphs).
         force: When True, also delete graphs with in-progress tasks.
         console: Rich Console for output. When None, a default Console is created.
 
@@ -258,33 +257,48 @@ async def run_purge(
     # --- Deletion pass: batch delete, result blobs first, then graph.json ---
     had_errors = False
 
+    # Track which graph.json path belongs to which graph, and which result blobs
+    # belong to which graph — so we can skip graph.json if result deletion failed.
     result_blob_names: list[str] = []
-    graph_json_blob_names: list[str] = []
+    graph_json_by_graph: dict[str, str] = {}  # graph_id -> graph.json blob name
+    result_blobs_by_graph: dict[str, list[str]] = {}  # graph_id -> result blob names
 
     for graph_id, blobs in eligible_graphs:
         graph_blob_path = f"{storage.task_result_prefix}/{graph_id}{graph_path_suffix}"
+        result_blobs_by_graph[graph_id] = []
         for blob in blobs:
             if blob.name == graph_blob_path:
-                graph_json_blob_names.append(blob.name)
+                graph_json_by_graph[graph_id] = blob.name
             else:
                 result_blob_names.append(blob.name)
+                result_blobs_by_graph[graph_id].append(blob.name)
 
-    # Delete result blobs first, then graph.json (ordering preserved)
+    # Delete result blobs first
     failed_results = await storage.delete_blobs_batch(result_blob_names)
-    failed_graphs = await storage.delete_blobs_batch(graph_json_blob_names)
+    failed_results_set = set(failed_results)
 
-    # Report failures
-    all_failed = failed_results + failed_graphs
-    for name in all_failed:
+    for name in failed_results:
         print(f"WARNING: Failed to delete blob {name}. Continuing.", file=sys.stderr)
         had_errors = True
 
-    total_deleted = (len(result_blob_names) + len(graph_json_blob_names)) - len(all_failed)
-    # Count fully-deleted graphs (no failures in their blobs)
-    failed_set = set(all_failed)
+    # Only delete graph.json for graphs whose result blobs all succeeded
+    safe_graph_json_names = [
+        graph_json_by_graph[graph_id]
+        for graph_id, _ in eligible_graphs
+        if graph_id in graph_json_by_graph
+        and not any(b in failed_results_set for b in result_blobs_by_graph[graph_id])
+    ]
+    failed_graphs = await storage.delete_blobs_batch(safe_graph_json_names)
+
+    for name in failed_graphs:
+        print(f"WARNING: Failed to delete blob {name}. Continuing.", file=sys.stderr)
+        had_errors = True
+
+    all_failed = failed_results_set | set(failed_graphs)
+    total_deleted = (len(result_blob_names) + len(safe_graph_json_names)) - len(all_failed)
     deleted_graph_count = sum(
-        1 for gid, blobs in eligible_graphs
-        if not any(b.name in failed_set for b in blobs)
+        1 for graph_id, blobs in eligible_graphs
+        if not any(b.name in all_failed for b in blobs)
     )
 
     console.print(f"\nDeleted {total_deleted} blobs across {deleted_graph_count} graphs.")
