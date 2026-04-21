@@ -6,6 +6,7 @@ import sys
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, UTC
 
+import uuid_utils
 from rich.console import Console
 
 from boilermaker.cli._globals import (
@@ -101,6 +102,78 @@ async def _stream_eligible_graphs(
             yield graph_id, blobs
 
 
+async def _stream_all_graphs(
+    storage: BlobClientStorage,
+    cutoff: datetime,
+) -> AsyncGenerator[tuple[str, list]]:
+    """Yield (graph_id, blobs) for all graphs created before *cutoff*.
+
+    Discovers graphs by listing all blobs under the task-results/ prefix and
+    grouping them by graph_id (the second path segment).  Graph creation time
+    is derived from the UUID7 graph_id, which encodes a millisecond timestamp.
+
+    Because UUID7 values are temporally monotonic and ``list_blobs`` returns
+    results in lexicographic order, the first graph_id whose timestamp is at or
+    after *cutoff* signals that all subsequent groups are also too new.
+    Iteration stops immediately at that point (early exit).
+
+    Non-UUID7 graph_ids (which would raise on parse) are logged and skipped.
+    """
+    listing_prefix = f"{storage.task_result_prefix}/"
+
+    current_graph_id: str | None = None
+    current_blobs: list = []
+
+    async for blob in storage.list_blobs(prefix=listing_prefix):
+        graph_id = blob.name.split("/")[1]
+
+        if graph_id != current_graph_id:
+            # Flush the previous group
+            if current_graph_id is not None:
+                try:
+                    uuid_obj = uuid_utils.UUID(current_graph_id)
+                    graph_created = datetime.fromtimestamp(
+                        uuid_obj.timestamp / 1000, tz=UTC
+                    )
+                except (ValueError, AttributeError) as exc:
+                    logger.warning(
+                        "Skipping graph %s: unable to parse UUID7 (%s).",
+                        current_graph_id,
+                        exc,
+                    )
+                    current_graph_id = graph_id
+                    current_blobs = [blob]
+                    continue
+
+                if graph_created >= cutoff:
+                    return  # early exit — all subsequent graphs are newer
+
+                yield current_graph_id, current_blobs
+
+            current_graph_id = graph_id
+            current_blobs = []
+
+        current_blobs.append(blob)
+
+    # Flush the final group
+    if current_graph_id is not None:
+        try:
+            uuid_obj = uuid_utils.UUID(current_graph_id)
+            graph_created = datetime.fromtimestamp(
+                uuid_obj.timestamp / 1000, tz=UTC
+            )
+        except (ValueError, AttributeError) as exc:
+            logger.warning(
+                "Skipping graph %s: unable to parse UUID7 (%s).",
+                current_graph_id,
+                exc,
+            )
+            return
+
+        if graph_created < cutoff:
+            yield current_graph_id, current_blobs
+
+
 def _validate_older_than(value: str) -> int:
     """Validate --older-than argument as an integer in [1, 30].
 
@@ -122,6 +195,7 @@ async def run_purge(
     storage: BlobClientStorage,
     older_than_days: int,
     dry_run: bool = False,
+    all_graphs: bool = False,
     console: Console | None = None,
 ) -> int:
     """Delete task-result blobs older than the given threshold from Azure Blob Storage.
@@ -135,6 +209,9 @@ async def run_purge(
         storage: Blob storage client.
         older_than_days: Number of days; graphs last modified before this cutoff are eligible.
         dry_run: When True, prints the deletion plan but does not delete any blobs.
+        all_graphs: When True, discovers graphs via UUID7 timestamp ordering
+            (_stream_all_graphs). When False, uses the dual-path tag+legacy
+            strategy (_stream_eligible_graphs).
         console: Rich Console for output. When None, a default Console is created.
 
     Returns:
@@ -156,7 +233,12 @@ async def run_purge(
     skipped_in_progress = 0
 
     try:
-        async for graph_id, blobs in _stream_eligible_graphs(storage, cutoff):
+        graph_stream = (
+            _stream_all_graphs(storage, cutoff)
+            if all_graphs
+            else _stream_eligible_graphs(storage, cutoff)
+        )
+        async for graph_id, blobs in graph_stream:
             graph_blob_path = f"{storage.task_result_prefix}/{graph_id}{graph_path_suffix}"
             has_graph_json = any(blob.name == graph_blob_path for blob in blobs)
             if not has_graph_json:

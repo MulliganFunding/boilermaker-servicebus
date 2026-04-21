@@ -1,6 +1,6 @@
 import re
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import datetime, UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

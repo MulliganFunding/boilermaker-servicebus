@@ -117,6 +117,15 @@ def _add_purge_subparser(subparsers: argparse._SubParsersAction) -> None:  # noq
         help="Delete blobs last modified more than DAYS days ago (1–30 inclusive)",
     )
     purge_parser.add_argument("--dry-run", action="store_true", help="Print what would be deleted without deleting")
+    purge_parser.add_argument(
+        "--all-graphs",
+        action="store_true",
+        default=False,
+        help=(
+            "Discover graphs by listing all graph-id prefixes and using UUID7 temporal ordering "
+            "instead of tag-based filtering. Use for containers with pre-tag blobs."
+        ),
+    )
 
 
 def _add_invoke_subparser(subparsers: argparse._SubParsersAction) -> None:  # noqa: SLF001
@@ -219,6 +228,7 @@ def main() -> None:
                     storage,
                     older_than_days=args.older_than,
                     dry_run=args.dry_run,
+                    all_graphs=getattr(args, "all_graphs", False),
                     console=console,
                 )
             if args.command == "invoke":

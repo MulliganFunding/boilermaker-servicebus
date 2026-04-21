@@ -10,7 +10,7 @@ from boilermaker.cli import build_parser
 from boilermaker.cli._globals import EXIT_ERROR, EXIT_HEALTHY, EXIT_STALLED
 from boilermaker.cli._output import _short_task_id, format_graph_table
 from boilermaker.cli.inspect import run_inspect
-from boilermaker.cli.purge import _stream_eligible_graphs, _validate_older_than, run_purge
+from boilermaker.cli.purge import _stream_all_graphs, _stream_eligible_graphs, _validate_older_than, run_purge
 from boilermaker.cli.recover import run_recover
 from boilermaker.task import Task, TaskGraph, TaskResultSlim, TaskStatus
 from boilermaker.task.task_id import TaskId
@@ -1093,7 +1093,7 @@ class TestDualPathPurge:
 
         cutoff = datetime.now(UTC) - timedelta(days=7)
         yielded = []
-        async for graph_id, blobs in _stream_eligible_graphs(storage, cutoff):
+        async for graph_id, _blobs in _stream_eligible_graphs(storage, cutoff):
             yielded.append(graph_id)
 
         assert sorted(yielded) == ["graph-1", "graph-2"]
@@ -1118,7 +1118,7 @@ class TestDualPathPurge:
 
         cutoff = datetime.now(UTC) - timedelta(days=7)
         yielded = []
-        async for graph_id_out, blobs in _stream_eligible_graphs(storage, cutoff):
+        async for graph_id_out, _blobs in _stream_eligible_graphs(storage, cutoff):
             yielded.append(graph_id_out)
 
         assert yielded == ["untagged-graph"]
@@ -1149,7 +1149,7 @@ class TestDualPathPurge:
 
         cutoff = datetime.now(UTC) - timedelta(days=7)
         yielded = []
-        async for graph_id_out, blobs in _stream_eligible_graphs(storage, cutoff):
+        async for graph_id_out, _blobs in _stream_eligible_graphs(storage, cutoff):
             yielded.append(graph_id_out)
 
         # The graph appears from both tag query and untagged scan, but
@@ -1180,7 +1180,7 @@ class TestDualPathPurge:
 
         cutoff = datetime.now(UTC) - timedelta(days=7)
         yielded = []
-        async for graph_id_out, blobs in _stream_eligible_graphs(storage, cutoff):
+        async for graph_id_out, _blobs in _stream_eligible_graphs(storage, cutoff):
             yielded.append(graph_id_out)
 
         assert yielded == []
@@ -1201,10 +1201,229 @@ class TestDualPathPurge:
         cutoff = datetime.now(UTC) - timedelta(days=7)
         with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
             yielded = []
-            async for graph_id_out, group_blobs in _stream_eligible_graphs(storage, cutoff):
+            async for graph_id_out, _group_blobs in _stream_eligible_graphs(storage, cutoff):
                 yielded.append(graph_id_out)
 
         # Fallback path should still discover the graph
         assert yielded == [graph_id]
         # Warning about find_blobs_by_tags failure should be logged
         assert any("find_blobs_by_tags failed" in record.message for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _stream_all_graphs: UUID7-based graph discovery
+# ---------------------------------------------------------------------------
+
+
+def _make_uuid7_str(ts_ms: int) -> str:
+    """Construct a valid UUID7 string with a specific millisecond timestamp.
+
+    UUID7 layout: 48-bit ms timestamp | 4-bit version (0x7) | 12-bit rand
+                  | 2-bit variant (0b10) | 62-bit rand.
+    """
+    import random as _rng
+
+    rand_a = _rng.getrandbits(12)
+    rand_b = _rng.getrandbits(62)
+    uuid_int = (ts_ms << 80) | (0x7 << 76) | (rand_a << 64) | (0b10 << 62) | rand_b
+    h = f"{uuid_int:032x}"
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+
+
+class TestStreamAllGraphs:
+    """Tests for the _stream_all_graphs async generator."""
+
+    def _make_storage_with_blobs(self, blob_list: list) -> mock.AsyncMock:
+        """Build a minimal storage mock for _stream_all_graphs."""
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+        storage.list_blobs = lambda prefix: _async_gen(blob_list)
+        return storage
+
+    async def test_old_uuid7_graphs_are_yielded(self):
+        """Blobs whose graph_id is a UUID7 with a timestamp before cutoff are yielded."""
+        old_ts_ms = int((datetime.now(UTC) - timedelta(days=10)).timestamp() * 1000)
+        old_uuid = _make_uuid7_str(old_ts_ms)
+
+        blobs = [
+            _make_blob(f"task-results/{old_uuid}/graph.json", _old(10)),
+            _make_blob(f"task-results/{old_uuid}/task-1.json", _old(10)),
+        ]
+        storage = self._make_storage_with_blobs(blobs)
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        yielded = []
+        async for graph_id, group_blobs in _stream_all_graphs(storage, cutoff):
+            yielded.append((graph_id, group_blobs))
+
+        assert len(yielded) == 1
+        assert yielded[0][0] == old_uuid
+        assert len(yielded[0][1]) == 2
+
+    async def test_early_exit_on_recent_uuid7(self):
+        """When a recent UUID7 graph_id is encountered, the generator stops early."""
+        old_ts_ms = int((datetime.now(UTC) - timedelta(days=10)).timestamp() * 1000)
+        old_uuid = _make_uuid7_str(old_ts_ms)
+
+        new_ts_ms = int(datetime.now(UTC).timestamp() * 1000)
+        new_uuid = _make_uuid7_str(new_ts_ms)
+
+        # UUID7s are lexicographically ordered by time, so old comes first
+        blobs = [
+            _make_blob(f"task-results/{old_uuid}/graph.json", _old(10)),
+            _make_blob(f"task-results/{old_uuid}/task-1.json", _old(10)),
+            _make_blob(f"task-results/{new_uuid}/graph.json", _new(0)),
+            _make_blob(f"task-results/{new_uuid}/task-1.json", _new(0)),
+        ]
+        storage = self._make_storage_with_blobs(blobs)
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        yielded = []
+        async for graph_id, _group_blobs in _stream_all_graphs(storage, cutoff):
+            yielded.append(graph_id)
+
+        # Only the old graph should be yielded; the new one triggers early exit
+        assert len(yielded) == 1
+        assert yielded[0] == old_uuid
+
+    async def test_empty_container(self):
+        """No blobs yields nothing."""
+        storage = self._make_storage_with_blobs([])
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        yielded = []
+        async for graph_id, _group_blobs in _stream_all_graphs(storage, cutoff):
+            yielded.append(graph_id)
+
+        assert yielded == []
+
+    async def test_non_uuid_graph_id_is_skipped(self, caplog):
+        """A non-UUID graph_id is skipped with a warning, not a crash."""
+        import logging
+
+        old_ts_ms = int((datetime.now(UTC) - timedelta(days=10)).timestamp() * 1000)
+        old_uuid = _make_uuid7_str(old_ts_ms)
+
+        # "not-a-uuid" sorts lexicographically before UUID7 strings starting with "0"
+        blobs = [
+            _make_blob("task-results/not-a-uuid/graph.json", _old(10)),
+            _make_blob(f"task-results/{old_uuid}/graph.json", _old(10)),
+        ]
+        storage = self._make_storage_with_blobs(blobs)
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
+            yielded = []
+            async for graph_id, _group_blobs in _stream_all_graphs(storage, cutoff):
+                yielded.append(graph_id)
+
+        # The non-UUID graph is skipped; the old UUID graph is yielded
+        assert old_uuid in yielded
+        assert "not-a-uuid" not in yielded
+        # Warning should be logged about the unparseable graph_id
+        assert any("not-a-uuid" in record.message for record in caplog.records)
+
+    async def test_all_graphs_newer_than_cutoff(self):
+        """All graph_ids have UUID7 timestamps >= cutoff. Nothing is yielded."""
+        new_ts_ms = int(datetime.now(UTC).timestamp() * 1000)
+        new_uuid = _make_uuid7_str(new_ts_ms)
+
+        blobs = [
+            _make_blob(f"task-results/{new_uuid}/graph.json", _new(0)),
+            _make_blob(f"task-results/{new_uuid}/task-1.json", _new(0)),
+        ]
+        storage = self._make_storage_with_blobs(blobs)
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        yielded = []
+        async for graph_id, _group_blobs in _stream_all_graphs(storage, cutoff):
+            yielded.append(graph_id)
+
+        assert yielded == []
+
+
+# ---------------------------------------------------------------------------
+# Purge: --all-graphs argument parsing
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeAllGraphsArgumentParsing:
+    def test_all_graphs_flag_is_parsed(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--storage-url", "https://example.blob.core.windows.net",
+            "--container", "my-container",
+            "purge",
+            "--task-results",
+            "--older-than", "7",
+            "--all-graphs",
+        ])
+        assert args.all_graphs is True
+
+    def test_all_graphs_default_is_false(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--storage-url", "https://example.blob.core.windows.net",
+            "--container", "my-container",
+            "purge",
+            "--task-results",
+            "--older-than", "7",
+        ])
+        assert args.all_graphs is False
+
+    def test_all_graphs_combines_with_dry_run(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--storage-url", "https://example.blob.core.windows.net",
+            "--container", "my-container",
+            "purge",
+            "--task-results",
+            "--older-than", "7",
+            "--all-graphs",
+            "--dry-run",
+        ])
+        assert args.all_graphs is True
+        assert args.dry_run is True
+
+
+# ---------------------------------------------------------------------------
+# run_purge: --all-graphs routing
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeAllGraphsRouting:
+    """Verify run_purge selects the correct graph stream based on all_graphs."""
+
+    async def test_all_graphs_true_uses_stream_all_graphs(self):
+        """When all_graphs=True, _stream_all_graphs is called."""
+        storage = _make_purge_storage(blob_list=[])
+
+        async def _empty_gen(*args, **kwargs):
+            return
+            yield  # make it an async generator
+
+        with (
+            mock.patch("boilermaker.cli.purge._stream_all_graphs", side_effect=_empty_gen) as mock_all,
+            mock.patch("boilermaker.cli.purge._stream_eligible_graphs", side_effect=_empty_gen) as mock_eligible,
+        ):
+            await run_purge(storage, older_than_days=7, all_graphs=True)
+
+        mock_all.assert_called_once()
+        mock_eligible.assert_not_called()
+
+    async def test_all_graphs_false_uses_stream_eligible_graphs(self):
+        """When all_graphs=False (default), _stream_eligible_graphs is called."""
+        storage = _make_purge_storage(blob_list=[])
+
+        async def _empty_gen(*args, **kwargs):
+            return
+            yield  # make it an async generator
+
+        with (
+            mock.patch("boilermaker.cli.purge._stream_all_graphs", side_effect=_empty_gen) as mock_all,
+            mock.patch("boilermaker.cli.purge._stream_eligible_graphs", side_effect=_empty_gen) as mock_eligible,
+        ):
+            await run_purge(storage, older_than_days=7, all_graphs=False)
+
+        mock_eligible.assert_called_once()
+        mock_all.assert_not_called()
