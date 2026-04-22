@@ -104,19 +104,30 @@ def _add_recover_subparser(subparsers: argparse._SubParsersAction) -> None:  # n
 def _add_purge_subparser(subparsers: argparse._SubParsersAction) -> None:  # noqa: SLF001
     purge_parser = subparsers.add_parser("purge", help="Delete old task-result blobs from Azure Blob Storage")
     purge_parser.add_argument(
-        "--task-results",
-        action="store_true",
-        required=True,
-        help="Purge task-result blobs (required for explicitness)",
-    )
-    purge_parser.add_argument(
         "--older-than",
         required=True,
         type=_validate_older_than,
         metavar="DAYS",
-        help="Delete blobs last modified more than DAYS days ago (1–30 inclusive)",
+        help=(
+            "Delete graphs older than DAYS days, based on created_date tags "
+            "(or UUID7 timestamps when --all-graphs is used) (1–30 inclusive)"
+        ),
     )
     purge_parser.add_argument("--dry-run", action="store_true", help="Print what would be deleted without deleting")
+    purge_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Delete graphs that have in-progress tasks",
+    )
+    purge_parser.add_argument(
+        "--all-graphs",
+        action="store_true",
+        default=False,
+        help=(
+            "Discover graphs by listing all graph-id prefixes and using UUID7 temporal ordering "
+            "instead of tag-based filtering. Use for containers with pre-tag blobs."
+        ),
+    )
 
 
 def _add_invoke_subparser(subparsers: argparse._SubParsersAction) -> None:  # noqa: SLF001
@@ -219,6 +230,8 @@ def main() -> None:
                     storage,
                     older_than_days=args.older_than,
                     dry_run=args.dry_run,
+                    all_graphs=getattr(args, "all_graphs", False),
+                    force=getattr(args, "force", False),
                     console=console,
                 )
             if args.command == "invoke":

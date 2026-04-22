@@ -268,46 +268,40 @@ class TestRecoverSubcommand:
 class TestPurgeSubcommand:
     def test_purge_parses_required_args(self):
         parser = build_parser()
-        args = parser.parse_args([
-            *_GLOBAL_OPTS,
-            "purge",
-            "--task-results",
-            "--older-than", "7",
-        ])
+        args = parser.parse_args(
+            [
+                *_GLOBAL_OPTS,
+                "purge",
+                "--older-than",
+                "7",
+            ]
+        )
         assert args.command == "purge"
-        assert args.task_results is True
         assert args.older_than == 7
         assert args.dry_run is False
 
     def test_purge_dry_run_flag_parses(self):
         parser = build_parser()
-        args = parser.parse_args([
-            *_GLOBAL_OPTS,
-            "purge",
-            "--task-results",
-            "--older-than", "7",
-            "--dry-run",
-        ])
-        assert args.dry_run is True
-
-    def test_purge_without_task_results_is_error(self):
-        parser = build_parser()
-        with pytest.raises(SystemExit) as exc_info:
-            parser.parse_args([
+        args = parser.parse_args(
+            [
                 *_GLOBAL_OPTS,
                 "purge",
-                "--older-than", "7",
-            ])
-        assert exc_info.value.code == 2
+                "--older-than",
+                "7",
+                "--dry-run",
+            ]
+        )
+        assert args.dry_run is True
 
     def test_purge_without_older_than_is_error(self):
         parser = build_parser()
         with pytest.raises(SystemExit) as exc_info:
-            parser.parse_args([
-                *_GLOBAL_OPTS,
-                "purge",
-                "--task-results",
-            ])
+            parser.parse_args(
+                [
+                    *_GLOBAL_OPTS,
+                    "purge",
+                ]
+            )
         assert exc_info.value.code == 2
 
 
