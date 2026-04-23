@@ -222,13 +222,14 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     # No other worker holds Started yet — retry the CAS with the
                     # re-read etag.
                     #
-                    # Scheduled: normal publish-before-store window; scheduler wrote
-                    #   Scheduled and released its lease before this worker consumed
-                    #   the SB message.
-                    # Pending:   lease acquire bumped the blob ETag (Azure advances the
-                    #   ETag on BlobLeaseClient.acquire() even without a content write)
-                    #   but the scheduler has not yet written Scheduled (or
-                    #   WriteScheduledFail left the blob Pending).  Either way no other
+                    # Scheduled: normal publish-before-store window; the scheduler's
+                    #   Scheduled content write (E→E+1) raced with this worker's
+                    #   initial Started write.
+                    # Pending:   the scheduler acquired the lease (Azure does NOT
+                    #   advance ETag on lease acquire) and published to SB, but has
+                    #   not yet written Scheduled — or WriteScheduledFail left the
+                    #   blob Pending.  The content write that bumped the ETag was
+                    #   something other than a lease operation.  Either way no other
                     #   worker holds Started, so this worker is the legitimate claimant.
                     #
                     # Spec action: WriteStarted412 (Scheduled/Pending branch) →
@@ -340,23 +341,29 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                 )
                             else:
                                 # Pending, Scheduled, None, or any other unclaimed state:
-                                # no other worker holds Started.  Do NOT settle — let the
-                                # SB lock expire so a fresh worker can retry from scratch.
-                                # Spec action: RereadAfterRetry412 (Pending/Scheduled) → no-settle
+                                # no other worker holds Started.  Abandon for immediate
+                                # redelivery — a fresh delivery will pre-read the current
+                                # ETag and succeed without hitting the two-412 window.
+                                # Spec action: RereadAfterRetry412 (Pending/Scheduled) → abandon
                                 _reread2_status = _reread2.status if _reread2 is not None else None
                                 logger.error(
                                     f"Two 412s on Started write; second re-read returned "
                                     f"{_reread2_status!r} "
                                     f"for task {self.task.task_id}. "
-                                    "Not settling — SB will redeliver.",
+                                    "Abandoning for immediate redelivery.",
                                 )
+                                try:
+                                    await self.abandon_current_message()
+                                except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                                    logger.warning(
+                                        f"Failed to abandon message after two 412s for task "
+                                        f"{self.task.task_id}; SB will redeliver when lock expires",
+                                        exc_info=True,
+                                    )
                                 return TaskResult(
                                     task_id=self.task.task_id,
                                     graph_id=self.task.graph_id,
-                                    status=TaskStatus.Failure,
-                                    errors=[
-                                        f"two 412s on Started write; second re-read returned {_reread2_status!r}"
-                                    ],
+                                    status=TaskStatus.Scheduled,
                                 )
                 elif _reread.status == TaskStatus.Retry:
                     # Another worker executed the task and published a delayed retry
