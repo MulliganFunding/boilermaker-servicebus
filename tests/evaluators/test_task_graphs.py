@@ -2075,14 +2075,14 @@ async def test_412_scheduled_retry_second_412_sees_terminal_settles(evaluator_co
 
 
 @pytest.mark.parametrize("second_reread_value", [None, "scheduled", "pending"])
-async def test_412_scheduled_retry_second_412_sees_unclaimed_does_not_settle(
+async def test_412_scheduled_retry_second_412_sees_unclaimed_abandons(
     evaluator_context, mock_storage, second_reread_value
 ):
     """When the retry Started write gets a second 412 and the second re-read returns an
-    unclaimed status (None, Scheduled, Pending), the handler does NOT call complete_message
-    — it lets the SB lock expire for redelivery instead of permanently stalling the graph.
+    unclaimed status (None, Scheduled, Pending), the handler abandons for immediate redelivery
+    — it does NOT call complete_message, which would permanently stall the graph.
 
-    Spec action: RereadAfterRetry412 (Pending/Scheduled) → RereadAfterRetryNoSettle.
+    Spec action: RereadAfterRetry412 (Pending/Scheduled) → abandon.
     Parameterized over: None, Scheduled, Pending second re-reads.
     """
     from unittest.mock import patch
@@ -2538,9 +2538,9 @@ async def test_non_412_started_write_error_falls_through_to_execution(evaluator_
 # ----- 412 + re-read also fails (lines 152-158) -----
 
 
-async def test_412_started_write_reread_also_fails_returns_failure(evaluator_context, mock_storage):
+async def test_412_started_write_reread_also_fails_abandons(evaluator_context, mock_storage):
     """When the Started write gets a 412 and the re-read also raises a storage error,
-    the evaluator must return Failure without settling (lines 152-158).
+    the evaluator abandons for immediate redelivery and returns Scheduled.
     """
     from unittest.mock import patch
 
@@ -2702,9 +2702,9 @@ async def test_412_reread_with_none_etag_logs_warning_and_retries(evaluator_cont
 # ----- Second 412 paths (lines 275-283, 290-291, 306-307, 324-336) -----
 
 
-async def test_second_412_reread_also_fails_returns_failure_no_settle(evaluator_context, mock_storage):
+async def test_second_412_reread_also_fails_abandons(evaluator_context, mock_storage):
     """When the second 412 + second re-read also raises a storage error, _reread2 is set
-    to None and the evaluator returns Failure without settling (lines 275-283).
+    to None and the evaluator abandons for immediate redelivery and returns Scheduled.
     """
     from unittest.mock import patch
 

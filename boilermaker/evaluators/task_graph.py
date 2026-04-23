@@ -68,7 +68,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         self.storage_interface: StorageInterface = storage_interface
 
     def _graph_tag(self) -> str:
-        return f"[Graph<{self.task.graph_id}>]" if self.task.graph_id else "[Graph<?>]"
+        return f"[Graph {self.task.graph_id}]" if self.task.graph_id else "[Graph ?]"
 
     def _task_tag(self, task: Task) -> str:
         return f"{task.function_name}[{task.task_id}]"
@@ -299,11 +299,11 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                     self.task.task_id, self.task.graph_id
                                 )
                             except exc.BoilermakerStorageError:
-                                # Blob state unknown — do NOT settle.  Let the SB lock
-                                # expire and redeliver so a fresh worker can retry.
+                                # Blob state unknown — abandon for immediate redelivery.
+                                # Falls through to the else branch below which calls abandon.
                                 logger.error(
                                     f"{_graph_tag} Second 412 + re-read also failed for task {_task_tag}; "
-                                    "not settling — SB will redeliver",
+                                    "abandoning for immediate redelivery",
                                     exc_info=True,
                                 )
                                 _reread2 = None
@@ -467,7 +467,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 )
 
         if not self.task.can_retry:
-            logger.error(f"{_graph_tag} Retries exhausted for {self.task.function_name}")
+            logger.error(f"{_graph_tag} Retries exhausted for {_task_tag}")
             if not message_settled:
                 try:
                     await self.deadletter_or_complete_task("ProcessingError", detail="Retries exhausted")
@@ -547,7 +547,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             delay = self.task.get_next_delay()
             retry_msg_id = f"{self.task.task_id}:{self.task.attempts.attempts}"
             warn_msg = (
-                f"{_graph_tag} {result.errors} {_task_tag}"
+                f"{_graph_tag} {result.errors} {_task_tag} "
                 f"[attempt {self.task.attempts.attempts} of {self.task.policy.max_tries}] "
                 f"Publishing retry... {self.sequence_number=} "
                 f"<function={self.task.function_name}> with {delay=} {retry_msg_id=}"
@@ -743,8 +743,9 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
 
         try:
             # Publish task to SB (message_id = task_id for fan-in dedup).
+            _task_tag = self._task_tag(task)
             await self.publish_task(task)
-            logger.info(f"[Graph {graph_id}] Published task {task.task_id}")
+            logger.info(f"[Graph {graph_id}] Published task {_task_tag}")
 
             # Write Scheduled status under the held lease. The lease prevents a
             # racing worker (that picked up the just-published SB message) from
@@ -754,15 +755,15 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 await self.storage_interface.store_task_result(result, lease_id=lease_id)
             except exc.BoilermakerStorageError as err:
                 logger.warning(
-                    f"[Graph {graph_id}] Failed to write Scheduled for task {task.task_id}. "
+                    f"[Graph {graph_id}] Failed to write Scheduled for task {_task_tag}. "
                     f"Task published to Service Bus. Error: {err}",
                     exc_info=True,
                 )
                 return True  # published successfully, blob write failed
             except ValueError:
                 logger.error(
-                    f"[Graph {graph_id}] schedule_task raised ValueError for task "
-                    f"{task.task_id}. Task published; blob write skipped.",
+                    f"[Graph {graph_id}] schedule_task raised ValueError for task {_task_tag}. "
+                    f"Task published; blob write skipped.",
                     exc_info=True,
                 )
                 return True  # published successfully, schedule_task rejected it
@@ -771,7 +772,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
 
         except Exception:
             logger.error(
-                f"[Graph {graph_id}] Failed to publish task {task.task_id}; remains Pending, will retry on redelivery.",
+                f"[Graph {graph_id}] Failed to publish task {_task_tag}; remains Pending, will retry on redelivery.",
                 exc_info=True,
             )
             return False
