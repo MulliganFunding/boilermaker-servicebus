@@ -6,13 +6,12 @@ import pytest
 from boilermaker.cli._mermaid import (
     _node_class,
     _sanitize_id,
-    _short_task_id,
     build_task_data_json,
     generate_mermaid,
 )
 from boilermaker.task import Task, TaskGraph, TaskStatus
 from boilermaker.task.result import TaskResult, TaskResultSlim
-from boilermaker.task.task_id import TaskId
+from boilermaker.task.task_id import TaskId, truncate_task_id
 
 
 # Helper to look up an entry in the dict-keyed task data JSON by function name.
@@ -72,21 +71,6 @@ class TestSanitizeId:
     def test_no_hyphens_unchanged(self):
         tid = TaskId("abcdef123")
         assert _sanitize_id(tid) == "abcdef123"
-
-
-# ---------------------------------------------------------------------------
-# TestShortTaskId
-# ---------------------------------------------------------------------------
-
-
-class TestShortTaskId:
-    def test_returns_last_12_chars(self):
-        tid = TaskId("0192f5e0-abcd-7def-8901-234567890abc")
-        assert _short_task_id(tid) == "234567890abc"
-
-    def test_short_id_returned_as_is(self):
-        tid = TaskId("short")
-        assert _short_task_id(tid) == "short"
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +447,7 @@ class TestTaskIdSanitization:
         assert "-" not in sanitized
         assert sanitized in mermaid
         # Last 12 chars of original ID are in the label
-        assert _short_task_id(a.task_id) in mermaid
+        assert truncate_task_id(a.task_id) in mermaid
 
 
 # ---------------------------------------------------------------------------

@@ -9,13 +9,7 @@ from rich.table import Table
 from rich.text import Text
 
 from boilermaker.task import TaskGraph, TaskStatus
-from boilermaker.task.task_id import TaskId
-
-
-def _short_task_id(task_id: TaskId) -> str:
-    """Return the last 12 characters of a task ID for compact display."""
-    full = str(task_id)
-    return full[-12:] if len(full) > 12 else full
+from boilermaker.task.task_id import TaskId, truncate_task_id
 
 
 def status_style(status: TaskStatus, is_stalled: bool) -> tuple[str, str]:
@@ -108,7 +102,7 @@ def render_task_table(graph: TaskGraph) -> Table:
                 type_text = Text(task_type)
 
             table.add_row(
-                f"...{_short_task_id(task_id)}",
+                truncate_task_id(task_id),
                 task.function_name,
                 status_text,
                 type_text,
@@ -258,7 +252,7 @@ def render_task_detail(graph: TaskGraph, task_id: TaskId) -> Panel:
     detail.append("Dependents:   ", style="bold")
     detail.append(", ".join(sorted(dependents)) if dependents else "(none)")
 
-    return Panel(detail, title=f"Task: ...{_short_task_id(task_id)}")
+    return Panel(detail, title=f"Task: {truncate_task_id(task_id)}")
 
 
 def format_graph_table(graph: TaskGraph) -> str:

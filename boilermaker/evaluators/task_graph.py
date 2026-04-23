@@ -73,7 +73,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         self.storage_interface: StorageInterface = storage_interface
 
     def _graph_tag(self) -> str:
-        return f"Graph<{self.task.graph_id}>" if self.task.graph_id else "Graph<?>"
+        return f"[Graph(id={self.task.graph_id})]" if self.task.graph_id else "[Graph(id=<?>)]"
 
     async def _abandon_or_let_expire(self) -> None:
         """Abandon for fast redelivery while delivery_count <= _MAX_DELIVERY_COUNT_FOR_ABANDON.
@@ -633,7 +633,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 if getattr(e, "status_code", None) == 404:
                     # Permanent: graph blob does not exist. Redelivery will not help.
                     logger.critical(
-                        f"[Graph {graph_id}] not found in storage (404); downstream tasks will not be dispatched. "
+                        f"[Graph(id={graph_id})] not found in storage (404); downstream tasks will not be dispatched. "
                         "This graph may have been deleted.",
                         exc_info=True,
                     )
@@ -643,7 +643,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 if attempt < _LOAD_GRAPH_RETRY_POLICY.max_tries - 1:
                     delay = _LOAD_GRAPH_RETRY_POLICY.get_delay_interval(attempt)
                     logger.warning(
-                        f"[Graph {graph_id}] load_graph failed "
+                        f"[Graph(id={graph_id})] load_graph failed "
                         f"(attempt {attempt + 1}/{_LOAD_GRAPH_RETRY_POLICY.max_tries}); "
                         f"retrying in {delay}s",
                         exc_info=True,
@@ -651,23 +651,23 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     await asyncio.sleep(delay)
                 else:
                     logger.error(
-                        f"[Graph {graph_id}] load_graph failed after "
+                        f"[Graph(id={graph_id})] load_graph failed after "
                         f"{_LOAD_GRAPH_RETRY_POLICY.max_tries} attempts; "
                         "raising ContinueGraphError to suppress message settlement",
                         exc_info=True,
                     )
                     raise exc.ContinueGraphError(
-                        f"[Graph {graph_id}] load_graph failed after {_LOAD_GRAPH_RETRY_POLICY.max_tries} attempts"
+                        f"[Graph(id={graph_id})] load_graph failed after {_LOAD_GRAPH_RETRY_POLICY.max_tries} attempts"
                     ) from last_exc
         else:
             # Should only be reached if max_tries == 0 (not expected).
-            raise exc.ContinueGraphError(f"[Graph {graph_id}] load_graph not attempted")
+            raise exc.ContinueGraphError(f"[Graph(id={graph_id})] load_graph not attempted")
 
         if not graph:
             # Permanent failure: graph blob does not exist.  Redelivery will not help.
             # Settling the upstream message is intentional here.
             logger.critical(
-                f"[Graph {graph_id}] not found after task completion — "
+                f"[Graph(id={graph_id})] not found after task completion — "
                 "downstream tasks will never be dispatched. "
                 "This is a permanent data loss; redelivery will not recover it."
             )
@@ -678,12 +678,12 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         if loaded_task_status != completed_task_result.status:
 
             logger.error(
-                f"[Graph {graph_id}] Task status mismatch: "
+                f"[Graph(id={graph_id})] Task status mismatch: "
                 f"expected {completed_task_result.task_id} to be {completed_task_result.status}, "
                 f"but got {loaded_task_status}. Suppressing settlement to allow redelivery."
             )
             raise exc.ContinueGraphError(
-                f"[Graph {graph_id}] Status mismatch for task {completed_task_result.task_id}: "
+                f"[Graph(id={graph_id})] Status mismatch for task {completed_task_result.task_id}: "
                 f"expected {completed_task_result.status}, got {loaded_task_status}"
             )
 
@@ -702,7 +702,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 ready_count += 1
 
         if ready_count == 0:
-            logger.debug(f"[Graph {graph_id}] No new tasks ready after task {completed_task_result.task_id}")
+            logger.debug(f"[Graph(id={graph_id})] No new tasks ready after task {completed_task_result.task_id}")
 
         return ready_count
 
@@ -738,23 +738,21 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             )
         except exc.BoilermakerStorageError:
             logger.warning(
-                f"Graph<{graph_id}> try_acquire_lease raised unexpected error for task "
-                f"{task.task_id}; skipping — will be retried on redelivery.",
+                f"[{graph}] try_acquire_lease raised unexpected error for task "
+                f"{task}; skipping — will be retried on redelivery.",
                 exc_info=True,
             )
             return False
         if lease_id is None:
             logger.debug(
-                f"Graph<{graph_id}> Skipping task {task.task_id}: "
-                "lease not acquired (another worker holds it or blob was modified)."
+                f"[{graph}] Skipping task {task}: lease not acquired (another worker holds it or blob was modified)."
             )
             return False
 
         try:
             # Publish task to SB (message_id = task_id for fan-in dedup).
-            _task_tag = str(task)
             await self.publish_task(task)
-            logger.info(f"Graph<{graph_id}> Published {_task_tag}")
+            logger.info(f"[{graph}] Published {task}")
 
             # Write Scheduled status under the held lease. The lease prevents a
             # racing worker (that picked up the just-published SB message) from
@@ -764,15 +762,13 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 await self.storage_interface.store_task_result(result, lease_id=lease_id)
             except exc.BoilermakerStorageError as err:
                 logger.warning(
-                    f"Graph<{graph_id}> Failed to write Scheduled for {_task_tag}. "
-                    f"Task published to Service Bus. Error: {err}",
+                    f"[{graph}] Failed to write Scheduled for {task}. Task published to Service Bus. Error: {err}",
                     exc_info=True,
                 )
                 return True  # published successfully, blob write failed
             except ValueError:
                 logger.error(
-                    f"Graph<{graph_id}> schedule_task raised ValueError for {_task_tag}. "
-                    f"Task published; blob write skipped.",
+                    f"[{graph}] schedule_task raised ValueError for {task}. Task published; blob write skipped.",
                     exc_info=True,
                 )
                 return True  # published successfully, schedule_task rejected it
@@ -781,7 +777,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
 
         except Exception:
             logger.error(
-                f"Graph<{graph_id}> Failed to publish {_task_tag}; remains Pending, will retry on redelivery.",
+                f"[{graph}] Failed to publish {task}; remains Pending, will retry on redelivery.",
                 exc_info=True,
             )
             return False

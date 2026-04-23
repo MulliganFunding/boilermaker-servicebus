@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from boilermaker import retries, tracing
 
-from .task_id import GraphId, ident_field, TaskId
+from .task_id import GraphId, ident_field, TaskId, truncate_task_id
 from .types import TaskHandler
 
 logger = logging.getLogger(__name__)
@@ -210,6 +210,10 @@ class Task(BaseModel):
         return self.attempts.inc(now)
 
     def __str__(self) -> str:
+        truncated_id = truncate_task_id(self.task_id)
+        return f"[{self.function_name}(id={truncated_id})]"
+
+    def __repr__(self) -> str:
         return f"Task<{self.function_name}: {self.task_id}>"
 
     def __hash__(self) -> int:

@@ -8,12 +8,11 @@ from unittest import mock
 import pytest
 from boilermaker.cli import build_parser
 from boilermaker.cli._globals import EXIT_ERROR, EXIT_HEALTHY, EXIT_STALLED
-from boilermaker.cli._output import _short_task_id, format_graph_table
+from boilermaker.cli._output import format_graph_table
 from boilermaker.cli.inspect import run_inspect
 from boilermaker.cli.purge import _stream_all_graphs, _stream_eligible_graphs, _validate_older_than, run_purge
 from boilermaker.cli.recover import run_recover
 from boilermaker.task import Task, TaskGraph, TaskResultSlim, TaskStatus
-from boilermaker.task.task_id import TaskId
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,21 +47,6 @@ def _mock_storage(graph: TaskGraph | None = None) -> mock.AsyncMock:
     storage.load_graph = mock.AsyncMock(return_value=graph)
     storage.load_graph_slim_from_tags = mock.AsyncMock(return_value=graph)
     return storage
-
-
-# ---------------------------------------------------------------------------
-# _short_task_id
-# ---------------------------------------------------------------------------
-
-
-class TestShortTaskId:
-    def test_truncates_long_id(self):
-        tid = TaskId("019750a3-bfac-7e3a-b4cd-4c3102c9f3f2")
-        assert _short_task_id(tid) == "4c3102c9f3f2"
-
-    def test_preserves_short_id(self):
-        tid = TaskId("abcd1234")
-        assert _short_task_id(tid) == "abcd1234"
 
 
 # ---------------------------------------------------------------------------

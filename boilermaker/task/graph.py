@@ -80,6 +80,12 @@ class TaskGraph(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    def __str__(self) -> str:
+        return f"Graph(id={self.graph_id})"
+
+    def __repr__(self) -> str:
+        return f"TaskGraph<{self.graph_id}>"
+
     @classmethod
     def graph_path(cls, graph_id: GraphId) -> Path:
         """Returns the storage path for an arbitrary GraphId."""
