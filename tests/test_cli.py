@@ -1297,3 +1297,277 @@ class TestPurgeAllGraphsRouting:
 
         mock_eligible.assert_called_once()
         mock_all.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _validate_global_required_options (cli/__init__.py lines 162-168)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateGlobalRequiredOptions:
+    from boilermaker.cli import _validate_global_required_options
+
+    def test_missing_storage_url_calls_parser_error(self):
+        from boilermaker.cli import _validate_global_required_options
+
+        parser = build_parser()
+        args = parser.parse_args(["inspect", "--graph", "g"])
+        args.storage_url = None
+        args.container = "my-container"
+        with pytest.raises(SystemExit):
+            _validate_global_required_options(args, parser)
+
+    def test_missing_container_calls_parser_error(self):
+        from boilermaker.cli import _validate_global_required_options
+
+        parser = build_parser()
+        args = parser.parse_args(["inspect", "--graph", "g"])
+        args.storage_url = "https://x.blob.core.windows.net"
+        args.container = None
+        with pytest.raises(SystemExit):
+            _validate_global_required_options(args, parser)
+
+    def test_both_missing_calls_parser_error(self):
+        from boilermaker.cli import _validate_global_required_options
+
+        parser = build_parser()
+        args = parser.parse_args(["inspect", "--graph", "g"])
+        args.storage_url = None
+        args.container = None
+        with pytest.raises(SystemExit):
+            _validate_global_required_options(args, parser)
+
+    def test_both_present_does_not_raise(self):
+        from boilermaker.cli import _validate_global_required_options
+
+        parser = build_parser()
+        args = parser.parse_args(["inspect", "--graph", "g"])
+        args.storage_url = "https://x.blob.core.windows.net"
+        args.container = "c"
+        _validate_global_required_options(args, parser)  # no exception
+
+
+# ---------------------------------------------------------------------------
+# _validate_inspect_args: --visual requires --graph (cli/__init__.py line 179)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateInspectArgs:
+    def test_visual_without_graph_calls_parser_error(self):
+        from boilermaker.cli import _validate_inspect_args
+
+        parser = build_parser()
+        args = parser.parse_args(["inspect"])
+        args.graph = None
+        args.task = None
+        args.json = False
+        args.visual = True
+        with pytest.raises(SystemExit):
+            _validate_inspect_args(args, parser)
+
+    def test_visual_with_json_calls_parser_error(self):
+        from boilermaker.cli import _validate_inspect_args
+
+        parser = build_parser()
+        args = parser.parse_args(["inspect", "--graph", "g"])
+        args.json = True
+        args.visual = True
+        args.task = None
+        with pytest.raises(SystemExit):
+            _validate_inspect_args(args, parser)
+
+    def test_visual_with_task_calls_parser_error(self):
+        from boilermaker.cli import _validate_inspect_args
+
+        parser = build_parser()
+        args = parser.parse_args(["inspect", "--graph", "g"])
+        args.json = False
+        args.visual = True
+        args.task = "some-task-id"
+        with pytest.raises(SystemExit):
+            _validate_inspect_args(args, parser)
+
+
+# ---------------------------------------------------------------------------
+# run_recover: graph not found (cli/recover.py lines 46-47)
+# ---------------------------------------------------------------------------
+
+
+class TestRecoverGraphNotFound:
+    async def test_returns_error_when_graph_not_found(self, capsys):
+        storage = _mock_storage(graph=None)
+        code = await run_recover(
+            storage,
+            "missing-graph-id",
+            sb_namespace_url="https://test.servicebus.windows.net",
+            sb_queue_name="test-queue",
+        )
+        assert code == EXIT_ERROR
+        captured = capsys.readouterr()
+        assert "not found in storage" in captured.err
+
+    async def test_task_not_in_graph_is_skipped(self, capsys):
+        """If detect_stalled_tasks returns a task_id that isn't in children or
+        fail_children (defensive guard), it must be skipped with a message to stderr."""
+        from boilermaker.task.task_id import TaskId
+
+        graph, task_a, task_b, task_c = _make_graph_with_tasks()
+        _set_result(graph, task_a, TaskStatus.Success)
+        _set_result(graph, task_b, TaskStatus.Success)
+        _set_result(graph, task_c, TaskStatus.Success)
+
+        storage = _mock_storage(graph)
+        mock_sb = _mock_service_bus()
+
+        # Inject a phantom stalled task_id that doesn't exist in graph.children
+        phantom_id = TaskId("00000000-0000-0000-0000-phantom000001")
+        stalled = [(phantom_id, "phantom_fn", TaskStatus.Scheduled)]
+
+        with (
+            mock.patch("boilermaker.task.graph.TaskGraph.detect_stalled_tasks", return_value=stalled),
+            mock.patch("boilermaker.cli.recover.AzureServiceBus", return_value=mock_sb),
+        ):
+            code = await run_recover(
+                storage,
+                str(graph.graph_id),
+                sb_namespace_url="https://test.servicebus.windows.net",
+                sb_queue_name="test-queue",
+            )
+
+        assert code == EXIT_STALLED
+        captured = capsys.readouterr()
+        assert "SKIP" in captured.err
+        mock_sb.send_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _stream_all_graphs: early exit when current group is too recent (line 103)
+# ---------------------------------------------------------------------------
+
+
+class TestStreamAllGraphsEarlyExitOnRecentGroup:
+    def _make_storage(self, blobs):
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+        storage.list_blobs = lambda prefix: _async_gen(blobs)
+        return storage
+
+    async def test_early_exit_when_previous_group_is_too_recent(self):
+        """When flushing a group whose UUID7 timestamp >= cutoff, _stream_all_graphs
+        must return immediately (not yield it). This tests the `return` at line 103
+        inside the flush-previous-group branch."""
+        # new_uuid1 is just over the cutoff; new_uuid2 is even newer.
+        # When we transition from new_uuid1 to new_uuid2, we flush new_uuid1 and
+        # find it's >= cutoff → early exit, new_uuid1 is NOT yielded.
+        new_ts_ms = int(datetime.now(UTC).timestamp() * 1000)
+        new_uuid1 = _make_uuid7_str(new_ts_ms - 100)
+        new_uuid2 = _make_uuid7_str(new_ts_ms)
+
+        blobs = [
+            _make_blob(f"task-results/{new_uuid1}/graph.json", _new(0)),
+            _make_blob(f"task-results/{new_uuid2}/graph.json", _new(0)),
+        ]
+        storage = self._make_storage(blobs)
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        yielded = []
+        async for graph_id, _ in _stream_all_graphs(storage, cutoff):
+            yielded.append(graph_id)
+
+        assert yielded == []
+
+
+# ---------------------------------------------------------------------------
+# _stream_all_graphs: non-UUID7 in final flush (lines 119-125)
+# ---------------------------------------------------------------------------
+
+
+class TestStreamAllGraphsNonUuidFinalFlush:
+    def _make_storage(self, blobs):
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+        storage.list_blobs = lambda prefix: _async_gen(blobs)
+        return storage
+
+    async def test_non_uuid_final_group_is_skipped_with_warning(self, caplog):
+        """A non-UUID7 graph_id appearing as the LAST group (final flush after
+        the loop) must be skipped with a warning — not crash."""
+        import logging
+
+        # "zzz-not-a-uuid" sorts after all real UUID7 strings starting with "0"
+        blobs = [
+            _make_blob("task-results/zzz-not-a-uuid/graph.json", _old(10)),
+        ]
+        storage = self._make_storage(blobs)
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
+            yielded = []
+            async for graph_id, _ in _stream_all_graphs(storage, cutoff):
+                yielded.append(graph_id)
+
+        assert yielded == []
+        assert any("zzz-not-a-uuid" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# run_purge: BoilermakerStorageError from load_graph (lines 214-216)
+# run_purge: graph is None from load_graph (lines 219-220)
+# run_purge: force=True with in-progress graphs (line 236)
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeLoadGraphEdgeCases:
+    def _make_graph_blob(self, graph_id: str) -> mock.MagicMock:
+        return _make_blob(f"task-results/{graph_id}/graph.json", _old(10))
+
+    async def test_load_graph_storage_error_skips_graph(self, capsys):
+        """BoilermakerStorageError from load_graph must skip that graph with a
+        SKIP message to stderr and continue processing others."""
+        from boilermaker.exc import BoilermakerStorageError
+
+        graph_id = "019d8c0c-bd9b-7c23-be84-4d0799d7ecd5"
+        blobs = [self._make_graph_blob(graph_id)]
+        storage = _make_purge_storage(blob_list=blobs)
+        storage.load_graph = mock.AsyncMock(
+            side_effect=BoilermakerStorageError(
+                "load failed", status_code=503, reason="Service Unavailable"
+            )
+        )
+
+        code = await run_purge(storage, older_than_days=7)
+        assert code == EXIT_HEALTHY
+        captured = capsys.readouterr()
+        assert "SKIP" in captured.err
+        assert "failed to load graph" in captured.err
+
+    async def test_load_graph_returns_none_skips_graph(self, capsys):
+        """None returned by load_graph (graph.json missing or unreadable) must
+        skip that graph with a SKIP message to stderr."""
+        graph_id = "019d8c0c-bd9b-7c23-be84-4d0799d7ecd6"
+        blobs = [self._make_graph_blob(graph_id)]
+        storage = _make_purge_storage(blob_list=blobs, graph=None)
+
+        code = await run_purge(storage, older_than_days=7)
+        assert code == EXIT_HEALTHY
+        captured = capsys.readouterr()
+        assert "SKIP" in captured.err
+
+    async def test_force_true_deletes_in_progress_graphs(self):
+        """With force=True, graphs with in-progress tasks must be added to the
+        eligible list and their blobs deleted."""
+        graph = TaskGraph()
+        task = Task.default("work")
+        graph.add_task(task)
+        _set_result(graph, task, TaskStatus.Started)
+        graph_id = str(graph.graph_id)
+
+        blobs = [
+            _make_blob(f"task-results/{graph_id}/graph.json", _old(10)),
+            _make_blob(f"task-results/{graph_id}/task-1.json", _old(10)),
+        ]
+        storage = _make_purge_storage(blob_list=blobs, graph=graph)
+
+        code = await run_purge(storage, older_than_days=7, force=True)
+        assert code == EXIT_HEALTHY
+        storage.delete_blobs_batch.assert_called()
