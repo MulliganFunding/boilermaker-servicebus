@@ -106,9 +106,17 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 except exc.ContinueGraphError:
                     logger.error(
                         f"continue_graph failed on redelivery for task {self.task.task_id}; "
-                        "suppressing settlement to allow redelivery",
+                        "abandoning for immediate redelivery",
                         exc_info=True,
                     )
+                    try:
+                        await self.abandon_current_message()
+                    except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                        logger.warning(
+                            f"Failed to abandon message after continue_graph redelivery failure "
+                            f"for task {self.task.task_id}; SB will redeliver when lock expires",
+                            exc_info=True,
+                        )
                     return _terminal_result
                 try:
                     await self.complete_message()
@@ -152,14 +160,21 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 except exc.BoilermakerStorageError:
                     logger.error(
                         f"412 on Started write and re-read also failed for task {self.task.task_id}; "
-                        "returning Failure to avoid stalling graph",
+                        "abandoning for immediate redelivery",
                         exc_info=True,
                     )
+                    try:
+                        await self.abandon_current_message()
+                    except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                        logger.warning(
+                            f"Failed to abandon message after 412+re-read failure for task "
+                            f"{self.task.task_id}; SB will redeliver when lock expires",
+                            exc_info=True,
+                        )
                     return TaskResult(
                         task_id=self.task.task_id,
                         graph_id=self.task.graph_id,
-                        status=TaskStatus.Failure,
-                        errors=["412 on Started write; re-read failed"],
+                        status=TaskStatus.Scheduled,
                     )
 
                 if _reread is None:
@@ -390,20 +405,25 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
 
                 else:
                     # Truly unexpected status after 412 (not None, finished, Started,
-                    # Scheduled, Pending, or Retry).  Do NOT settle — we don't know
-                    # whether another worker will continue the graph, so stalling here
-                    # is safer than consuming the message and orphaning the task.
-                    # Let the SB lock expire so a fresh worker can retry from scratch.
+                    # Scheduled, Pending, or Retry) — this branch should be unreachable
+                    # for all currently defined statuses.  Abandon for immediate redelivery.
                     logger.error(
                         f"412 on Started write but re-read returned unexpected status "
                         f"{_reread.status!r} for task {self.task.task_id}; "
-                        "not settling — SB will redeliver."
+                        "abandoning for immediate redelivery."
                     )
+                    try:
+                        await self.abandon_current_message()
+                    except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                        logger.warning(
+                            f"Failed to abandon message after 412+unexpected status for task "
+                            f"{self.task.task_id}; SB will redeliver when lock expires",
+                            exc_info=True,
+                        )
                     return TaskResult(
                         task_id=self.task.task_id,
                         graph_id=self.task.graph_id,
-                        status=TaskStatus.Failure,
-                        errors=[f"412 on Started write; re-read returned unexpected status {_reread.status!r}"],
+                        status=_reread.status,
                     )
 
         # We successfully wrote Started — we own execution from here.
@@ -495,13 +515,22 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             try:
                 await self.continue_graph(result)
             except exc.ContinueGraphError:
-                # Transient load_graph failure — do NOT settle the message.
-                # Allow Service Bus redelivery so downstream dispatch can be retried.
+                # Transient load_graph failure — abandon for immediate redelivery.
+                # The task result is already written; a fresh delivery will skip
+                # re-execution (idempotency guard) and retry continue_graph directly.
                 logger.error(
                     f"continue_graph failed for task {self.task.task_id}; "
-                    "suppressing message settlement to allow redelivery",
+                    "abandoning for immediate redelivery",
                     exc_info=True,
                 )
+                try:
+                    await self.abandon_current_message()
+                except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                    logger.warning(
+                        f"Failed to abandon message after continue_graph failure for task "
+                        f"{self.task.task_id}; SB will redeliver when lock expires",
+                        exc_info=True,
+                    )
                 return result
         elif result.status == TaskStatus.Retry:
             # Retry requested: republish the same task with delay
