@@ -168,7 +168,8 @@ async def run_purge(
         all_graphs: When True, discovers graphs via UUID7 timestamp ordering
             (_stream_all_graphs). When False, uses tag-based discovery
             (_stream_eligible_graphs).
-        force: When True, also delete graphs with in-progress tasks.
+        force: When True, also delete graphs with in-progress tasks, and purge
+            orphaned task-result blobs that have no accompanying graph.json.
         console: Rich Console for output. When None, a default Console is created.
 
     Returns:
@@ -199,10 +200,13 @@ async def run_purge(
             graph_blob_path = f"{storage.task_result_prefix}/{graph_id}{graph_path_suffix}"
             has_graph_json = any(blob.name == graph_blob_path for blob in blobs)
             if not has_graph_json:
-                print(
-                    f"SKIP: Graph {graph_id} has no graph.json — cannot verify in-progress status. Skipping.",
-                    file=sys.stderr,
-                )
+                if force:
+                    eligible_graphs.append((graph_id, blobs))
+                else:
+                    print(
+                        f"SKIP: Graph {graph_id} has no graph.json — cannot verify in-progress status. Skipping.",
+                        file=sys.stderr,
+                    )
                 continue
 
             try:

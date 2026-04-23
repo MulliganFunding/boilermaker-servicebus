@@ -38,9 +38,10 @@ def _set_result(graph: TaskGraph, task: Task, status: TaskStatus) -> None:
 
 
 def _mock_storage(graph: TaskGraph | None = None) -> mock.AsyncMock:
-    """Return a mock storage whose load_graph returns the given graph."""
+    """Return a mock storage whose load_graph_slim_from_tags returns the given graph."""
     storage = mock.AsyncMock()
     storage.load_graph = mock.AsyncMock(return_value=graph)
+    storage.load_graph_slim_from_tags = mock.AsyncMock(return_value=graph)
     return storage
 
 
@@ -456,7 +457,7 @@ class TestRunInspectJsonExitCodes:
         json_exit_code = await run_inspect(storage, str(graph.graph_id), output_json=True)
         capsys.readouterr()  # flush captured output
 
-        storage.load_graph.return_value = graph
+        storage.load_graph_slim_from_tags.return_value = graph
         rich_exit_code = await run_inspect(storage, str(graph.graph_id), console=_no_color_console())
         assert json_exit_code == rich_exit_code == EXIT_HEALTHY
 
@@ -471,7 +472,7 @@ class TestRunInspectJsonExitCodes:
         json_exit_code = await run_inspect(storage, str(graph.graph_id), output_json=True)
         capsys.readouterr()  # flush captured output
 
-        storage.load_graph.return_value = graph
+        storage.load_graph_slim_from_tags.return_value = graph
         rich_exit_code = await run_inspect(storage, str(graph.graph_id), console=_no_color_console())
         assert json_exit_code == rich_exit_code == EXIT_STALLED
 

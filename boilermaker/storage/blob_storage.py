@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from boilermaker.exc import BoilermakerStorageError
 from boilermaker.storage import StorageInterface
-from boilermaker.task import GraphId, TaskGraph, TaskId, TaskResult, TaskResultSlim
+from boilermaker.task import GraphId, TaskGraph, TaskId, TaskResult, TaskResultSlim, TaskStatus
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -48,6 +48,43 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
             container_name=container_name,
             credentials=credentials,
         )
+
+    async def _download_result_with_limiter(
+        self,
+        graph_id: GraphId,
+        blob_name: str,
+        limiter: CapacityLimiter,
+        model: type[TaskResultSlim] | type[TaskResult] = TaskResultSlim,
+    ) -> TaskResultSlim | TaskResult:
+        """Download a single task-result blob, parse it, and return it.
+
+        Raises BoilermakerStorageError on network or deserialization failure.
+        Does NOT check graph_id — callers are responsible for filtering.
+        """
+        async with limiter:
+            try:
+                async with self.get_blob_download_stream(blob_name) as stream:
+                    blob_etag = stream.properties.etag
+                    contents = await stream.readall()
+                tr = model.model_validate_json(contents)
+                tr.etag = blob_etag
+                return tr
+            except AzureBlobError as exc:
+                raise BoilermakerStorageError(
+                    f"Failed to load task result blob {blob_name} in graph {graph_id}",
+                    name=blob_name,
+                    graph_id=graph_id,
+                    status_code=exc.status_code,
+                    reason=exc.reason,
+                ) from exc
+            except ValidationError as e:
+                raise BoilermakerStorageError(
+                    f"Failed to deserialize task result in graph {graph_id}: {e}",
+                    name=blob_name,
+                    graph_id=graph_id,
+                    status_code=None,
+                    reason="DeserializationError",
+                ) from e
 
     async def load_graph(self, graph_id: GraphId, full: bool = False) -> TaskGraph | None:
         """Loads a TaskGraph from Azure Blob Storage.
@@ -90,43 +127,6 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                     status_code=None,
                 ) from e
 
-            # Load all task result instances associated with this graph.
-            # Downloads run concurrently (up to 10 at a time) for speed.
-            model = TaskResult if full else TaskResultSlim
-            limiter = CapacityLimiter(10)
-
-            async def _download_result(blob_name: str) -> None:
-                async with limiter:
-                    try:
-                        async with self.get_blob_download_stream(blob_name) as stream:
-                            blob_etag = stream.properties.etag
-                            contents = await stream.readall()
-                        tr = model.model_validate_json(contents)
-                        tr.etag = blob_etag
-                    except AzureBlobError as exc:
-                        raise BoilermakerStorageError(
-                            f"Failed to load task result blob {blob_name} in graph {graph_id}",
-                            name=blob_name,
-                            graph_id=graph_id,
-                            status_code=exc.status_code,
-                            reason=exc.reason,
-                        ) from exc
-                    except ValidationError as e:
-                        raise BoilermakerStorageError(
-                            f"Failed to deserialize task result in graph {graph_id}: {e}",
-                            name=blob_name,
-                            graph_id=graph_id,
-                            status_code=None,
-                            reason="DeserializationError",
-                        ) from e
-
-                    if tr.graph_id == graph_id:
-                        graph.results[tr.task_id] = tr
-                    else:
-                        logger.warning(
-                            f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!"
-                        )
-
             # Collect blob names first (sequential), then download concurrently.
             # This keeps list_blobs errors outside the task group so they are
             # caught by the existing AzureBlobError/HttpResponseError handlers.
@@ -151,10 +151,20 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                 ) from exc
 
             # Download result blobs concurrently (up to 10 at a time).
+            model = TaskResult if full else TaskResultSlim
+            limiter = CapacityLimiter(10)
+
+            async def _download_and_store(blob_name: str) -> None:
+                tr = await self._download_result_with_limiter(graph_id, blob_name, limiter, model=model)
+                if tr.graph_id == graph_id:
+                    graph.results[tr.task_id] = tr
+                else:
+                    logger.warning(f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!")
+
             try:
                 async with create_task_group() as tg:
                     for blob_name in blob_names:
-                        tg.start_soon(_download_result, blob_name)
+                        tg.start_soon(_download_and_store, blob_name)
             except* BoilermakerStorageError as exc_group:
                 # Unwrap the ExceptionGroup — raise the first storage error
                 # directly to preserve the existing API contract.
@@ -189,9 +199,7 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                     if etag:
                         acquire_kwargs["etag"] = etag
                         acquire_kwargs["match_condition"] = MatchConditions.IfNotModified
-                    await lease_client.acquire(
-                        lease_duration=lease_duration, **acquire_kwargs
-                    )
+                    await lease_client.acquire(lease_duration=lease_duration, **acquire_kwargs)
                     return lease_client.id
             except AzureBlobError as exc:
                 # 409 Conflict = blob is already leased by another worker
@@ -206,9 +214,7 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                     reason=exc.reason,
                 ) from exc
 
-    async def release_lease(
-        self, task_id: TaskId, graph_id: GraphId, lease_id: str
-    ) -> None:
+    async def release_lease(self, task_id: TaskId, graph_id: GraphId, lease_id: str) -> None:
         """Release a previously acquired lease. Best-effort — logs warning on failure."""
         fname = f"{self.task_result_prefix}/{graph_id}/{task_id}.json"
         with tracer.start_as_current_span("release_lease"):
@@ -235,7 +241,6 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         """
         with tracer.start_as_current_span("store_graph"):
             created_date_tag = datetime.now(UTC).strftime("%Y-%m-%d")
-            lease = None
             async with self.get_blob_service_client() as blob_service_client:
                 container_client = blob_service_client.get_container_client(self.container_name)
                 # Store the graph itself first
@@ -290,9 +295,6 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
                         status_code=500,
                         reason="Unknown",
                     ) from excgroup
-                finally:
-                    if lease is not None:
-                        await lease.release()
             return graph
 
     async def load_task_result(self, task_id: TaskId, graph_id: GraphId) -> TaskResultSlim | None:
@@ -309,31 +311,109 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
         with tracer.start_as_current_span("load_task_result"):
             fname = f"{self.task_result_prefix}/{graph_id}/{task_id}.json"
             try:
-                async with self.get_blob_download_stream(fname) as stream:
-                    blob_etag = stream.properties.etag
-                    contents = await stream.readall()
-            except AzureBlobError as exc:
+                return await self._download_result_with_limiter(graph_id, fname, CapacityLimiter(1))
+            except BoilermakerStorageError as exc:
                 if exc.status_code == 404:
                     return None
+                raise
+
+    async def load_graph_slim_from_tags(self, graph_id: GraphId) -> TaskGraph | None:
+        """Load a TaskGraph for display only, using blob tags to avoid content downloads.
+
+        Builds TaskResultSlim from the 'status' tag on each blob instead of
+        downloading the blob body. Falls back to content download for any blob
+        that is missing 'status' tag (older blobs that pre-date tag support).
+
+        Args:
+            graph_id: The GraphId to load.
+        Returns:
+            The loaded TaskGraph, or None if graph.json is not found.
+        Raises:
+            BoilermakerStorageError: On storage or deserialization failures.
+        """
+        if not graph_id:
+            raise ValueError("`graph_id` must be provided to load a TaskGraph.")
+        with tracer.start_as_current_span("load_graph_slim_from_tags"):
+            graph_path = f"{self.task_result_prefix}/{TaskGraph.graph_path(graph_id)}"
+            graph_dir = f"{self.task_result_prefix}/{graph_id}"
+            try:
+                graph_contents = await self.download_blob(graph_path)
+            except AzureBlobError as exc:
                 raise BoilermakerStorageError(
-                    f"Failed to load task result {task_id}",
-                    task_id=task_id,
+                    f"Failed to load TaskGraph {graph_id}",
+                    task_id=None,
                     graph_id=graph_id,
                     status_code=exc.status_code,
                     reason=exc.reason,
                 ) from exc
+            if graph_contents is None:
+                return None
+
             try:
-                result = TaskResultSlim.model_validate_json(contents)
-                result.etag = blob_etag
-                return result
+                graph = TaskGraph.model_validate_json(graph_contents)
             except ValidationError as e:
                 raise BoilermakerStorageError(
-                    f"Failed to deserialize task result {task_id}: {e}",
-                    task_id=task_id,
-                    graph_id=graph_id,
+                    f"Failed to deserialize graph {graph_id}: {e}",
                     status_code=None,
-                    reason="DeserializationError",
                 ) from e
+
+            blob_names_to_download: list[str] = []
+            try:
+                async for blob in self.list_blobs(prefix=graph_dir, include=["tags"]):
+                    if blob.name == graph_path:
+                        continue
+                    tags = blob.tags or {}
+                    status_tag = tags.get("status")
+                    if status_tag:
+                        raw_graph_id = tags.get("graph_id")
+                        blob_graph_id = GraphId(raw_graph_id) if raw_graph_id and raw_graph_id != "none" else None
+                        task_id = TaskId(blob.name.split("/")[-1].removesuffix(".json"))
+                        tr = TaskResultSlim(
+                            task_id=task_id,
+                            graph_id=blob_graph_id,
+                            status=TaskStatus(status_tag),
+                            etag=blob.etag,
+                        )
+                        if tr.graph_id == graph_id:
+                            graph.results[tr.task_id] = tr
+                        else:
+                            logger.warning(
+                                f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!"
+                            )
+                    else:
+                        blob_names_to_download.append(blob.name)
+            except AzureBlobError as exc:
+                raise BoilermakerStorageError(
+                    f"Failed to list blobs for graph {graph_id}",
+                    graph_id=graph_id,
+                    status_code=exc.status_code,
+                    reason=exc.reason,
+                ) from exc
+            except HttpResponseError as exc:
+                raise BoilermakerStorageError(
+                    f"Failed to list blobs for graph {graph_id}",
+                    graph_id=graph_id,
+                    status_code=exc.status_code,
+                    reason=str(exc),
+                ) from exc
+
+            limiter = CapacityLimiter(10)
+
+            async def _download_and_store(blob_name: str) -> None:
+                tr = await self._download_result_with_limiter(graph_id, blob_name, limiter)
+                if tr.graph_id == graph_id:
+                    graph.results[tr.task_id] = tr
+                else:
+                    logger.warning(f"TaskResult {tr.task_id} in graph {graph_dir} with wrong graph_id {tr.graph_id}!")
+
+            try:
+                async with create_task_group() as tg:
+                    for blob_name in blob_names_to_download:
+                        tg.start_soon(_download_and_store, blob_name)
+            except* BoilermakerStorageError as exc_group:
+                raise exc_group.exceptions[0] from exc_group.exceptions[0].__cause__
+
+            return graph
 
     async def store_task_result(
         self,

@@ -117,7 +117,7 @@ def _add_purge_subparser(subparsers: argparse._SubParsersAction) -> None:  # noq
     purge_parser.add_argument(
         "--force",
         action="store_true",
-        help="Delete graphs that have in-progress tasks",
+        help="Delete graphs that have in-progress tasks, and purge orphaned blobs that have no graph.json",
     )
     purge_parser.add_argument(
         "--all-graphs",

@@ -46,6 +46,7 @@ def _mock_storage(graph: TaskGraph | None = None) -> mock.AsyncMock:
     """Return a mock storage whose load_graph returns the given graph."""
     storage = mock.AsyncMock()
     storage.load_graph = mock.AsyncMock(return_value=graph)
+    storage.load_graph_slim_from_tags = mock.AsyncMock(return_value=graph)
     return storage
 
 
@@ -608,6 +609,28 @@ class TestPurgeMissingGraphJson:
         assert "no graph.json" in captured.err
         storage.load_graph.assert_not_called()
         storage.delete_blob.assert_not_called()
+
+    async def test_orphaned_blobs_purged_when_force(self, capsys):
+        """--force must purge task-result blobs that have no graph.json."""
+        graph_id = "019d8c0c-bd9b-7c23-be84-4d0799d7ecd4"
+        blob_name = f"task-results/{graph_id}/task-1.json"
+        blobs = [_make_blob(blob_name, _old(10))]
+        storage = _make_purge_storage(blob_list=blobs)
+        code = await run_purge(storage, older_than_days=7, force=True)
+        assert code == EXIT_HEALTHY
+        storage.load_graph.assert_not_called()
+        storage.delete_blobs_batch.assert_called()
+        deleted = [name for call in storage.delete_blobs_batch.call_args_list for name in call.args[0]]
+        assert blob_name in deleted
+
+    async def test_orphaned_blobs_not_purged_without_force(self, capsys):
+        """Without --force orphaned blobs (no graph.json) must still be skipped."""
+        graph_id = "019d8c0c-bd9b-7c23-be84-4d0799d7ecd4"
+        blobs = [_make_blob(f"task-results/{graph_id}/task-1.json", _old(10))]
+        storage = _make_purge_storage(blob_list=blobs)
+        code = await run_purge(storage, older_than_days=7, force=False)
+        assert code == EXIT_HEALTHY
+        storage.delete_blobs_batch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
