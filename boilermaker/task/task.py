@@ -209,6 +209,9 @@ class Task(BaseModel):
         now = datetime.datetime.now(datetime.UTC)
         return self.attempts.inc(now)
 
+    def __str__(self) -> str:
+        return f"Task<{self.task_id}: {self.function_name}>"
+
     def __hash__(self) -> int:
         """Hash based on unique task_id for use in sets and dicts."""
         return hash(self.task_id)

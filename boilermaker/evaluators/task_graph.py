@@ -14,6 +14,11 @@ from .eval import eval_task
 
 logger = logging.getLogger("boilermaker.app")
 
+# Maximum SB delivery_count at which we actively abandon for fast redelivery.
+# Above this threshold we let the lock expire naturally to avoid burning through
+# the queue's max_delivery_count (typically ~5) during sustained outages.
+_MAX_DELIVERY_COUNT_FOR_ABANDON = 3
+
 # Retry policy used when load_graph raises a transient exception.
 # Up to 3 attempts total (initial + 2 retries) with exponential backoff.
 _LOAD_GRAPH_RETRY_POLICY = retries.RetryPolicy(
@@ -68,17 +73,25 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         self.storage_interface: StorageInterface = storage_interface
 
     def _graph_tag(self) -> str:
-        return f"[Graph {self.task.graph_id}]" if self.task.graph_id else "[Graph ?]"
+        return f"Graph<{self.task.graph_id}>" if self.task.graph_id else "Graph<?>"
 
-    def _task_tag(self, task: Task) -> str:
-        return f"{task.function_name}[{task.task_id}]"
+    async def _abandon_or_let_expire(self) -> None:
+        """Abandon for fast redelivery while delivery_count <= _MAX_DELIVERY_COUNT_FOR_ABANDON.
+
+        Once the count exceeds the threshold we let the lock expire naturally instead,
+        so a sustained storage outage cannot burn through the queue's max_delivery_count
+        and dead-letter the message prematurely.
+        """
+        delivery_count = self.task.msg.delivery_count if self.task.msg and self.task.msg.delivery_count else 0
+        if delivery_count <= _MAX_DELIVERY_COUNT_FOR_ABANDON:
+            await self.abandon_current_message()
 
     # The main message handler
     async def message_handler(self) -> TaskResult:
         """Individual message handler"""
         message_settled = False
         _graph_tag = self._graph_tag()
-        _task_tag = self._task_tag(self.task)
+        _task_tag = str(self.task)
 
         # Idempotent redelivery guard — if this task already reached a terminal state
         # (e.g. a prior execution succeeded before the SB lock expired and redelivered), skip
@@ -91,7 +104,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 # Transient read failure — proceed normally; do NOT skip execution on a read
                 # error, as that would permanently stall the graph.
                 logger.warning(
-                    f"{_graph_tag} Failed to read current status for task {_task_tag} before "
+                    f"{_graph_tag} Failed to read current status for {_task_tag} before "
                     "writing Started; proceeding with execution",
                     exc_info=True,
                 )
@@ -101,7 +114,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
 
             if _existing is not None and _existing.status.finished:
                 logger.info(
-                    f"{_graph_tag} Task {_task_tag} already in terminal state {_existing.status!r} "
+                    f"{_graph_tag} {_task_tag} already in terminal state {_existing.status!r} "
                     "(SB redelivery); skipping re-execution"
                 )
                 _terminal_result = TaskResult(
@@ -113,16 +126,16 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     await self.continue_graph(_terminal_result)
                 except exc.ContinueGraphError:
                     logger.error(
-                        f"{_graph_tag} continue_graph failed on redelivery for task {_task_tag}; "
+                        f"{_graph_tag} continue_graph failed on redelivery for {_task_tag}; "
                         "abandoning for immediate redelivery",
                         exc_info=True,
                     )
                     try:
-                        await self.abandon_current_message()
+                        await self._abandon_or_let_expire()
                     except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                         logger.warning(
                             f"{_graph_tag} Failed to abandon message after continue_graph redelivery failure "
-                            f"for task {_task_tag}; SB will redeliver when lock expires",
+                            f"for {_task_tag}; SB will redeliver when lock expires",
                             exc_info=True,
                         )
                     return _terminal_result
@@ -130,10 +143,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     await self.complete_message()
                 except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                     logger.warning(
-                        (
-                            f"{_graph_tag} Failed to complete message on redelivery for task "
-                            f"{_task_tag}; Expect redelivery"
-                        ),
+                        f"{_graph_tag} Failed to complete message on redelivery for {_task_tag}. Expect redelivery",
                         exc_info=True,
                     )
                 return _terminal_result
@@ -155,7 +165,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             _is_precondition_failure = getattr(_started_err, "status_code", None) == 412
             if not _is_precondition_failure:
                 logger.warning(
-                    f"{_graph_tag} Non-precondition error writing Started for task {_task_tag}; proceeding...",
+                    f"{_graph_tag} Non-precondition error writing Started for {_task_tag}; proceeding...",
                     exc_info=True,
                 )
             else:
@@ -170,16 +180,16 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     _reread = await self.storage_interface.load_task_result(self.task.task_id, self.task.graph_id)
                 except exc.BoilermakerStorageError:
                     logger.error(
-                        f"{_graph_tag} 412 on Started write and re-read also failed for task {_task_tag}; "
+                        f"{_graph_tag} 412 on Started write and re-read also failed for {_task_tag}; "
                         "abandoning for immediate redelivery",
                         exc_info=True,
                     )
                     try:
-                        await self.abandon_current_message()
+                        await self._abandon_or_let_expire()
                     except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                         logger.warning(
-                            f"{_graph_tag} Failed to abandon message after 412+re-read failure for task "
-                            f"{_task_tag}; SB will redeliver when lock expires",
+                            f"{_graph_tag} Failed to abandon message after 412+re-read failure for {_task_tag}; "
+                            "SB will redeliver when lock expires",
                             exc_info=True,
                         )
                     return TaskResult(
@@ -193,7 +203,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     # state, since a blob must exist once the graph is stored.  Returning
                     # Failure surfaces the anomaly rather than silently dropping the task.
                     logger.error(
-                        f"{_graph_tag} 412 on Started write but re-read returned None for task {_task_tag}; "
+                        f"{_graph_tag} 412 on Started write but re-read returned None for {_task_tag}; "
                         "blob should always exist after graph creation."
                     )
                     return TaskResult(
@@ -206,14 +216,14 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 if _reread.status.finished:
                     # Another worker already reached a terminal state — skip execution.
                     logger.info(
-                        f"{_graph_tag} Task {_task_tag} reached terminal state {_reread.status!r} "
+                        f"{_graph_tag} {_task_tag} reached terminal state {_reread.status!r} "
                         "after 412 on Started write; skipping execution"
                     )
                     try:
                         await self.complete_message()
                     except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                         logger.warning(
-                            f"{_graph_tag} Failed to complete message after 412 skip for task {_task_tag}; "
+                            f"{_graph_tag} Failed to complete message after 412 skip for {_task_tag}; "
                             "SB will redeliver",
                             exc_info=True,
                         )
@@ -226,14 +236,14 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 if _reread.status == TaskStatus.Started:
                     # Another worker won the CAS and is executing — yield to that worker.
                     logger.info(
-                        f"{_graph_tag} Task {_task_tag} is already Started by another worker "
+                        f"{_graph_tag} {_task_tag} is already Started by another worker "
                         "(412 on Started write); completing message without executing"
                     )
                     try:
                         await self.complete_message()
                     except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                         logger.warning(
-                            f"{_graph_tag} Failed to complete message after 412 yield for task {_task_tag}; "
+                            f"{_graph_tag} Failed to complete message after 412 yield for {_task_tag}; "
                             "SB will redeliver",
                             exc_info=True,
                         )
@@ -261,11 +271,11 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     #              RetryStartedAfterScheduled
                     if _reread.etag is None:
                         logger.warning(
-                            f"{_graph_tag} 412 + {_reread.status.value} re-read for task {_task_tag}: "
+                            f"{_graph_tag} 412 + {_reread.status.value} re-read for {_task_tag}: "
                             "re-read etag is None — degraded to unconditional retry write"
                         )
                     logger.warning(
-                        f"{_graph_tag} 412 + {_reread.status.value} for task {_task_tag}; "
+                        f"{_graph_tag} 412 + {_reread.status.value} for {_task_tag}; "
                         "retrying Started write with re-read etag"
                     )
                     try:
@@ -279,7 +289,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                         if not _retry_is_precondition_failure:
                             # RetryStartedWriteNon412Error: fail-open, fall through to execution.
                             logger.warning(
-                                f"{_graph_tag} Non-412 error on retry Started write for task {_task_tag}; "
+                                f"{_graph_tag} Non-412 error on retry Started write for {_task_tag}; "
                                 "proceeding with execution",
                                 exc_info=True,
                             )
@@ -291,7 +301,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                             # the current state.
                             # Spec action: RetryStartedWrite412 → RereadAfterRetry412
                             logger.warning(
-                                f"{_graph_tag}  Second 412 on retry Started write for task {_task_tag}; "
+                                f"{_graph_tag}  Second 412 on retry Started write for {_task_tag}; "
                                 "re-reading to determine action"
                             )
                             try:
@@ -302,7 +312,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                 # Blob state unknown — abandon for immediate redelivery.
                                 # Falls through to the else branch below which calls abandon.
                                 logger.error(
-                                    f"{_graph_tag} Second 412 + re-read also failed for task {_task_tag}; "
+                                    f"{_graph_tag} Second 412 + re-read also failed for {_task_tag}; "
                                     "abandoning for immediate redelivery",
                                     exc_info=True,
                                 )
@@ -316,7 +326,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                 except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                                     logger.warning(
                                         f"{_graph_tag} Failed to complete message after second 412 (Started) "
-                                        f"for task {_task_tag}; SB will redeliver",
+                                        f"for {_task_tag}; SB will redeliver",
                                         exc_info=True,
                                     )
                                 return TaskResult(
@@ -332,7 +342,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                 except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                                     logger.warning(
                                         f"{_graph_tag} Failed to complete message after second 412 (terminal) "
-                                        f"for task {_task_tag}; SB will redeliver",
+                                        f"for {_task_tag}; SB will redeliver",
                                         exc_info=True,
                                     )
                                 return TaskResult(
@@ -348,7 +358,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                 # Note: Retry is not modeled as a blob status in the TLA+ spec
                                 # (spec only produces Success/Failure from execution).
                                 logger.warning(
-                                    f"{_graph_tag} Second 412 + Retry re-read for task {_task_tag}; "
+                                    f"{_graph_tag} Second 412 + Retry re-read for {_task_tag}; "
                                     "another worker published a retry message — settling our duplicate"
                                 )
                                 try:
@@ -356,7 +366,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                 except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                                     logger.warning(
                                         f"{_graph_tag} Failed to complete message after second 412 (Retry) "
-                                        f"for task {_task_tag}; SB will redeliver",
+                                        f"for {_task_tag}; SB will redeliver",
                                         exc_info=True,
                                     )
                                 return TaskResult(
@@ -373,16 +383,15 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                 _reread2_status = _reread2.status if _reread2 is not None else None
                                 logger.error(
                                     f"{_graph_tag} Two 412s on Started write; second re-read returned "
-                                    f"{_reread2_status!r} "
-                                    f"for task {_task_tag}. "
+                                    f"{_reread2_status!r} for {_task_tag}. "
                                     "Abandoning for immediate redelivery.",
                                 )
                                 try:
-                                    await self.abandon_current_message()
+                                    await self._abandon_or_let_expire()
                                 except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                                     logger.warning(
-                                        f"{_graph_tag} Failed to abandon message after two 412s for task "
-                                        f"{_task_tag}; SB will redeliver when lock expires",
+                                        f"{_graph_tag} Failed to abandon message after two 412s for {_task_tag}; "
+                                        "SB will redeliver when lock expires",
                                         exc_info=True,
                                     )
                                 return TaskResult(
@@ -396,14 +405,14 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     # the retry message.
                     # Spec action: WriteStarted412 (Retry) → Completing
                     logger.warning(
-                        f"{_graph_tag} 412 on Started write; re-read returned Retry for task {_task_tag}; "
+                        f"{_graph_tag} 412 on Started write; re-read returned Retry for {_task_tag}; "
                         "another worker already retried — settling our duplicate"
                     )
                     try:
                         await self.complete_message()
                     except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                         logger.warning(
-                            f"{_graph_tag} Failed to complete message after 412+Retry for task {_task_tag}; "
+                            f"{_graph_tag} Failed to complete message after 412+Retry for {_task_tag}; "
                             "SB will redeliver",
                             exc_info=True,
                         )
@@ -419,15 +428,15 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     # for all currently defined statuses.  Abandon for immediate redelivery.
                     logger.error(
                         f"{_graph_tag} 412 on Started write but re-read returned unexpected status "
-                        f"{_reread.status!r} for task {_task_tag}; "
+                        f"{_reread.status!r} for {_task_tag}; "
                         "abandoning for immediate redelivery."
                     )
                     try:
-                        await self.abandon_current_message()
+                        await self._abandon_or_let_expire()
                     except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                         logger.warning(
-                            f"{_graph_tag} Failed to abandon message after 412+unexpected status for task "
-                            f"{_task_tag}; SB will redeliver when lock expires",
+                            f"{_graph_tag} Failed to abandon message after 412+unexpected status for {_task_tag}; "
+                            "SB will redeliver when lock expires",
                             exc_info=True,
                         )
                     return TaskResult(
@@ -450,7 +459,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 await self.complete_message()
                 message_settled = True
             except exc.BoilermakerTaskLeaseLost:
-                logger.error(f"{_graph_tag} Lost message lease when trying to complete early for task {_task_tag}")
+                logger.error(f"{_graph_tag} Lost message lease when trying to complete early for {_task_tag}")
                 return TaskResult(
                     task_id=self.task.task_id,
                     graph_id=self.task.graph_id,
@@ -530,14 +539,14 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 # The task result is already written; a fresh delivery will skip
                 # re-execution (idempotency guard) and retry continue_graph directly.
                 logger.error(
-                    f"{_graph_tag} continue_graph failed for task {_task_tag}; abandoning for immediate redelivery",
+                    f"{_graph_tag} continue_graph failed for {_task_tag}; abandoning for immediate redelivery",
                     exc_info=True,
                 )
                 try:
-                    await self.abandon_current_message()
+                    await self._abandon_or_let_expire()
                 except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
                     logger.warning(
-                        f"{_graph_tag} Failed to abandon message after continue_graph failure for task {_task_tag}; "
+                        f"{_graph_tag} Failed to abandon message after continue_graph failure for {_task_tag}; "
                         "SB will redeliver when lock expires",
                         exc_info=True,
                     )
@@ -547,7 +556,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             delay = self.task.get_next_delay()
             retry_msg_id = f"{self.task.task_id}:{self.task.attempts.attempts}"
             warn_msg = (
-                f"{_graph_tag} {result.errors} {_task_tag} "
+                f"{_graph_tag} [{result.errors}] {_task_tag} "
                 f"[attempt {self.task.attempts.attempts} of {self.task.policy.max_tries}] "
                 f"Publishing retry... {self.sequence_number=} "
                 f"<function={self.task.function_name}> with {delay=} {retry_msg_id=}"
@@ -571,7 +580,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 message_settled = True
             except exc.BoilermakerTaskLeaseLost:
                 logger.error(
-                    f"{_graph_tag} Lost message lease when trying to complete late for task {_task_tag} "
+                    f"{_graph_tag} Lost message lease when trying to complete late for {_task_tag} "
                     "May result in multiple executions of this task and its callbacks!"
                 )
                 return result
@@ -729,23 +738,23 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             )
         except exc.BoilermakerStorageError:
             logger.warning(
-                f"[Graph {graph_id}] try_acquire_lease raised unexpected error for task "
+                f"Graph<{graph_id}> try_acquire_lease raised unexpected error for task "
                 f"{task.task_id}; skipping — will be retried on redelivery.",
                 exc_info=True,
             )
             return False
         if lease_id is None:
             logger.debug(
-                f"[Graph {graph_id}] Skipping task {task.task_id}: "
+                f"Graph<{graph_id}> Skipping task {task.task_id}: "
                 "lease not acquired (another worker holds it or blob was modified)."
             )
             return False
 
         try:
             # Publish task to SB (message_id = task_id for fan-in dedup).
-            _task_tag = self._task_tag(task)
+            _task_tag = str(task)
             await self.publish_task(task)
-            logger.info(f"[Graph {graph_id}] Published task {_task_tag}")
+            logger.info(f"Graph<{graph_id}> Published {_task_tag}")
 
             # Write Scheduled status under the held lease. The lease prevents a
             # racing worker (that picked up the just-published SB message) from
@@ -755,14 +764,14 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 await self.storage_interface.store_task_result(result, lease_id=lease_id)
             except exc.BoilermakerStorageError as err:
                 logger.warning(
-                    f"[Graph {graph_id}] Failed to write Scheduled for task {_task_tag}. "
+                    f"Graph<{graph_id}> Failed to write Scheduled for {_task_tag}. "
                     f"Task published to Service Bus. Error: {err}",
                     exc_info=True,
                 )
                 return True  # published successfully, blob write failed
             except ValueError:
                 logger.error(
-                    f"[Graph {graph_id}] schedule_task raised ValueError for task {_task_tag}. "
+                    f"Graph<{graph_id}> schedule_task raised ValueError for {_task_tag}. "
                     f"Task published; blob write skipped.",
                     exc_info=True,
                 )
@@ -772,7 +781,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
 
         except Exception:
             logger.error(
-                f"[Graph {graph_id}] Failed to publish task {_task_tag}; remains Pending, will retry on redelivery.",
+                f"Graph<{graph_id}> Failed to publish {_task_tag}; remains Pending, will retry on redelivery.",
                 exc_info=True,
             )
             return False
