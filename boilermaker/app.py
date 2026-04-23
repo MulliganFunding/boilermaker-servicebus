@@ -34,6 +34,7 @@ from .evaluators import (
     TaskHandlerRegistry,
     TaskPublisher,
 )
+from .evaluators.task_graph import _MAX_DELIVERY_COUNT_FOR_ABANDON
 from .exc import BoilermakerAppException, BoilermakerStorageError
 from .retries import RetryPolicy
 from .storage import StorageInterface
@@ -535,6 +536,15 @@ class Boilermaker:
         Raises:
             Various Azure Service Bus exceptions for connection issues
         """
+        if self.results_storage is not None:
+            logger.warning(
+                "TaskGraph worker starting. Queue max_delivery_count must exceed "
+                f"{_MAX_DELIVERY_COUNT_FOR_ABANDON + 1} — messages with delivery_count "
+                f"<= {_MAX_DELIVERY_COUNT_FOR_ABANDON} are abandoned for fast redelivery; "
+                "higher counts fall back to lock-expiry. Lower max_delivery_count risks "
+                "dead-lettering graph tasks during sustained storage outages."
+            )
+
         async with create_task_group() as tg:
             async with self.service_bus_client.get_receiver() as receiver:
                 # Handle SIGTERM: when found -> instruct evaluator to abandon message
