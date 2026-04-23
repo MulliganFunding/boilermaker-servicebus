@@ -41,16 +41,17 @@
 \*      - CAS 412 again: re-read a second time:
 \*          Started   -> complete message, return (another worker won)
 \*          terminal  -> complete message, return terminal result
-\*          other     -> complete message, return Failure (always settle)
+\*          Pending/Scheduled -> abandon_message() for immediate redelivery, return Scheduled
 \*      - Non-412 storage error: proceed with execution anyway (fail-open)
 \*   3. Execute task (nondeterministic)
 \*   4. Write result unconditionally
 \*   5. Run continue_graph
 \*   6. Complete (settle) message
 \*
-\* KEY INVARIANT: always settle the SB message. Never rely on SB redelivery for
-\* correctness of the 412 branch. The Scheduled -> retry -> Started path is the
-\* forward move that eliminates orphaned-Scheduled bug.
+\* KEY INVARIANT: settle the SB message on the normal forward path. For the
+\* double-412 Pending/Scheduled case, abandon the message for immediate SB
+\* redelivery — this is the mechanism that prevents permanent stalls when the
+\* blob is unclaimed after two consecutive CAS misses.
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -303,8 +304,10 @@ WriteStartedSuccess(w) ==
 \*   Started   -> Completing (complete message; another worker won)
 \*   Scheduled -> RetryStartedAfterScheduled (retry with re-read etag)
 \*   Pending   -> RetryStartedAfterScheduled (retry with re-read etag; same as Scheduled)
-\*               Lease acquire bumped the ETag without changing content.  No other
-\*               worker holds Started, so this worker is the legitimate claimant.
+\*               NOTE: under corrected Azure semantics lease acquire does NOT bump the
+\*               ETag, so this Pending branch is unreachable in normal operation —
+\*               the consumer's etag still matches while the blob is leased and the
+\*               write gets 409, not 412.  The branch is retained defensively.
 \*   other     -> Completing (always settle)
 \*
 \* Since blobStatus[t] is always defined (never None) in this model, the
@@ -334,8 +337,10 @@ WriteStarted412(w) ==
                              workerReadySet, workerCurrentReady>>
           \/ \* Re-read is Scheduled or Pending: no worker owns Started yet —
              \* retry the Started write with the re-read etag.
-             \* Pending:   lease acquire bumped the ETag (AcquireLeaseSuccess) but the
-             \*             Scheduled write has not yet happened (or WriteScheduledFail).
+             \* Pending:   Under corrected Azure semantics (lease acquire does NOT bump
+             \*             ETag) this branch is unreachable in normal operation: the
+             \*             consumer's etag matches while the blob is leased, so the
+             \*             write gets 409 instead.  Retained defensively.
              \* Scheduled: normal publish-before-store window.
              /\ rereadStatus \in {"Scheduled", "Pending"}
              /\ workerPhase' = [workerPhase EXCEPT ![w] = "RetryStartedAfterScheduled"]
@@ -554,12 +559,14 @@ StatusMismatchCheck(w) ==
 \* On failure: remove from readySet (skip), stay in AcquiringLease.
 \* When readySet is empty: transition to Completing.
 \*
-\* ETag bump on lease acquire: Azure Blob Storage advances the blob's ETag when
-\* BlobLeaseClient.acquire() succeeds, even though the blob content (status) does
-\* not change.  We model this as blobEtag[child] + 1.  This is the root cause of
-\* the 412+Pending race: a worker that read the blob before the lease acquire will
-\* hold a stale ETag and get a 412 on its Started write, with the re-read returning
-\* Pending (status unchanged by the lease acquire).  See WriteStarted412 below.
+\* ETag on lease acquire: Azure Blob Storage does NOT advance the blob's ETag when
+\* BlobLeaseClient.acquire() succeeds — lease state is separate from blob content.
+\* We therefore leave blobEtag unchanged in AcquireLeaseSuccess.
+\* Consequence: a worker that captured the blob's ETag before the lease acquire
+\* will still hold a valid ETag and its Started write will receive 409 (blob is
+\* leased, non-lease write rejected) rather than 412 (ETag mismatch).  The
+\* 412+Pending scenario modeled in WriteStarted412 is therefore unreachable under
+\* correct Azure semantics; the branch is retained defensively.
 
 AcquireLeaseSuccess(w) ==
     /\ workerPhase[w] = "AcquiringLease"
@@ -572,12 +579,11 @@ AcquireLeaseSuccess(w) ==
         /\ blobStatus[child] = "Pending"
         /\ ~blobLeased[child]
         /\ blobLeased' = [blobLeased EXCEPT ![child] = TRUE]
-        \* Azure bumps the ETag on lease acquire even with no content change.
-        /\ blobEtag'   = [blobEtag   EXCEPT ![child] = blobEtag[child] + 1]
+        \* Lease acquire does NOT advance the ETag (Azure docs: only content writes do).
         /\ workerCurrentReady' = [workerCurrentReady EXCEPT ![w] = child]
         /\ workerReadySet' = [workerReadySet EXCEPT ![w] = workerReadySet[w] \ {child}]
         /\ workerPhase' = [workerPhase EXCEPT ![w] = "PublishingTask"]
-        /\ UNCHANGED <<blobStatus, blobDeadLettered, sbMessages, workerMsg, workerTask,
+        /\ UNCHANGED <<blobStatus, blobEtag, blobDeadLettered, sbMessages, workerMsg, workerTask,
                         workerResult, workerCapturedEtag,
                         workerSnapshot, workerSnapshotEtags>>
 
@@ -940,10 +946,17 @@ EventualResultWrite ==
 \* State constraint for bounded model checking
 \* ---------------------------------------------------------------------------
 
-\* Etag values are protocol-bounded: each task is written at most
-\* ~(2*MaxDeliveryCount + 3) times.  Making the bound explicit lets TLC
-\* prune unreachable high-etag states and dramatically shrinks the state
-\* space.  If TLC ever reports a CONSTRAINT violation, increase the bound.
+\* Etag values are protocol-bounded.  With lease acquire no longer bumping the
+\* ETag, the maximum number of ETag advances per task is:
+\*   1  (Pending write in Init or continue_graph)
+\* + 1  (Scheduled write by continue_graph)
+\* + MaxDeliveryCount * 2  (Started + result write per delivery attempt)
+\* = 2 * MaxDeliveryCount + 2
+\*
+\* The bound of 2 * MaxDeliveryCount + 4 retains two extra slots of buffer
+\* above the tightest derivation to accommodate model-checking edge cases and
+\* any future protocol extensions.  If TLC ever reports a CONSTRAINT violation,
+\* increase the bound.
 EtagBound == \A t \in Tasks : blobEtag[t] <= 2 * MaxDeliveryCount + 4
 
 \* ---------------------------------------------------------------------------

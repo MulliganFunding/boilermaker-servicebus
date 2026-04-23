@@ -1079,3 +1079,323 @@ class TestFindBlobsByTags:
             results.append(blob)
 
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# load_graph: AzureBlobError from list_blobs (line 139)
+# ---------------------------------------------------------------------------
+
+
+async def test_load_graph_azure_blob_error_from_list_blobs_raises_storage_error(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+):
+    """AzureBlobError raised by list_blobs (after graph.json downloads) must be
+    wrapped as BoilermakerStorageError, same as HttpResponseError."""
+    graph_json = sample_task_graph.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(graph_json)
+    azure_error = AzureBlobError(
+        MagicMock(message="Service Unavailable", status_code=503, reason="Service Unavailable")
+    )
+    set_return.list_blobs_returns(azure_error)
+
+    with pytest.raises(BoilermakerStorageError) as exc_info:
+        await blob_storage.load_graph(sample_task_graph.graph_id)
+
+    assert "Failed to list blobs" in str(exc_info.value)
+    assert exc_info.value.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# release_lease: AzureBlobError is logged, not raised (lines 219-227)
+# ---------------------------------------------------------------------------
+
+
+async def test_release_lease_warns_and_does_not_raise_on_azure_blob_error(blob_storage, caplog):
+    """release_lease must log a warning and swallow AzureBlobError — the lease
+    will auto-expire and a raised exception would break the finally block in
+    _lease_publish_schedule."""
+    import logging
+    from contextlib import asynccontextmanager
+
+    error = AzureBlobError(MagicMock(status_code=409, reason="Conflict"))
+
+    @asynccontextmanager
+    async def _fake_client(_fname):
+        yield MagicMock()
+
+    with (
+        patch.object(blob_storage, "get_blob_client", _fake_client),
+        patch("boilermaker.storage.blob_storage.BlobLeaseClient") as mock_blc,
+    ):
+        mock_lease = AsyncMock()
+        mock_lease.release.side_effect = error
+        mock_blc.return_value = mock_lease
+
+        with caplog.at_level(logging.WARNING, logger="boilermaker.storage.blob_storage"):
+            await blob_storage.release_lease("task-1", "graph-1", "lease-id")
+
+    assert any("Failed to release lease" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# load_task_result: non-404 error must re-raise (lines 315-318)
+# ---------------------------------------------------------------------------
+
+
+async def test_load_task_result_returns_none_on_404(blob_storage):
+    """load_task_result must return None when the blob is not found (404).
+    This is the 'not yet written' case used by the idempotency guard."""
+    error = BoilermakerStorageError("not found", status_code=404, reason="Not Found")
+    with patch.object(blob_storage, "_download_result_with_limiter", new_callable=AsyncMock) as mock_dl:
+        mock_dl.side_effect = error
+        result = await blob_storage.load_task_result("task-1", GraphId("graph-1"))
+
+    assert result is None
+
+
+async def test_load_task_result_non_404_storage_error_reraises(blob_storage):
+    """load_task_result must re-raise BoilermakerStorageError for non-404 errors.
+    Only 404 is absorbed as 'not found'; other codes indicate transient failures."""
+    error = BoilermakerStorageError(
+        "Service unavailable",
+        task_id=None,
+        graph_id=None,
+        status_code=503,
+        reason="Service Unavailable",
+    )
+    with patch.object(blob_storage, "_download_result_with_limiter", new_callable=AsyncMock) as mock_dl:
+        mock_dl.side_effect = error
+        with pytest.raises(BoilermakerStorageError) as exc_info:
+            await blob_storage.load_task_result("task-1", GraphId("graph-1"))
+
+    assert exc_info.value.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# load_graph_slim_from_tags: various error paths
+# ---------------------------------------------------------------------------
+
+
+async def test_load_graph_slim_from_tags_empty_graph_id_raises_value_error(blob_storage):
+    """Empty graph_id must raise ValueError before touching storage."""
+    with pytest.raises(ValueError, match="`graph_id` must be provided"):
+        await blob_storage.load_graph_slim_from_tags(GraphId(""))
+
+
+async def test_load_graph_slim_from_tags_azure_blob_error_on_download_raises_storage_error(blob_storage):
+    """AzureBlobError from download_blob in load_graph_slim_from_tags must be wrapped
+    as BoilermakerStorageError."""
+    error = AzureBlobError(MagicMock(message="Not found", status_code=404, reason="Not found"))
+    with patch.object(blob_storage, "download_blob", new_callable=AsyncMock) as mock_dl:
+        mock_dl.side_effect = error
+        with pytest.raises(BoilermakerStorageError) as exc_info:
+            await blob_storage.load_graph_slim_from_tags(GraphId("some-graph"))
+
+    assert "Failed to load TaskGraph" in str(exc_info.value)
+    assert exc_info.value.status_code == 404
+
+
+async def test_load_graph_slim_from_tags_returns_none_when_graph_not_found(blob_storage):
+    """load_graph_slim_from_tags returns None when download_blob returns None."""
+    with patch.object(blob_storage, "download_blob", new_callable=AsyncMock) as mock_dl:
+        mock_dl.return_value = None
+        result = await blob_storage.load_graph_slim_from_tags(GraphId("some-graph"))
+
+    assert result is None
+
+
+async def test_load_graph_slim_from_tags_validation_error_wrapped_as_storage_error(blob_storage):
+    """ValidationError from model_validate_json on the graph blob must be wrapped
+    as BoilermakerStorageError in load_graph_slim_from_tags."""
+    from pydantic import ValidationError
+
+    with (
+        patch.object(blob_storage, "download_blob", new_callable=AsyncMock) as mock_dl,
+        patch(
+            "boilermaker.storage.blob_storage.TaskGraph.model_validate_json",
+            side_effect=ValidationError.from_exception_data("TaskGraph", [], input_type="json"),
+        ),
+    ):
+        mock_dl.return_value = '{"corrupt": "data"}'
+        with pytest.raises(BoilermakerStorageError) as exc_info:
+            await blob_storage.load_graph_slim_from_tags(GraphId("some-graph"))
+
+    assert "Failed to deserialize graph" in str(exc_info.value)
+
+
+async def test_load_graph_slim_from_tags_skips_graph_json_blob_in_listing(
+    mock_azureblob, blob_storage, sample_task_graph, sample_task
+):
+    """The graph.json blob must be skipped during listing — it must not be parsed
+    as a TaskResultSlim."""
+    sample_task_graph.add_task(sample_task)
+    graph_json = sample_task_graph.model_dump_json()
+    _, _, set_return = mock_azureblob
+
+    set_return.download_blob_returns(graph_json)
+
+    graph_path = f"task-results/{sample_task_graph.storage_path}"
+    # Include the graph.json blob in the listing — it should be skipped
+    set_return.list_blobs_returns([_tagged_blob(graph_path, str(sample_task_graph.graph_id), "success")])
+
+    result = await blob_storage.load_graph_slim_from_tags(sample_task_graph.graph_id)
+
+    assert result is not None
+    # graph.json was skipped — no task results loaded
+    assert len(result.results) == 0
+
+
+async def test_load_graph_slim_from_tags_warns_on_wrong_graph_id_in_tag_path(
+    mock_azureblob, blob_storage, sample_task_graph, sample_task, caplog
+):
+    """A blob whose 'graph_id' tag doesn't match the loaded graph_id must be
+    excluded from results with a warning — not silently dropped."""
+    import logging
+
+    sample_task_graph.add_task(sample_task)
+    graph_json = sample_task_graph.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(graph_json)
+
+    blob_name = f"task-results/{sample_task_graph.graph_id}/{sample_task.task_id}.json"
+    # Use a different graph_id in the tag
+    wrong_graph_id = "wrong-graph-id"
+    set_return.list_blobs_returns([_tagged_blob(blob_name, wrong_graph_id, "success")])
+
+    with caplog.at_level(logging.WARNING, logger="boilermaker.storage.blob_storage"):
+        result = await blob_storage.load_graph_slim_from_tags(sample_task_graph.graph_id)
+
+    assert result is not None
+    assert sample_task.task_id not in result.results
+    assert any("wrong graph_id" in r.message for r in caplog.records)
+
+
+async def test_load_graph_slim_from_tags_azure_blob_error_from_list_blobs_raises_storage_error(
+    mock_azureblob, blob_storage, sample_task_graph
+):
+    """AzureBlobError raised by list_blobs in load_graph_slim_from_tags must be
+    wrapped as BoilermakerStorageError."""
+    graph_json = sample_task_graph.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(graph_json)
+    azure_error = AzureBlobError(
+        MagicMock(message="Service Unavailable", status_code=503, reason="Service Unavailable")
+    )
+    set_return.list_blobs_returns(azure_error)
+
+    with pytest.raises(BoilermakerStorageError) as exc_info:
+        await blob_storage.load_graph_slim_from_tags(sample_task_graph.graph_id)
+
+    assert "Failed to list blobs" in str(exc_info.value)
+    assert exc_info.value.status_code == 503
+
+
+async def test_load_graph_slim_from_tags_http_response_error_from_list_blobs_raises_storage_error(
+    mock_azureblob, blob_storage, sample_task_graph
+):
+    """HttpResponseError raised by list_blobs in load_graph_slim_from_tags must be
+    wrapped as BoilermakerStorageError."""
+    from azure.core.exceptions import HttpResponseError
+
+    graph_json = sample_task_graph.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(graph_json)
+    set_return.list_blobs_returns(HttpResponseError(message="Auth failure", response=None))
+
+    with pytest.raises(BoilermakerStorageError) as exc_info:
+        await blob_storage.load_graph_slim_from_tags(sample_task_graph.graph_id)
+
+    assert "Failed to list blobs" in str(exc_info.value)
+
+
+async def test_load_graph_slim_from_tags_warns_on_wrong_graph_id_in_fallback_download(
+    mock_azureblob, blob_storage, sample_task_graph, sample_task, caplog
+):
+    """When a blob has no status tag and the fallback download returns a TaskResultSlim
+    with a mismatched graph_id, a warning must be logged and the result excluded."""
+    import logging
+
+    sample_task_graph.add_task(sample_task)
+    slim_result = TaskResultSlim(
+        task_id=sample_task.task_id,
+        graph_id=GraphId("completely-different-graph"),
+        status=TaskStatus.Success,
+    )
+    graph_json = sample_task_graph.model_dump_json()
+    task_result_json = slim_result.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(None, side_effect=[graph_json, task_result_json])
+
+    blob = mock.MagicMock()
+    blob.name = f"task-results/{sample_task_graph.graph_id}/{sample_task.task_id}.json"
+    blob.etag = "etag-x"
+    blob.tags = None  # no status tag → triggers fallback download
+    set_return.list_blobs_returns([blob])
+
+    with caplog.at_level(logging.WARNING, logger="boilermaker.storage.blob_storage"):
+        result = await blob_storage.load_graph_slim_from_tags(sample_task_graph.graph_id)
+
+    assert result is not None
+    assert sample_task.task_id not in result.results
+    assert any("wrong graph_id" in r.message for r in caplog.records)
+
+
+async def test_load_graph_slim_from_tags_storage_error_from_fallback_download_propagates(
+    mock_azureblob, blob_storage, sample_task_graph, sample_task
+):
+    """BoilermakerStorageError raised by _download_result_with_limiter inside the
+    task group must be unwrapped from the ExceptionGroup and re-raised (lines 413-414)."""
+    sample_task_graph.add_task(sample_task)
+    graph_json = sample_task_graph.model_dump_json()
+    _, _, set_return = mock_azureblob
+    set_return.download_blob_returns(graph_json)
+
+    storage_error = BoilermakerStorageError("blob download failed", status_code=503, reason="Error")
+
+    blob = mock.MagicMock()
+    blob.name = f"task-results/{sample_task_graph.graph_id}/{sample_task.task_id}.json"
+    blob.etag = "etag-x"
+    blob.tags = None  # no status tag → enters blob_names_to_download list
+    set_return.list_blobs_returns([blob])
+
+    # Patch _download_result_with_limiter to raise inside the task group — this
+    # ensures the exception goes through anyio's ExceptionGroup machinery and
+    # exercises the except* handler at lines 413-414.
+    with patch.object(
+        blob_storage,
+        "_download_result_with_limiter",
+        new_callable=AsyncMock,
+        side_effect=storage_error,
+    ):
+        with pytest.raises(BoilermakerStorageError) as exc_info:
+            await blob_storage.load_graph_slim_from_tags(sample_task_graph.graph_id)
+
+    assert exc_info.value.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# delete_blobs_batch: result-count mismatch warning (line 488)
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_blobs_batch_warns_when_result_count_mismatches(
+    mock_azureblob, blob_storage, caplog
+):
+    """When the batch delete response has fewer results than blobs submitted,
+    a warning must be logged about inaccurate failure attribution."""
+    import logging
+
+    container_client, _, _ = mock_azureblob
+    blob_names = ["blob-a", "blob-b", "blob-c"]
+    # Only return 2 results for 3 blobs
+    container_client.delete_blobs.return_value = _AsyncDeleteResults(
+        [_DeleteResult(202), _DeleteResult(202)]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="boilermaker.storage.blob_storage"):
+        await blob_storage.delete_blobs_batch(blob_names)
+
+    assert any("inaccurate" in r.message for r in caplog.records)

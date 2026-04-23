@@ -3,14 +3,13 @@
 from io import StringIO
 
 from boilermaker.cli._output import (
-    _short_task_id,
     render_graph_summary,
     render_purge_plan,
     render_task_table,
     status_style,
 )
 from boilermaker.task import Task, TaskGraph, TaskResultSlim, TaskStatus
-from boilermaker.task.task_id import TaskId
+from boilermaker.task.task_id import truncate_task_id
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -48,21 +47,6 @@ def _render_to_str(renderable, width: int = 120) -> str:
     console = Console(file=buf, no_color=True, width=width)
     console.print(renderable)
     return buf.getvalue()
-
-
-# ---------------------------------------------------------------------------
-# TestShortTaskId
-# ---------------------------------------------------------------------------
-
-
-class TestShortTaskId:
-    def test_truncates_long_id(self):
-        tid = TaskId("019750a3-bfac-7e3a-b4cd-4c3102c9f3f2")
-        assert _short_task_id(tid) == "4c3102c9f3f2"
-
-    def test_preserves_short_id(self):
-        tid = TaskId("abcd1234")
-        assert _short_task_id(tid) == "abcd1234"
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +244,7 @@ class TestRenderTaskTable:
     def test_task_id_is_truncated_to_last_12_chars(self):
         graph, task_a, task_b, task_c = _make_graph_with_tasks()
         _set_result(graph, task_a, TaskStatus.Success)
-        short_id = _short_task_id(task_a.task_id)
+        short_id = truncate_task_id(task_a.task_id)
         output = _render_to_str(render_task_table(graph))
         assert short_id in output
 

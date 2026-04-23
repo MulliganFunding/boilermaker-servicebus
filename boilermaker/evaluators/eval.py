@@ -41,7 +41,7 @@ async def eval_task(
     function = function_registry.get(task.function_name)
 
     # Look up function associated with the task
-    logger.info(f"[{task.function_name}] Begin Task {task.sequence_number=}")
+    logger.info(f"{task} Begin Task {task.sequence_number=}")
 
     if function is None:
         raise BoilermakerUnregisteredFunction(f"Function {task.function_name} not found in registry")
@@ -62,10 +62,7 @@ async def eval_task(
                 status=TaskStatus.Failure,
                 errors=["Task returned TaskFailureResult"],
             )
-            logger.warning(
-                f"[{task.function_name}] Task {task.sequence_number=} "
-                f"returned TaskFailureResult in {time.monotonic() - start:.3f}s"
-            )
+            logger.warning(f"{task} returned TaskFailureResult in {time.monotonic() - start:.3f}s")
         else:
             # Create success result
             task_result = TaskResult(
@@ -74,9 +71,7 @@ async def eval_task(
                 result=result,
                 status=TaskStatus.Success,
             )
-            logger.info(
-                f"[{task.function_name}] Completed Task {task.sequence_number=} in {time.monotonic() - start:.3f}s"
-            )
+            logger.info(f"{task} Completed Task {task.sequence_number=} in {time.monotonic() - start:.3f}s")
     except RetryException as retry:
         # A retry has been requested:
         # Calculate next delay and publish retry.
@@ -85,7 +80,7 @@ async def eval_task(
         if retry.policy and retry.policy != task.policy:
             # This will publish the *next* instance of the task using *this* policy
             task.policy = retry.policy
-            logger.warning(f"Task policy updated to retry policy {retry.policy}")
+            logger.warning(f"{task} retry policy updated to -> {retry.policy}")
 
         task_result = TaskResult(
             task_id=task.task_id,
@@ -96,7 +91,7 @@ async def eval_task(
         )
     except Exception as exc:
         # Some other exception has been thrown
-        err_msg = f"Exception in task sequence_number={task.sequence_number} {traceback.format_exc()}"
+        err_msg = f"Exception in {task} sequence_number={task.sequence_number} {traceback.format_exc()}"
         logger.error(err_msg)
         task_result = TaskResult(
             task_id=task.task_id,

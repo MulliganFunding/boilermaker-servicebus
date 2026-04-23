@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from boilermaker.task import TaskGraph, TaskStatus
 from boilermaker.task.result import TaskResult
-from boilermaker.task.task_id import TaskId
+from boilermaker.task.task_id import TaskId, truncate_task_id
 
 # ---------------------------------------------------------------------------
 # Color mapping
@@ -51,12 +51,6 @@ def _sanitize_id(task_id: TaskId) -> str:
 def _escape_label(text: str) -> str:
     """Escape text for use inside a Mermaid quoted label."""
     return text.replace("\\", "\\\\").replace('"', "#quot;").replace("\n", " ")
-
-
-def _short_task_id(task_id: TaskId) -> str:
-    """Return the last 12 characters of a task ID for compact display."""
-    full = str(task_id)
-    return full[-12:] if len(full) > 12 else full
 
 
 def _node_class(status: TaskStatus | None, is_stalled: bool, has_blob: bool) -> str:
@@ -105,7 +99,7 @@ def generate_mermaid(graph: TaskGraph, stalled_task_ids: set[TaskId]) -> str:
         label_parts = [_escape_label(task.function_name)]
         if not has_blob:
             label_parts.append("NO BLOB")
-        label_parts.append(f"...{_short_task_id(task_id)}")
+        label_parts.append(truncate_task_id(task_id))
         label = "\\n".join(label_parts)
 
         lines.append(f'    {sanitized}["{label}"]:::{cls}')
@@ -127,7 +121,7 @@ def generate_mermaid(graph: TaskGraph, stalled_task_ids: set[TaskId]) -> str:
 
         if not has_blob:
             label_parts.append("NO BLOB")
-        label_parts.append(f"...{_short_task_id(task_id)}")
+        label_parts.append(truncate_task_id(task_id))
         label = "\\n".join(label_parts)
 
         lines.append(f'    {sanitized}{{{{"{label}"}}}}:::{cls}')

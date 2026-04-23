@@ -535,9 +535,10 @@ async def test_graph_workflow_exception_handling(evaluator_context):
 
     assert evaluator_context.mock_storage.load_graph.call_count == _LOAD_GRAPH_RETRY_POLICY.max_tries
 
-    # Message must NOT be settled — suppress settlement to allow Service Bus redelivery
-    assert len(evaluator_context.mockservicebus._receiver.method_calls) == 0, (
-        "Message should NOT be settled when load_graph raises (transient error path)"
+    # Message must be abandoned (not completed/deadlettered) — allow immediate redelivery
+    evaluator_context.mockservicebus._receiver.abandon_message.assert_called_once()
+    assert not evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "Message should NOT be completed when load_graph raises (transient error path)"
     )
 
 
@@ -845,9 +846,10 @@ async def test_load_graph_storage_error_no_settlement(evaluator_context, mock_st
     # load_graph was retried the configured number of times
     assert mock_storage.load_graph.call_count == _LOAD_GRAPH_RETRY_POLICY.max_tries
 
-    # Message must NOT be settled — allow Service Bus redelivery
-    assert len(evaluator_context.mockservicebus._receiver.method_calls) == 0, (
-        "Message must not be settled when load_graph raises a transient error"
+    # Message must be abandoned (not completed/deadlettered) — allow immediate redelivery
+    evaluator_context.mockservicebus._receiver.abandon_message.assert_called_once()
+    assert not evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "Message must not be completed when load_graph raises a transient error"
     )
 
     # No downstream tasks must be published
@@ -920,9 +922,10 @@ async def test_non404_storage_error_retried_raises_continue_graph_error_no_settl
         f"Expected {_LOAD_GRAPH_RETRY_POLICY.max_tries} load_graph attempts, got {mock_storage.load_graph.call_count}"
     )
 
-    # Message must NOT be settled — Service Bus should redeliver
-    assert len(evaluator_context.mockservicebus._receiver.method_calls) == 0, (
-        "Message must not be settled when load_graph raises a transient 503 error"
+    # Message must be abandoned (not completed/deadlettered) — allow immediate redelivery
+    evaluator_context.mockservicebus._receiver.abandon_message.assert_called_once()
+    assert not evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "Message must not be completed when load_graph raises a transient 503 error"
     )
 
     # No downstream tasks published
@@ -1033,9 +1036,10 @@ async def test_validation_error_in_load_graph_raises_continue_graph_error(evalua
         f"Expected {_LOAD_GRAPH_RETRY_POLICY.max_tries} load_graph attempts, got {mock_storage.load_graph.call_count}"
     )
 
-    # Message must NOT be settled — allow Service Bus redelivery
-    assert len(evaluator_context.mockservicebus._receiver.method_calls) == 0, (
-        "Message must not be settled when load_graph raises (wrapping ValidationError)"
+    # Message must be abandoned (not completed/deadlettered) — allow immediate redelivery
+    evaluator_context.mockservicebus._receiver.abandon_message.assert_called_once()
+    assert not evaluator_context.mockservicebus._receiver.complete_message.called, (
+        "Message must not be completed when load_graph raises (wrapping ValidationError)"
     )
 
     # No downstream tasks must be published
@@ -2071,14 +2075,14 @@ async def test_412_scheduled_retry_second_412_sees_terminal_settles(evaluator_co
 
 
 @pytest.mark.parametrize("second_reread_value", [None, "scheduled", "pending"])
-async def test_412_scheduled_retry_second_412_sees_unclaimed_does_not_settle(
+async def test_412_scheduled_retry_second_412_sees_unclaimed_abandons(
     evaluator_context, mock_storage, second_reread_value
 ):
     """When the retry Started write gets a second 412 and the second re-read returns an
-    unclaimed status (None, Scheduled, Pending), the handler does NOT call complete_message
-    — it lets the SB lock expire for redelivery instead of permanently stalling the graph.
+    unclaimed status (None, Scheduled, Pending), the handler abandons for immediate redelivery
+    — it does NOT call complete_message, which would permanently stall the graph.
 
-    Spec action: RereadAfterRetry412 (Pending/Scheduled) → RereadAfterRetryNoSettle.
+    Spec action: RereadAfterRetry412 (Pending/Scheduled) → abandon.
     Parameterized over: None, Scheduled, Pending second re-reads.
     """
     from unittest.mock import patch
@@ -2135,13 +2139,14 @@ async def test_412_scheduled_retry_second_412_sees_unclaimed_does_not_settle(
     mock_eval_task.assert_not_called()
 
     assert result is not None
-    assert result.status == TaskStatus.Failure, (
-        f"Expected Failure for unclaimed second re-read value {second_reread_value!r}, got {result.status}"
+    assert result.status == TaskStatus.Scheduled, (
+        f"Expected Scheduled for unclaimed second re-read value {second_reread_value!r}, got {result.status}"
     )
 
+    evaluator_context.mockservicebus._receiver.abandon_message.assert_called_once()
     assert not evaluator_context.mockservicebus._receiver.complete_message.called, (
         "complete_message must NOT be called for unclaimed second re-read status — "
-        "let SB redeliver rather than permanently stalling the graph"
+        "abandon for immediate redelivery rather than letting the lock expire"
     )
 
 
@@ -2533,9 +2538,9 @@ async def test_non_412_started_write_error_falls_through_to_execution(evaluator_
 # ----- 412 + re-read also fails (lines 152-158) -----
 
 
-async def test_412_started_write_reread_also_fails_returns_failure(evaluator_context, mock_storage):
+async def test_412_started_write_reread_also_fails_abandons(evaluator_context, mock_storage):
     """When the Started write gets a 412 and the re-read also raises a storage error,
-    the evaluator must return Failure without settling (lines 152-158).
+    the evaluator abandons for immediate redelivery and returns Scheduled.
     """
     from unittest.mock import patch
 
@@ -2565,7 +2570,8 @@ async def test_412_started_write_reread_also_fails_returns_failure(evaluator_con
         result = await evaluator_context.evaluator()
 
     mock_eval_task.assert_not_called()
-    assert result.status == TaskStatus.Failure
+    assert result.status == TaskStatus.Scheduled
+    evaluator_context.mockservicebus._receiver.abandon_message.assert_called_once()
     assert not evaluator_context.mockservicebus._receiver.complete_message.called
 
 
@@ -2696,9 +2702,9 @@ async def test_412_reread_with_none_etag_logs_warning_and_retries(evaluator_cont
 # ----- Second 412 paths (lines 275-283, 290-291, 306-307, 324-336) -----
 
 
-async def test_second_412_reread_also_fails_returns_failure_no_settle(evaluator_context, mock_storage):
+async def test_second_412_reread_also_fails_abandons(evaluator_context, mock_storage):
     """When the second 412 + second re-read also raises a storage error, _reread2 is set
-    to None and the evaluator returns Failure without settling (lines 275-283).
+    to None and the evaluator abandons for immediate redelivery and returns Scheduled.
     """
     from unittest.mock import patch
 
@@ -2729,7 +2735,8 @@ async def test_second_412_reread_also_fails_returns_failure_no_settle(evaluator_
         result = await evaluator_context.evaluator()
 
     mock_eval_task.assert_not_called()
-    assert result.status == TaskStatus.Failure
+    assert result.status == TaskStatus.Scheduled
+    evaluator_context.mockservicebus._receiver.abandon_message.assert_called_once()
     assert not evaluator_context.mockservicebus._receiver.complete_message.called
 
 
