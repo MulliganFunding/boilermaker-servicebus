@@ -210,7 +210,7 @@ class Task(BaseModel):
         return self.attempts.inc(now)
 
     def __str__(self) -> str:
-        return f"Task<{self.task_id}: {self.function_name}>"
+        return f"Task<{self.function_name}: {self.task_id}>"
 
     def __hash__(self) -> int:
         """Hash based on unique task_id for use in sets and dicts."""
