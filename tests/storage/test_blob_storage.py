@@ -1,6 +1,7 @@
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, UTC
+from unittest import mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -542,6 +543,130 @@ async def test_store_and_load_task_result_round_trip(mock_azureblob, blob_storag
 
     assert loaded is not None, "load_task_result returned None — blob path mismatch between store and load"
     assert loaded.status == sample_task_result.status
+
+
+# Tests for load_graph_slim_from_tags (inspect-only tag-based loading)
+
+
+def _tagged_blob(name: str, graph_id: str, status: str, etag: str = "etag-abc") -> mock.MagicMock:
+    """Create a BlobProperties-like mock with tags set."""
+    blob = mock.MagicMock()
+    blob.name = name
+    blob.etag = etag
+    blob.tags = {"graph_id": graph_id, "status": status, "created_date": "2026-01-01"}
+    return blob
+
+
+async def test_load_graph_slim_from_tags_builds_from_tags_without_download(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+    sample_task,
+):
+    """load_graph_slim_from_tags must build TaskResultSlim from blob tags without
+    downloading blob content when the 'status' tag is present."""
+    sample_task_graph.add_task(sample_task)
+    graph_json = sample_task_graph.model_dump_json()
+    _, mockblobc, set_return = mock_azureblob
+    set_return.download_blob_returns(graph_json)
+
+    blob_name = f"task-results/{sample_task_graph.graph_id}/{sample_task.task_id}.json"
+    set_return.list_blobs_returns(
+        [_tagged_blob(blob_name, str(sample_task_graph.graph_id), "success", etag="etag-123")]
+    )
+
+    result = await blob_storage.load_graph_slim_from_tags(sample_task_graph.graph_id)
+
+    assert result is not None
+    assert sample_task.task_id in result.results
+    tr = result.results[sample_task.task_id]
+    assert isinstance(tr, TaskResultSlim)
+    assert tr.status == TaskStatus.Success
+    assert tr.etag == "etag-123"
+    # No blob content download should have occurred — only graph.json
+    assert mockblobc.download_blob.call_count == 1
+
+
+async def test_load_graph_slim_from_tags_falls_back_to_download_for_untagged_blob(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+    sample_task,
+):
+    """load_graph_slim_from_tags must fall back to content download for blobs that
+    have no 'status' tag (written before tag support was added)."""
+    sample_task_graph.add_task(sample_task)
+    slim_result = TaskResultSlim(
+        task_id=sample_task.task_id,
+        graph_id=sample_task.graph_id,
+        status=TaskStatus.Success,
+    )
+    graph_json = sample_task_graph.model_dump_json()
+    task_result_json = slim_result.model_dump_json()
+    _, mockblobc, set_return = mock_azureblob
+    set_return.download_blob_returns(None, side_effect=[graph_json, task_result_json])
+
+    blob = mock.MagicMock()
+    blob.name = f"task-results/{sample_task_graph.graph_id}/{sample_task.task_id}.json"
+    blob.etag = "etag-old"
+    blob.tags = None
+    set_return.list_blobs_returns([blob])
+
+    result = await blob_storage.load_graph_slim_from_tags(sample_task_graph.graph_id)
+
+    assert result is not None
+    assert sample_task.task_id in result.results
+    # download_blob called twice: graph.json + task result fallback
+    assert mockblobc.download_blob.call_count == 2
+
+
+async def test_load_graph_slim_from_tags_passes_include_tags_to_list_blobs(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+):
+    """load_graph_slim_from_tags must pass include=['tags'] to list_blobs."""
+    graph_json = sample_task_graph.model_dump_json()
+    container_client, _, set_return = mock_azureblob
+    set_return.download_blob_returns(graph_json)
+    set_return.list_blobs_returns([])
+
+    await blob_storage.load_graph_slim_from_tags(sample_task_graph.graph_id)
+
+    container_client.list_blobs.assert_called_once()
+    assert container_client.list_blobs.call_args.kwargs.get("include") == ["tags"]
+
+
+async def test_load_graph_unchanged_does_not_use_tags(
+    mock_azureblob,
+    blob_storage,
+    sample_task_graph,
+    sample_task,
+):
+    """load_graph must NOT pass include=['tags'] — evaluator path is unchanged."""
+    sample_task_graph.add_task(sample_task)
+    slim_result = TaskResultSlim(
+        task_id=sample_task.task_id,
+        graph_id=sample_task.graph_id,
+        status=TaskStatus.Success,
+    )
+    graph_json = sample_task_graph.model_dump_json()
+    task_result_json = slim_result.model_dump_json()
+    container_client, _, set_return = mock_azureblob
+    set_return.download_blob_returns(None, side_effect=[graph_json, task_result_json])
+    set_return.list_blobs_returns(
+        [
+            BlobProperties(
+                name=f"task-results/{sample_task_graph.graph_id}/{sample_task.task_id}.json",
+                last_modified="2023-01-01T00:00:00Z",
+            )
+        ]
+    )
+
+    await blob_storage.load_graph(sample_task_graph.graph_id)
+
+    call_kwargs = container_client.list_blobs.call_args.kwargs
+    assert "include" not in call_kwargs
 
 
 # Tests for load_graph full=True parameter

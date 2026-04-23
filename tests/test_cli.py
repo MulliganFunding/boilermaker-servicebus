@@ -46,6 +46,7 @@ def _mock_storage(graph: TaskGraph | None = None) -> mock.AsyncMock:
     """Return a mock storage whose load_graph returns the given graph."""
     storage = mock.AsyncMock()
     storage.load_graph = mock.AsyncMock(return_value=graph)
+    storage.load_graph_slim_from_tags = mock.AsyncMock(return_value=graph)
     return storage
 
 

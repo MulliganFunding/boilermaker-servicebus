@@ -63,7 +63,7 @@ async def run_inspect(
         open_visual(graph, stalled_task_ids, console=console)
         return exit_code
 
-    graph = await storage.load_graph(GraphId(graph_id))
+    graph = await storage.load_graph_slim_from_tags(GraphId(graph_id))
     if graph is None:
         print(f"ERROR: Graph {graph_id} not found in storage.", file=sys.stderr)
         return EXIT_ERROR

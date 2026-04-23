@@ -554,9 +554,10 @@ _GLOBAL_OPTS = [
 
 
 def _mock_storage(graph: TaskGraph | None = None) -> mock.AsyncMock:
-    """Return a mock storage whose load_graph returns the given graph."""
+    """Return a mock storage whose load_graph/load_graph_slim_from_tags return the given graph."""
     storage = mock.AsyncMock()
     storage.load_graph = mock.AsyncMock(return_value=graph)
+    storage.load_graph_slim_from_tags = mock.AsyncMock(return_value=graph)
     return storage
 
 
@@ -722,7 +723,7 @@ class TestVisualLoadGraphFullTrue:
         )
 
     @pytest.mark.asyncio
-    async def test_non_visual_calls_load_graph_without_full(self):
+    async def test_non_visual_calls_load_graph_slim_from_tags(self):
         graph, task_a, task_b, task_c = _make_graph_with_tasks()
         _set_result(graph, task_a, TaskStatus.Success)
         _set_result(graph, task_b, TaskStatus.Success)
@@ -733,7 +734,6 @@ class TestVisualLoadGraphFullTrue:
             storage, str(graph.graph_id), console=_no_color_console(),
         )
 
-        storage.load_graph.assert_called_once()
-        call_kwargs = storage.load_graph.call_args
-        # Non-visual path should not pass full=True
-        assert call_kwargs.kwargs.get("full", False) is False
+        storage.load_graph_slim_from_tags.assert_called_once()
+        # The evaluator's load_graph must not be called by the non-visual path
+        storage.load_graph.assert_not_called()
