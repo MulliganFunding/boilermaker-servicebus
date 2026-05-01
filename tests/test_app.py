@@ -16,7 +16,7 @@ from boilermaker import retries
 from boilermaker.app import Boilermaker, BoilermakerAppException
 from boilermaker.evaluators import NoStorageEvaluator
 from boilermaker.exc import BoilermakerStorageError
-from boilermaker.task import Task, TaskGraph
+from boilermaker.task import NullTaskId, Task, TaskGraph
 
 
 class State:
@@ -821,3 +821,85 @@ async def test_renew_message_lock_via_state_app(sbus, mockservicebus, make_messa
         "Boilermaker.message_handler to fix this."
     )
     mockservicebus._receiver.renew_message_lock.assert_awaited_once()
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# NullTaskId / duplicate task_id safety
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_task_proto_has_null_task_id(app):
+    """Registered task prototypes must carry NullTaskId, not a real UUID."""
+
+    async def somefunc(state):
+        return "ok"
+
+    app.register_async(somefunc)
+    proto = app.task_registry["somefunc"]
+    assert proto.task_id == NullTaskId, (
+        f"Task prototype should have NullTaskId but got {proto.task_id}"
+    )
+
+
+async def test_create_task_assigns_unique_id(app):
+    """Every call to create_task must produce a unique, non-null task_id."""
+
+    async def somefunc(state):
+        return "ok"
+
+    app.register_async(somefunc)
+    task1 = app.create_task(somefunc)
+    task2 = app.create_task(somefunc)
+
+    assert task1.task_id != NullTaskId
+    assert task2.task_id != NullTaskId
+    assert task1.task_id != task2.task_id, (
+        "Two tasks created from the same function must have different task_ids"
+    )
+
+
+async def test_publish_task_rejects_null_task_id(app, mockservicebus):
+    """publish_task must refuse to send a task that still carries NullTaskId."""
+
+    async def somefunc(state):
+        return "ok"
+
+    app.register_async(somefunc)
+    # Manually build a task with NullTaskId (simulating the old bug)
+    proto = app.task_registry["somefunc"]
+    import copy
+
+    bad_task = copy.deepcopy(proto)
+    # Don't assign a new task_id — it should still be NullTaskId
+    bad_task.payload = {"args": (), "kwargs": {}}
+
+    with pytest.raises(BoilermakerAppException, match="NullTaskId"):
+        await app.publish_task(bad_task)
+
+    # Nothing should have been sent
+    mockservicebus._sender.assert_not_called()
+
+
+async def test_apply_async_never_publishes_duplicate_ids(app, mockservicebus):
+    """Multiple apply_async calls for the same function must produce distinct message IDs."""
+
+    async def somefunc(state):
+        return "ok"
+
+    app.register_async(somefunc)
+    t1 = await app.apply_async(somefunc)
+    t2 = await app.apply_async(somefunc)
+    t3 = await app.apply_async(somefunc)
+
+    ids = {t1.task_id, t2.task_id, t3.task_id}
+    assert len(ids) == 3, f"Expected 3 unique task_ids, got {len(ids)}: {ids}"
+    assert NullTaskId not in ids
+
+    # Verify the unique_msg_id sent to ServiceBus is also unique per call
+    calls = mockservicebus._sender.method_calls
+    assert len(calls) == 3
+    msg_ids = set()
+    for call in calls:
+        # schedule_messages is the underlying method; extract the message body
+        published_task = Task.model_validate_json(str(call[1][0]))
+        msg_ids.add(published_task.task_id)
+    assert len(msg_ids) == 3
+    assert NullTaskId not in msg_ids

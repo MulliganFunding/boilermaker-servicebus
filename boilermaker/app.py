@@ -38,7 +38,7 @@ from .evaluators.task_graph import _MAX_DELIVERY_COUNT_FOR_ABANDON
 from .exc import BoilermakerAppException, BoilermakerStorageError
 from .retries import RetryPolicy
 from .storage import StorageInterface
-from .task import Task, TaskGraph, TaskId
+from .task import new_task_id, NullTaskId, Task, TaskGraph, TaskId
 
 tracer: trace.Tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
@@ -165,6 +165,7 @@ class Boilermaker:
 
         task = Task.default(fn_name, **options)
         self.function_registry[fn_name] = typing.cast(TaskHandler, fn)  # why must cast here
+        task.task_id = NullTaskId
         self.task_registry[fn_name] = task
         logger.info(f"Registered background function fn={fn_name}")
         return self
@@ -225,6 +226,7 @@ class Boilermaker:
         payload = {"args": args, "kwargs": kwargs}
         task_proto = self.task_registry[fn.__name__]
         task = copy.deepcopy(task_proto)
+        task.task_id = new_task_id()
         task.payload = payload
         if policy is not None:
             task.policy = policy
@@ -355,6 +357,13 @@ class Boilermaker:
             published = await app.publish_task(task, delay=60)  # 1 minute delay
             print(f"Published with sequence: {published.sequence_number}")
         """
+        if task.task_id == NullTaskId:
+            raise BoilermakerAppException(
+                "Refusing to publish task with NullTaskId — "
+                "this is a prototype task that was never assigned a unique ID",
+                [],
+            )
+
         encountered_errors = []
         for _i in range(publish_attempts):
             try:
