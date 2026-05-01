@@ -554,18 +554,17 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         elif result.status == TaskStatus.Retry:
             # Retry requested: republish the same task with delay
             delay = self.task.get_next_delay()
-            retry_msg_id = f"{self.task.task_id}:{self.task.attempts.attempts}"
             warn_msg = (
                 f"{_graph_tag} [{result.errors}] {_task_tag} "
                 f"[attempt {self.task.attempts.attempts} of {self.task.policy.max_tries}] "
                 f"Publishing retry... {self.sequence_number=} "
-                f"<function={self.task.function_name}> with {delay=} {retry_msg_id=}"
+                f"<function={self.task.function_name}> with {delay=} {self.task.retry_task_id=}"
             )
             logger.warning(warn_msg)
             await self.publish_task(
                 self.task,
                 delay=delay,
-                unique_msg_id=retry_msg_id,
+                unique_msg_id=self.task.retry_task_id,
             )
 
         # At-least once: settle at the end.

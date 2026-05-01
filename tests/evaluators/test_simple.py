@@ -383,6 +383,44 @@ async def test_task_retries_acks_late(
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
+# Fix F0: Retry publish uses differentiated message_id
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_retry_publish_uses_differentiated_message_id(app, mockservicebus, make_message):
+    """Retry publishes must use message_id '{task_id}:{attempt_number}' so that
+    Azure Service Bus duplicate detection does not silently drop retry messages.
+
+    The original publish uses bare task_id as message_id. A retry for the same
+    task_id would be deduped without a differentiated ID.
+    """
+    published = []
+
+    async def mock_publisher(task, *args, **kwargs):
+        published.append((task, args, kwargs))
+
+    async def retrytask(state):
+        raise retries.RetryException("Retry me")
+
+    app.register_async(retrytask, policy=retries.RetryPolicy.default())
+    task = app.create_task(retrytask)
+    task.msg = make_message(task)
+
+    ev = NoStorageEvaluator(
+        mockservicebus._receiver, task, mock_publisher, app.function_registry, state=app.state
+    )
+    result = await ev.message_handler()
+    assert result.status == TaskStatus.Retry
+
+    assert len(published) == 1
+    retry_task, _, kwargs = published[0]
+    expected_msg_id = f"{retry_task.task_id}:{retry_task.attempts.attempts}"
+    actual_msg_id = kwargs.get("unique_msg_id")
+    assert actual_msg_id == expected_msg_id, (
+        f"Retry publish must use differentiated message_id. "
+        f"Expected '{expected_msg_id}', got '{actual_msg_id}'"
+    )
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
 # test task-handling with exceptions
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 @pytest.mark.parametrize("acks_late", [True, False])
