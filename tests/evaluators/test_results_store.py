@@ -302,6 +302,43 @@ async def test_retry_policy_update_with_storage(acks_late, store_evaluator_conte
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
+# Fix F0: Retry publish uses differentiated message_id
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+async def test_retry_publish_uses_differentiated_message_id(store_evaluator_context):
+    """Retry publishes must use message_id '{task_id}:{attempt_number}' so that
+    Azure Service Bus duplicate detection does not silently drop retry messages.
+
+    The original publish uses bare task_id as message_id. A retry for the same
+    task_id would be deduped without a differentiated ID.
+    """
+
+    async def retrytask(state):
+        raise retries.RetryException("Retry me")
+
+    store_evaluator_context.app.register_async(retrytask, policy=retries.RetryPolicy.default())
+    task = store_evaluator_context.app.create_task(retrytask)
+    store_evaluator_context.current_task = task
+
+    async with store_evaluator_context.with_regular_assertions(
+        compare_result=None,
+        compare_status=TaskStatus.Retry,
+        check_graph_loaded=False,
+    ) as ctx:
+        ctx.assert_messages_scheduled(1)
+        scheduled = ctx.get_scheduled_messages()
+        retry_msg = scheduled[0]
+        task = retry_msg.task
+        kwargs = retry_msg.kwargs
+
+        expected_msg_id = f"{task.task_id}:{task.attempts.attempts}"
+        actual_msg_id = kwargs.get("unique_msg_id")
+        assert actual_msg_id == expected_msg_id, (
+            f"Retry publish must use differentiated message_id. "
+            f"Expected '{expected_msg_id}', got '{actual_msg_id}'"
+        )
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
 # Exception Handling Coverage Tests
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 @pytest.mark.parametrize("acks_late", [True, False])

@@ -139,12 +139,13 @@ class ResultsStorageTaskEvaluator(TaskEvaluatorBase):
                 f"{result.errors} "
                 f"[attempt {self.task.attempts.attempts} of {self.task.policy.max_tries}] "
                 f"Publishing retry... {self.sequence_number=} "
-                f"<function={self.task.function_name}> with {delay=}"
+                f"<function={self.task.function_name}> with {delay=} {self.task.retry_task_id=}"
             )
             logger.warning(warn_msg)
             await self.publish_task(
                 self.task,
                 delay=delay,
+                unique_msg_id=self.task.retry_task_id,
             )
 
         # At-least once: settle at the end.

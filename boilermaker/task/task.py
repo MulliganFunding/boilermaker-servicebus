@@ -262,6 +262,19 @@ class Task(BaseModel):
         other.on_success = self
         return self
 
+    @property
+    def retry_task_id(self) -> str:
+        """Generate a unique identifier for retry attempts.
+
+        Combines the task ID with the current attempt count to create
+        a unique identifier for each retry attempt. This is useful for
+        tracking and logging retries.
+
+        Returns:
+            str: A unique identifier for the current retry attempt
+        """
+        return f"{self.task_id}:{self.attempts.attempts}"
+
     @classmethod
     def si(
         cls,
