@@ -895,9 +895,7 @@ async def test_no_publish_when_load_graph_fails(evaluator_context, mock_storage)
     assert evaluator_context.get_scheduled_messages() == [], "task_publisher must not be called when load_graph raises"
 
 
-async def test_non404_storage_error_retried_raises_continue_graph_error_no_settlement(
-    evaluator_context, mock_storage
-):
+async def test_non404_storage_error_retried_raises_continue_graph_error_no_settlement(evaluator_context, mock_storage):
     """A non-404 BoilermakerStorageError (e.g. 503) must be retried and eventually
     raise ContinueGraphError, leaving the message unsettled for Service Bus redelivery.
 
@@ -934,9 +932,7 @@ async def test_non404_storage_error_retried_raises_continue_graph_error_no_settl
     )
 
 
-async def test_retries_exhausted_continue_graph_error_does_not_propagate(
-    retries_exhausted_scenario, mock_storage
-):
+async def test_retries_exhausted_continue_graph_error_does_not_propagate(retries_exhausted_scenario, mock_storage):
     """ContinueGraphError from continue_graph on the RetriesExhausted path must not propagate.
 
     The message is already deadlettered before continue_graph is called, so
@@ -1266,8 +1262,7 @@ async def test_failure_callback_publish_before_store(evaluator_context, app):
 
     published_ids = {msg.task.task_id for msg in evaluator_context.get_scheduled_messages()}
     assert fail_task.task_id in published_ids, (
-        "Pending failure callback must be published on redelivery "
-        "(generate_failure_ready_tasks re-discovers it)"
+        "Pending failure callback must be published on redelivery (generate_failure_ready_tasks re-discovers it)"
     )
 
 
@@ -1280,8 +1275,9 @@ async def test_publish_task_exception_on_second_task_does_not_abort_loop(app, ev
     """A publish_task failure for one ready task must not abort publishing of remaining tasks.
 
     Two ready tasks are set up. publish_task raises on the second call.
-    Assert: first task is published, second task is also attempted, continue_graph does not raise,
-    and the failed task remains in Pending status (publish-before-store: blob write skipped on failure).
+    Assert: both tasks are attempted (the loop is best-effort, not aborted early), the first
+    is published, the failed one remains Pending, and continue_graph then raises
+    ContinueGraphError so the parent is redelivered to retry the lost dispatch.
     """
 
     async def task_b(state):
@@ -1334,17 +1330,16 @@ async def test_publish_task_exception_on_second_task_does_not_abort_loop(app, ev
         status=TaskStatus.Success,
     )
 
-    # continue_graph must not raise even though publish_task raises on the second call
-    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+    # The loop is best-effort (attempts all ready tasks) but a lost dispatch must
+    # surface so the parent is redelivered rather than silently settled.
+    with pytest.raises(exc.ContinueGraphError):
+        await evaluator_context.evaluator.continue_graph(completed)
 
-    # Both t_b and t_c were attempted (3 attempts including the one that failed)
+    # Both t_b and t_c were attempted (loop not aborted by the first failure)
     assert len(attempted_task_ids) == 2, f"Expected both ready tasks to be attempted, got {attempted_task_ids}"
 
     # Only one task was successfully published (the one that didn't raise)
     assert len(published_task_ids) == 1, f"Expected exactly one successful publish, got {published_task_ids}"
-
-    # ready_count only counts successful publishes
-    assert ready_count == 1, f"Expected ready_count=1 (only successful publish), got {ready_count}"
 
     # The failed task remains in Pending status (publish-before-store: blob write is skipped on publish failure)
     failed_task_id = next(tid for tid in attempted_task_ids if tid not in published_task_ids)
@@ -1353,8 +1348,13 @@ async def test_publish_task_exception_on_second_task_does_not_abort_loop(app, ev
     )
 
 
-async def test_continue_graph_does_not_raise_when_publish_fails(evaluator_context):
-    """continue_graph must not raise when publish_task raises; message_handler can proceed to settle."""
+async def test_continue_graph_raises_when_publish_fails(evaluator_context):
+    """continue_graph must raise ContinueGraphError when a ready task fails to publish.
+
+    Suppressing settlement (via the raise) is what lets message_handler abandon the
+    parent for redelivery. Swallowing the failure here would leave the un-dispatched
+    child orphaned in Pending and permanently stall the graph.
+    """
     graph = evaluator_context.graph
     # ok_task completed successfully
     graph.add_result(
@@ -1377,11 +1377,8 @@ async def test_continue_graph_does_not_raise_when_publish_fails(evaluator_contex
         status=TaskStatus.Success,
     )
 
-    # Must not raise — exception isolation means the loop continues and returns normally
-    ready_count = await evaluator_context.evaluator.continue_graph(completed)
-
-    # All publishes failed, so ready_count is 0
-    assert ready_count == 0
+    with pytest.raises(exc.ContinueGraphError):
+        await evaluator_context.evaluator.continue_graph(completed)
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -1553,8 +1550,7 @@ async def test_retry_publish_uses_differentiated_message_id(retry_scenario):
         expected_msg_id = f"{task.task_id}:{task.attempts.attempts}"
         actual_msg_id = kwargs.get("unique_msg_id")
         assert actual_msg_id == expected_msg_id, (
-            f"Retry publish must use differentiated message_id. "
-            f"Expected '{expected_msg_id}', got '{actual_msg_id}'"
+            f"Retry publish must use differentiated message_id. Expected '{expected_msg_id}', got '{actual_msg_id}'"
         )
 
 
@@ -1595,7 +1591,7 @@ async def test_started_write_passes_etag_from_initial_read(evaluator_context, mo
     ok_task = evaluator_context.ok_task
     ok_task.graph_id = graph.graph_id
 
-    observed_etag = "W/\"abc123\""
+    observed_etag = 'W/"abc123"'
 
     # Arrange: the task is Pending with a known ETag.
     pending_slim = TaskResultSlim(
@@ -1631,9 +1627,7 @@ async def test_started_write_passes_etag_from_initial_read(evaluator_context, mo
 
     # The first store_task_result call is the Started write — it must carry the ETag.
     started_call = mock_storage.store_task_result.call_args_list[0]
-    actual_etag = started_call.kwargs.get("etag") or (
-        started_call.args[1] if len(started_call.args) > 1 else None
-    )
+    actual_etag = started_call.kwargs.get("etag") or (started_call.args[1] if len(started_call.args) > 1 else None)
     assert actual_etag == observed_etag, (
         f"Started write must pass etag={observed_etag!r} from the initial read, got {actual_etag!r}"
     )
@@ -1660,7 +1654,7 @@ async def test_412_on_started_write_with_terminal_reread_skips_execution(evaluat
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     # After the 412, the re-read returns Success (another worker completed the task).
     success_slim = TaskResultSlim(
@@ -1671,9 +1665,7 @@ async def test_412_on_started_write_with_terminal_reread_skips_execution(evaluat
     mock_storage.load_task_result.side_effect = [pending_slim, success_slim]
 
     # The Started write raises 412.
-    mock_storage.store_task_result.side_effect = BoilermakerStorageError(
-        "412 Precondition Failed", status_code=412
-    )
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError("412 Precondition Failed", status_code=412)
 
     evaluator_context.evaluator.task = ok_task
     ok_task.msg = evaluator_context.make_message(ok_task)
@@ -1686,9 +1678,7 @@ async def test_412_on_started_write_with_terminal_reread_skips_execution(evaluat
 
     # The returned result must reflect the terminal status from the re-read.
     assert result is not None
-    assert result.status == TaskStatus.Success, (
-        f"Expected Success (from re-read), got {result.status}"
-    )
+    assert result.status == TaskStatus.Success, f"Expected Success (from re-read), got {result.status}"
 
     # Message must have been completed (not left unsettled).
     assert evaluator_context.mockservicebus._receiver.complete_message.called, (
@@ -1717,7 +1707,7 @@ async def test_412_on_started_write_with_started_reread_yields_to_other_worker(e
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     # After the 412, the re-read returns Started (another worker won the CAS and is running).
     started_slim = TaskResultSlim(
@@ -1728,9 +1718,7 @@ async def test_412_on_started_write_with_started_reread_yields_to_other_worker(e
     mock_storage.load_task_result.side_effect = [pending_slim, started_slim]
 
     # The Started write raises 412.
-    mock_storage.store_task_result.side_effect = BoilermakerStorageError(
-        "412 Precondition Failed", status_code=412
-    )
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError("412 Precondition Failed", status_code=412)
 
     evaluator_context.evaluator.task = ok_task
     ok_task.msg = evaluator_context.make_message(ok_task)
@@ -1743,9 +1731,7 @@ async def test_412_on_started_write_with_started_reread_yields_to_other_worker(e
 
     # The returned result carries Started status (we deferred to the other worker).
     assert result is not None
-    assert result.status == TaskStatus.Started, (
-        f"Expected Started (yielded to other worker), got {result.status}"
-    )
+    assert result.status == TaskStatus.Started, f"Expected Started (yielded to other worker), got {result.status}"
 
     # Message must have been completed so it is not redelivered.
     assert evaluator_context.mockservicebus._receiver.complete_message.called, (
@@ -1775,15 +1761,13 @@ async def test_412_on_started_write_with_none_reread_returns_failure(evaluator_c
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     # After the 412 the re-read returns None — the blob has vanished unexpectedly.
     mock_storage.load_task_result.side_effect = [pending_slim, None]
 
     # The Started write raises 412.
-    mock_storage.store_task_result.side_effect = BoilermakerStorageError(
-        "412 Precondition Failed", status_code=412
-    )
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError("412 Precondition Failed", status_code=412)
 
     evaluator_context.evaluator.task = ok_task
     ok_task.msg = evaluator_context.make_message(ok_task)
@@ -1829,22 +1813,28 @@ async def test_412_scheduled_reread_retries_started_write_with_new_etag(evaluato
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     scheduled_slim = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Scheduled,
-        etag="W/\"etag-v2\"",
+        etag='W/"etag-v2"',
     )
     mock_storage.load_task_result.side_effect = [pending_slim, scheduled_slim]
 
-    # First store raises 412; retry succeeds; result write also succeeds.
-    mock_storage.store_task_result.side_effect = [
-        BoilermakerStorageError("412 Precondition Failed", status_code=412),
-        None,
-        None,
-    ]
+    # First store raises 412; retry succeeds. All subsequent writes (the result
+    # write and the Scheduled writes continue_graph makes when dispatching ready
+    # children) succeed, so the dispatch completes and the message settles normally.
+    _store_calls = {"n": 0}
+
+    def _store_side_effect(*args, **kwargs):
+        _store_calls["n"] += 1
+        if _store_calls["n"] == 1:
+            raise BoilermakerStorageError("412 Precondition Failed", status_code=412)
+        return None
+
+    mock_storage.store_task_result.side_effect = _store_side_effect
 
     graph.add_result(
         TaskResult(
@@ -1872,10 +1862,8 @@ async def test_412_scheduled_reread_retries_started_write_with_new_etag(evaluato
         "store_task_result must be called at least twice (Started write + retry)"
     )
     retry_call = mock_storage.store_task_result.call_args_list[1]
-    actual_etag = retry_call.kwargs.get("etag") or (
-        retry_call.args[1] if len(retry_call.args) > 1 else None
-    )
-    assert actual_etag == "W/\"etag-v2\"", (
+    actual_etag = retry_call.kwargs.get("etag") or (retry_call.args[1] if len(retry_call.args) > 1 else None)
+    assert actual_etag == 'W/"etag-v2"', (
         f"Retry Started write must use the Scheduled blob's etag 'W/\"etag-v2\"', got {actual_etag!r}"
     )
 
@@ -1899,22 +1887,28 @@ async def test_412_scheduled_retry_success_falls_through_to_execution(evaluator_
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     scheduled_slim = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Scheduled,
-        etag="W/\"etag-v2\"",
+        etag='W/"etag-v2"',
     )
     mock_storage.load_task_result.side_effect = [pending_slim, scheduled_slim]
 
-    # First store raises 412; retry succeeds; result write also succeeds.
-    mock_storage.store_task_result.side_effect = [
-        BoilermakerStorageError("412 Precondition Failed", status_code=412),
-        None,
-        None,
-    ]
+    # First store raises 412; retry succeeds. All subsequent writes (the result
+    # write and the Scheduled writes continue_graph makes when dispatching ready
+    # children) succeed, so the dispatch completes and the message settles normally.
+    _store_calls = {"n": 0}
+
+    def _store_side_effect(*args, **kwargs):
+        _store_calls["n"] += 1
+        if _store_calls["n"] == 1:
+            raise BoilermakerStorageError("412 Precondition Failed", status_code=412)
+        return None
+
+    mock_storage.store_task_result.side_effect = _store_side_effect
 
     graph.add_result(
         TaskResult(
@@ -1945,9 +1939,7 @@ async def test_412_scheduled_retry_success_falls_through_to_execution(evaluator_
     )
 
     assert result is not None
-    assert result.status == TaskStatus.Success, (
-        f"Expected Success after retry success + execution, got {result.status}"
-    )
+    assert result.status == TaskStatus.Success, f"Expected Success after retry success + execution, got {result.status}"
 
     assert evaluator_context.mockservicebus._receiver.complete_message.called, (
         "complete_message must be called via the normal execution path after retry success"
@@ -1973,13 +1965,13 @@ async def test_412_scheduled_retry_second_412_sees_started_yields_with_settle(ev
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     scheduled_slim = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Scheduled,
-        etag="W/\"etag-v2\"",
+        etag='W/"etag-v2"',
     )
     started_slim = TaskResultSlim(
         task_id=ok_task.task_id,
@@ -2035,13 +2027,13 @@ async def test_412_scheduled_retry_second_412_sees_terminal_settles(evaluator_co
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     scheduled_slim = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Scheduled,
-        etag="W/\"etag-v2\"",
+        etag='W/"etag-v2"',
     )
     success_slim = TaskResultSlim(
         task_id=ok_task.task_id,
@@ -2065,9 +2057,7 @@ async def test_412_scheduled_retry_second_412_sees_terminal_settles(evaluator_co
     mock_eval_task.assert_not_called()
 
     assert result is not None
-    assert result.status == TaskStatus.Success, (
-        f"Expected Success (terminal from second re-read), got {result.status}"
-    )
+    assert result.status == TaskStatus.Success, f"Expected Success (terminal from second re-read), got {result.status}"
 
     assert evaluator_context.mockservicebus._receiver.complete_message.called, (
         "complete_message must be called once after second 412 + terminal re-read"
@@ -2098,13 +2088,13 @@ async def test_412_scheduled_retry_second_412_sees_unclaimed_abandons(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     scheduled_slim = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Scheduled,
-        etag="W/\"etag-v2\"",
+        etag='W/"etag-v2"',
     )
 
     if second_reread_value is None:
@@ -2169,23 +2159,29 @@ async def test_412_scheduled_retry_non412_error_proceeds_to_execution(evaluator_
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     scheduled_slim = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Scheduled,
-        etag="W/\"etag-v2\"",
+        etag='W/"etag-v2"',
     )
     mock_storage.load_task_result.side_effect = [pending_slim, scheduled_slim]
 
     # First store raises 412; retry raises a non-412 storage error (fail-open);
-    # result write succeeds after execution proceeds.
-    mock_storage.store_task_result.side_effect = [
-        BoilermakerStorageError("412 Precondition Failed", status_code=412),
-        BoilermakerStorageError("503 Service Unavailable", status_code=503),
-        None,
-    ]
+    # subsequent writes (result + continue_graph Scheduled writes) succeed.
+    _store_calls = {"n": 0}
+
+    def _store_side_effect(*args, **kwargs):
+        _store_calls["n"] += 1
+        if _store_calls["n"] == 1:
+            raise BoilermakerStorageError("412 Precondition Failed", status_code=412)
+        if _store_calls["n"] == 2:
+            raise BoilermakerStorageError("503 Service Unavailable", status_code=503)
+        return None
+
+    mock_storage.store_task_result.side_effect = _store_side_effect
 
     graph.add_result(
         TaskResult(
@@ -2244,23 +2240,29 @@ async def test_412_pending_reread_retries_started_write_with_new_etag(evaluator_
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     # Re-read after 412 returns Pending with a NEW etag — lease acquire bumped it.
     pending_slim_reread = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v2\"",
+        etag='W/"etag-v2"',
     )
     mock_storage.load_task_result.side_effect = [pending_slim, pending_slim_reread]
 
-    # First store raises 412; retry succeeds; result write also succeeds.
-    mock_storage.store_task_result.side_effect = [
-        BoilermakerStorageError("412 Precondition Failed", status_code=412),
-        None,
-        None,
-    ]
+    # First store raises 412; retry succeeds. All subsequent writes (the result
+    # write and the Scheduled writes continue_graph makes when dispatching ready
+    # children) succeed, so the dispatch completes and the message settles normally.
+    _store_calls = {"n": 0}
+
+    def _store_side_effect(*args, **kwargs):
+        _store_calls["n"] += 1
+        if _store_calls["n"] == 1:
+            raise BoilermakerStorageError("412 Precondition Failed", status_code=412)
+        return None
+
+    mock_storage.store_task_result.side_effect = _store_side_effect
 
     graph.add_result(
         TaskResult(
@@ -2288,10 +2290,8 @@ async def test_412_pending_reread_retries_started_write_with_new_etag(evaluator_
         "store_task_result must be called at least twice (Started write + retry)"
     )
     retry_call = mock_storage.store_task_result.call_args_list[1]
-    actual_etag = retry_call.kwargs.get("etag") or (
-        retry_call.args[1] if len(retry_call.args) > 1 else None
-    )
-    assert actual_etag == "W/\"etag-v2\"", (
+    actual_etag = retry_call.kwargs.get("etag") or (retry_call.args[1] if len(retry_call.args) > 1 else None)
+    assert actual_etag == 'W/"etag-v2"', (
         f"Retry Started write must use the re-read Pending blob etag 'W/\"etag-v2\"', got {actual_etag!r}"
     )
 
@@ -2318,22 +2318,28 @@ async def test_412_pending_retry_success_falls_through_to_execution(evaluator_co
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     pending_slim_reread = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v2\"",
+        etag='W/"etag-v2"',
     )
     mock_storage.load_task_result.side_effect = [pending_slim, pending_slim_reread]
 
-    # First store raises 412; retry succeeds; result write also succeeds.
-    mock_storage.store_task_result.side_effect = [
-        BoilermakerStorageError("412 Precondition Failed", status_code=412),
-        None,
-        None,
-    ]
+    # First store raises 412; retry succeeds. All subsequent writes (the result
+    # write and the Scheduled writes continue_graph makes when dispatching ready
+    # children) succeed, so the dispatch completes and the message settles normally.
+    _store_calls = {"n": 0}
+
+    def _store_side_effect(*args, **kwargs):
+        _store_calls["n"] += 1
+        if _store_calls["n"] == 1:
+            raise BoilermakerStorageError("412 Precondition Failed", status_code=412)
+        return None
+
+    mock_storage.store_task_result.side_effect = _store_side_effect
 
     graph.add_result(
         TaskResult(
@@ -2393,19 +2399,17 @@ async def test_412_retry_reread_settles_and_returns_retry(evaluator_context, moc
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Pending,
-        etag="W/\"etag-v1\"",
+        etag='W/"etag-v1"',
     )
     retry_slim_reread = TaskResultSlim(
         task_id=ok_task.task_id,
         graph_id=GraphId(graph.graph_id),
         status=TaskStatus.Retry,
-        etag="W/\"etag-v2\"",
+        etag='W/"etag-v2"',
     )
     mock_storage.load_task_result.side_effect = [pending_slim, retry_slim_reread]
 
-    mock_storage.store_task_result.side_effect = BoilermakerStorageError(
-        "412 Precondition Failed", status_code=412
-    )
+    mock_storage.store_task_result.side_effect = BoilermakerStorageError("412 Precondition Failed", status_code=412)
 
     evaluator_context.evaluator.task = ok_task
     ok_task.msg = evaluator_context.make_message(ok_task)
@@ -2416,9 +2420,7 @@ async def test_412_retry_reread_settles_and_returns_retry(evaluator_context, moc
     mock_eval_task.assert_not_called()
 
     assert result is not None
-    assert result.status == TaskStatus.Retry, (
-        f"Expected Retry for Retry re-read after 412, got {result.status}"
-    )
+    assert result.status == TaskStatus.Retry, f"Expected Retry for Retry re-read after 412, got {result.status}"
 
     assert evaluator_context.mockservicebus._receiver.complete_message.called, (
         "complete_message must be called — another worker already owns the retry"
@@ -3146,8 +3148,8 @@ async def test_continue_graph_callback_not_double_dispatched(evaluator_context, 
 
     # First call acquires lease; second call finds it held (returns None).
     evaluator_context.mock_storage.try_acquire_lease.side_effect = itertools.chain(
-        ["lease-id-1"],   # first worker acquires
-        [None],           # second worker cannot acquire
+        ["lease-id-1"],  # first worker acquires
+        [None],  # second worker cannot acquire
     )
 
     completed = TaskResult(

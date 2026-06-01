@@ -59,7 +59,12 @@ async def test_lease_skips_task_when_not_acquired(evaluator_context):
 
 
 async def test_lease_released_on_publish_failure(evaluator_context):
-    """Lease must be released even when publish_task raises an exception."""
+    """Lease must be released even when publish_task raises an exception.
+
+    The publish failure must surface as a ContinueGraphError so the caller can
+    suppress settlement and redeliver the parent (rather than silently orphaning
+    the child task in Pending).
+    """
     evaluator_context.prep_task_to_succeed()
 
     # Make publish_task raise an exception
@@ -79,12 +84,78 @@ async def test_lease_released_on_publish_failure(evaluator_context):
         result="OK",
     )
 
-    await evaluator_context.evaluator.continue_graph(completed)
+    # A lost dispatch must propagate so the parent is redelivered, not settled.
+    with pytest.raises(exc.ContinueGraphError):
+        await evaluator_context.evaluator.continue_graph(completed)
 
     # Lease should still have been released despite publish failure
     assert evaluator_context.mock_storage.release_lease.call_count > 0, (
         "release_lease must be called even when publish fails"
     )
+
+
+async def test_publish_failure_suppresses_parent_settlement(evaluator_context):
+    """Regression guard for graph stalls caused by a lost dispatch.
+
+    When a child task fails to publish during ``continue_graph`` (e.g. Service Bus
+    connection-pool exhaustion), the *succeeded* parent message must NOT be
+    completed. It must be abandoned for redelivery so the lost dispatch is retried.
+    Without this, the child is orphaned in Pending and the graph stalls forever:
+    no terminal state is ever reached, so no fan-in / all-failed callback fires.
+    """
+    evaluator_context.prep_task_to_succeed()
+
+    async def failing_publish(task, *args, **kwargs):
+        raise RuntimeError("No connections available: connection pool exhausted")
+
+    evaluator_context.evaluator.task_publisher = failing_publish
+
+    # Run the full message handler for the (successful) parent task.
+    result = await evaluator_context()
+
+    # The parent task itself still succeeded...
+    assert result.status == TaskStatus.Success
+
+    # ...but settlement must be a single abandon (redelivery) — never complete or
+    # dead-letter, which would strand the un-dispatched child.
+    receiver = evaluator_context.mockservicebus._receiver
+    assert len(receiver.method_calls) == 1, "expected exactly one settlement action"
+    assert receiver.method_calls[0][0] == "abandon_message", (
+        f"parent must be abandoned for redelivery when a child dispatch fails, got {receiver.method_calls[0][0]!r}"
+    )
+
+
+async def test_lease_acquisition_storage_error_raises_for_redelivery(evaluator_context):
+    """A storage error while acquiring the lease means the dispatch could not even be
+    attempted; continue_graph must raise so the parent is redelivered."""
+    evaluator_context.prep_task_to_succeed()
+    evaluator_context.mock_storage.try_acquire_lease.side_effect = exc.BoilermakerStorageError("boom")
+
+    completed = TaskResult(
+        task_id=evaluator_context.ok_task.task_id,
+        graph_id=evaluator_context.graph.graph_id,
+        status=TaskStatus.Success,
+        result="OK",
+    )
+    with pytest.raises(exc.ContinueGraphError):
+        await evaluator_context.evaluator.continue_graph(completed)
+
+
+async def test_lease_not_acquired_does_not_raise(evaluator_context):
+    """Lease-not-acquired (another worker owns the dispatch) is a benign skip and must
+    NOT raise — only genuine publish/lease failures trigger redelivery."""
+    evaluator_context.prep_task_to_succeed()
+    evaluator_context.mock_storage.try_acquire_lease.return_value = None
+
+    completed = TaskResult(
+        task_id=evaluator_context.ok_task.task_id,
+        graph_id=evaluator_context.graph.graph_id,
+        status=TaskStatus.Success,
+        result="OK",
+    )
+    # Must not raise, and nothing is counted as dispatched.
+    ready_count = await evaluator_context.evaluator.continue_graph(completed)
+    assert ready_count == 0
 
 
 async def test_lease_released_on_storage_error(evaluator_context):
@@ -173,9 +244,7 @@ async def test_lease_not_acquired_no_scheduled_write(evaluator_context):
     ) as ctx:
         # Only the started + result writes should exist (no scheduling writes)
         others = ctx.get_other_storage_calls()
-        assert len(others) == 0, (
-            "No scheduling writes should happen when lease is not acquired"
-        )
+        assert len(others) == 0, "No scheduling writes should happen when lease is not acquired"
 
 
 async def test_selective_lease_failure_skips_one_task(evaluator_context, app):
@@ -351,9 +420,7 @@ async def test_try_acquire_lease_returns_none_on_409(blob_storage):
     mock_blob_client = AsyncMock()
     mock_lease_client = AsyncMock()
 
-    mock_lease_client.acquire.side_effect = _make_azure_blob_error(
-        409, "There is already a lease present."
-    )
+    mock_lease_client.acquire.side_effect = _make_azure_blob_error(409, "There is already a lease present.")
 
     with patch.object(blob_storage, "get_blob_client") as mock_get_blob:
         mock_ctx = AsyncMock()
@@ -383,9 +450,7 @@ async def test_try_acquire_lease_returns_none_on_412(blob_storage):
         mock_get_blob.return_value = mock_ctx
 
         with patch("boilermaker.storage.blob_storage.BlobLeaseClient", return_value=mock_lease_client):
-            result = await blob_storage.try_acquire_lease(
-                "task-1", "graph-1", etag="stale-etag"
-            )
+            result = await blob_storage.try_acquire_lease("task-1", "graph-1", etag="stale-etag")
 
     assert result is None
 
@@ -395,9 +460,7 @@ async def test_try_acquire_lease_raises_on_non_409_412(blob_storage):
     mock_blob_client = AsyncMock()
     mock_lease_client = AsyncMock()
 
-    mock_lease_client.acquire.side_effect = _make_azure_blob_error(
-        404, "The specified blob does not exist."
-    )
+    mock_lease_client.acquire.side_effect = _make_azure_blob_error(404, "The specified blob does not exist.")
 
     with patch.object(blob_storage, "get_blob_client") as mock_get_blob:
         mock_ctx = AsyncMock()
@@ -426,9 +489,7 @@ async def test_try_acquire_lease_passes_etag_to_acquire(blob_storage):
         mock_get_blob.return_value = mock_ctx
 
         with patch("boilermaker.storage.blob_storage.BlobLeaseClient", return_value=mock_lease_client):
-            result = await blob_storage.try_acquire_lease(
-                "task-1", "graph-1", etag="my-etag-value"
-            )
+            result = await blob_storage.try_acquire_lease("task-1", "graph-1", etag="my-etag-value")
 
     assert result == "acquired-lease-id"
     mock_lease_client.acquire.assert_called_once_with(
@@ -550,9 +611,7 @@ async def test_publish_graph_publishes_before_store(app, mock_storage):
     assert "store" in call_order, "store_task_result must be called"
     publish_idx = call_order.index("publish")
     store_idx = call_order.index("store")
-    assert publish_idx < store_idx, (
-        f"publish must happen before store, but got order: {call_order}"
-    )
+    assert publish_idx < store_idx, f"publish must happen before store, but got order: {call_order}"
 
 
 async def test_publish_graph_publish_failure_skips_store(app, mock_storage):
@@ -588,9 +647,7 @@ async def test_publish_graph_publish_failure_skips_store(app, mock_storage):
     mock_storage.store_task_result.assert_not_called()
 
     # Lease must still be released despite publish failure
-    assert mock_storage.release_lease.call_count >= 1, (
-        "release_lease must be called even when publish fails"
-    )
+    assert mock_storage.release_lease.call_count >= 1, "release_lease must be called even when publish fails"
 
 
 async def test_publish_graph_passes_lease_id_to_store_task_result(app, mock_storage):
