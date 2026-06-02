@@ -1,4 +1,5 @@
 import asyncio
+import enum
 import itertools
 import logging
 import typing
@@ -13,6 +14,25 @@ from .common import TaskEvaluatorBase, TaskHandlerRegistry, TaskPublisher
 from .eval import eval_task
 
 logger = logging.getLogger("boilermaker.app")
+
+
+class _DispatchOutcome(enum.Enum):
+    """Result of attempting to dispatch one ready task in ``continue_graph``.
+
+    PUBLISHED: the task was published to Service Bus (counts toward ready_count).
+    SKIPPED:   the lease was not acquired because another worker holds it or the
+               blob was modified since load — another worker owns this dispatch,
+               so it is safe to do nothing here.
+    FAILED:    publishing genuinely failed (e.g. Service Bus unavailable, connection
+               pool exhausted) or the lease could not be checked due to a storage
+               error. The dispatch was lost. The parent message MUST NOT be settled,
+               so that Service Bus redelivers it and the dispatch is retried.
+    """
+
+    PUBLISHED = "published"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
 
 # Maximum SB delivery_count at which we actively abandon for fast redelivery.
 # Above this threshold we let the lock expire naturally to avoid burning through
@@ -675,7 +695,6 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         # Sanity check: did we load the result that was *just* stored?
         loaded_task_status = graph.get_status(completed_task_result.task_id)
         if loaded_task_status != completed_task_result.status:
-
             logger.error(
                 f"[Graph(id={graph_id})] Task status mismatch: "
                 f"expected {completed_task_result.task_id} to be {completed_task_result.status}, "
@@ -686,19 +705,42 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                 f"expected {completed_task_result.status}, got {loaded_task_status}"
             )
 
-        # Find and publish newly ready tasks
+        # Find and publish newly ready tasks. We attempt every ready task (best
+        # effort) and only afterwards decide whether to suppress settlement, so a
+        # single transient publish failure does not strand the other ready tasks.
         ready_count = 0
+        dispatch_failed = False
         for ready_task in itertools.chain.from_iterable(
             (graph.generate_ready_tasks(), graph.generate_failure_ready_tasks())
         ):
-            if await self._lease_publish_schedule(ready_task, graph, graph_id):
+            outcome = await self._lease_publish_schedule(ready_task, graph, graph_id)
+            if outcome is _DispatchOutcome.PUBLISHED:
                 ready_count += 1
+            elif outcome is _DispatchOutcome.FAILED:
+                dispatch_failed = True
 
         # Dispatch the all_failed_callback if the graph has reached terminal-failed state.
         # This loop yields at most one task.
         for callback_task in graph.generate_all_failed_callback_task():
-            if await self._lease_publish_schedule(callback_task, graph, graph_id):
+            outcome = await self._lease_publish_schedule(callback_task, graph, graph_id)
+            if outcome is _DispatchOutcome.PUBLISHED:
                 ready_count += 1
+            elif outcome is _DispatchOutcome.FAILED:
+                dispatch_failed = True
+
+        # If any ready task could not be published, the dispatch was lost. We must
+        # NOT settle the parent message: raise so message_handler abandons it for
+        # redelivery (bounded by the queue's max_delivery_count). On redelivery the
+        # idempotent guard skips re-executing the already-finished parent and retries
+        # this dispatch; SB duplicate-detection suppresses re-publishing tasks that
+        # did succeed. Without this, a publish failure here (e.g. Service Bus
+        # connection-pool exhaustion) silently orphans the child task in Pending and
+        # permanently stalls the graph — no terminal state, no callbacks ever fire.
+        if dispatch_failed:
+            raise exc.ContinueGraphError(
+                f"[Graph(id={graph_id})] One or more ready tasks failed to publish; "
+                "suppressing settlement so the parent message is redelivered and the dispatch retried."
+            )
 
         if ready_count == 0:
             logger.debug(f"[Graph(id={graph_id})] No new tasks ready after task {completed_task_result.task_id}")
@@ -710,7 +752,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         task: Task,
         graph: TaskGraph,
         graph_id: GraphId,
-    ) -> bool:
+    ) -> _DispatchOutcome:
         """Acquire a lease, publish a task to Service Bus, and write Scheduled status.
 
         Implements the four-step dispatch protocol used by ``continue_graph()``:
@@ -721,11 +763,15 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         4. Release the lease (always, via ``finally``).
 
         If the lease cannot be acquired (another worker holds it, or the blob was
-        modified since ``load_graph``), the task is silently skipped — it will be
-        retried on redelivery.
+        modified since ``load_graph``), the task is silently skipped — another
+        worker owns the dispatch.
 
         Returns:
-            True if the task was successfully published, False otherwise.
+            ``_DispatchOutcome.PUBLISHED`` if the task was published to Service Bus,
+            ``_DispatchOutcome.SKIPPED`` if the lease was not acquired (another worker
+            owns it), or ``_DispatchOutcome.FAILED`` if publishing/lease-acquisition
+            genuinely failed. A FAILED outcome means the dispatch was lost and the
+            caller must suppress settlement of the parent so it is redelivered.
         """
         task_result_slim = graph.results.get(task.task_id)
         lease_id = None
@@ -738,15 +784,15 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
         except exc.BoilermakerStorageError:
             logger.warning(
                 f"[{graph}] try_acquire_lease raised unexpected error for task "
-                f"{task}; skipping — will be retried on redelivery.",
+                f"{task}; dispatch lost, parent will be redelivered to retry.",
                 exc_info=True,
             )
-            return False
+            return _DispatchOutcome.FAILED
         if lease_id is None:
             logger.debug(
                 f"[{graph}] Skipping task {task}: lease not acquired (another worker holds it or blob was modified)."
             )
-            return False
+            return _DispatchOutcome.SKIPPED
 
         try:
             # Publish task to SB (message_id = task_id for fan-in dedup).
@@ -764,22 +810,23 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                     f"[{graph}] Failed to write Scheduled for {task}. Task published to Service Bus. Error: {err}",
                     exc_info=True,
                 )
-                return True  # published successfully, blob write failed
+                return _DispatchOutcome.PUBLISHED  # published successfully, blob write failed
             except ValueError:
                 logger.error(
                     f"[{graph}] schedule_task raised ValueError for {task}. Task published; blob write skipped.",
                     exc_info=True,
                 )
-                return True  # published successfully, schedule_task rejected it
+                return _DispatchOutcome.PUBLISHED  # published successfully, schedule_task rejected it
 
-            return True
+            return _DispatchOutcome.PUBLISHED
 
         except Exception:
             logger.error(
-                f"[{graph}] Failed to publish {task}; remains Pending, will retry on redelivery.",
+                f"[{graph}] Failed to publish {task}; remains Pending. Parent will be "
+                "redelivered to retry the dispatch (settlement suppressed).",
                 exc_info=True,
             )
-            return False
+            return _DispatchOutcome.FAILED
         finally:
             if lease_id is not None:
                 await self.storage_interface.release_lease(task.task_id, graph_id, lease_id)
