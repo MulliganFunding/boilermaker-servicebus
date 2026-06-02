@@ -141,13 +141,18 @@ VARIABLES
     workerReadySet,         \* workerReadySet[w]: set of task IDs
 
     \* The task currently being scheduled (lease acquired, publish pending / Scheduled pending)
-    workerCurrentReady      \* workerCurrentReady[w]: task ID or Nil
+    workerCurrentReady,     \* workerCurrentReady[w]: task ID or Nil
+
+    \* TRUE if any dispatch in the current continue_graph pass returned FAILED.
+    \* When TRUE at the end of the scheduling loop, the parent message MUST NOT
+    \* be settled — it is returned to SB for redelivery (ContinueGraphError).
+    workerDispatchFailed    \* workerDispatchFailed[w] \in BOOLEAN
 
 vars == <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
           workerPhase, workerMsg, workerTask, workerResult,
           workerCapturedEtag,
           workerSnapshot, workerSnapshotEtags,
-          workerReadySet, workerCurrentReady>>
+          workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* ---------------------------------------------------------------------------
 \* Type invariant
@@ -173,6 +178,7 @@ TypeOK ==
     /\ \A w \in Workers : workerResult[w] \in {"Success", "Failure", Nil}
     /\ \A w \in Workers : workerCapturedEtag[w] \in Nat \cup {0}
     /\ \A w \in Workers : workerCurrentReady[w] \in Tasks \cup {Nil}
+    /\ workerDispatchFailed \in [Workers -> BOOLEAN]
 
 \* ---------------------------------------------------------------------------
 \* Initial state
@@ -199,6 +205,7 @@ Init ==
     /\ workerSnapshotEtags = [w \in Workers |-> [t \in Tasks |-> 0]]
     /\ workerReadySet = [w \in Workers |-> {}]
     /\ workerCurrentReady = [w \in Workers |-> Nil]
+    /\ workerDispatchFailed = [w \in Workers |-> FALSE]
 
 \* ---------------------------------------------------------------------------
 \* Helper: reset worker to Idle
@@ -214,6 +221,7 @@ WorkerReset(w) ==
     /\ workerSnapshotEtags' = [workerSnapshotEtags EXCEPT ![w] = [t \in Tasks |-> 0]]
     /\ workerReadySet' = [workerReadySet EXCEPT ![w] = {}]
     /\ workerCurrentReady' = [workerCurrentReady EXCEPT ![w] = Nil]
+    /\ workerDispatchFailed' = [workerDispatchFailed EXCEPT ![w] = FALSE]
 
 \* ---------------------------------------------------------------------------
 \* Actions
@@ -232,7 +240,7 @@ ReceiveMessage(w) ==
         /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, workerResult,
                         workerCapturedEtag,
                         workerSnapshot, workerSnapshotEtags,
-                        workerReadySet, workerCurrentReady>>
+                        workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* ===== ReadForIdempotency =====
 \* Worker reads the blob before writing Started.
@@ -254,20 +262,20 @@ ReadForIdempotency(w) ==
           /\ workerCapturedEtag' = [workerCapturedEtag EXCEPT ![w] = currentEtag]
           /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                           workerSnapshot, workerSnapshotEtags,
-                          workerReadySet, workerCurrentReady>>
+                          workerReadySet, workerCurrentReady, workerDispatchFailed>>
        \/ \* Read succeeds and status is non-terminal: capture etag, proceed to Started write
           /\ currentStatus \notin TerminalStatuses
           /\ workerCapturedEtag' = [workerCapturedEtag EXCEPT ![w] = currentEtag]
           /\ workerPhase' = [workerPhase EXCEPT ![w] = "WroteStarted"]
           /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                           workerResult, workerSnapshot, workerSnapshotEtags,
-                          workerReadySet, workerCurrentReady>>
+                          workerReadySet, workerCurrentReady, workerDispatchFailed>>
        \/ \* Read fails (transient): proceed with etag=0 (unconditional write, fail-open)
           /\ workerCapturedEtag' = [workerCapturedEtag EXCEPT ![w] = 0]
           /\ workerPhase' = [workerPhase EXCEPT ![w] = "WroteStarted"]
           /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                           workerResult, workerSnapshot, workerSnapshotEtags,
-                          workerReadySet, workerCurrentReady>>
+                          workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* ===== WriteStarted =====
 \* Worker attempts to write Started with an ETag CAS.
@@ -294,7 +302,7 @@ WriteStartedSuccess(w) ==
        /\ UNCHANGED <<blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask, workerResult,
                        workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
-                       workerReadySet, workerCurrentReady>>
+                       workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* Sub-action: 412 — etag mismatch; re-read blob and branch
 \* We model the re-read as instantaneous (reading current blobStatus).
@@ -334,7 +342,7 @@ WriteStarted412(w) ==
              /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
                              workerMsg, workerTask, workerResult, workerCapturedEtag,
                              workerSnapshot, workerSnapshotEtags,
-                             workerReadySet, workerCurrentReady>>
+                             workerReadySet, workerCurrentReady, workerDispatchFailed>>
           \/ \* Re-read is Scheduled or Pending: no worker owns Started yet —
              \* retry the Started write with the re-read etag.
              \* Pending:   Under corrected Azure semantics (lease acquire does NOT bump
@@ -349,7 +357,7 @@ WriteStarted412(w) ==
              /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
                              workerMsg, workerTask, workerResult,
                              workerSnapshot, workerSnapshotEtags,
-                             workerReadySet, workerCurrentReady>>
+                             workerReadySet, workerCurrentReady, workerDispatchFailed>>
           \/ \* Re-read is some other non-terminal, non-Started, non-Scheduled, non-Pending status:
              \* always settle (complete message, return Failure)
              /\ rereadStatus \notin TerminalStatuses \cup {"Started", "Scheduled", "Pending"}
@@ -357,7 +365,7 @@ WriteStarted412(w) ==
              /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
                              workerMsg, workerTask, workerResult, workerCapturedEtag,
                              workerSnapshot, workerSnapshotEtags,
-                             workerReadySet, workerCurrentReady>>
+                             workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* ===== RetryStartedWrite =====
 \* Worker retries the Started write using the etag captured from the re-read.
@@ -382,7 +390,7 @@ RetryStartedWriteSuccess(w) ==
        /\ UNCHANGED <<blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask, workerResult,
                        workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
-                       workerReadySet, workerCurrentReady>>
+                       workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 RetryStartedWrite412(w) ==
     /\ workerPhase[w] = "RetryStartedAfterScheduled"
@@ -395,7 +403,7 @@ RetryStartedWrite412(w) ==
        /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
                        workerMsg, workerTask, workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
-                       workerReadySet, workerCurrentReady>>
+                       workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 RetryStartedWriteNon412Error(w) ==
     /\ workerPhase[w] = "RetryStartedAfterScheduled"
@@ -404,7 +412,7 @@ RetryStartedWriteNon412Error(w) ==
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
                     workerMsg, workerTask, workerResult, workerCapturedEtag,
                     workerSnapshot, workerSnapshotEtags,
-                    workerReadySet, workerCurrentReady>>
+                    workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* ===== RereadAfterRetry =====
 \* Worker got a second 412 on the retry. Re-reads the blob to determine action.
@@ -425,7 +433,7 @@ RereadAfterRetrySettle(w) ==
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
                     workerMsg, workerTask, workerResult, workerCapturedEtag,
                     workerSnapshot, workerSnapshotEtags,
-                    workerReadySet, workerCurrentReady>>
+                    workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* No-settle variant: blob is unclaimed (Pending or Scheduled).
 \* Return the SB message to the queue and reset the worker, exactly like LockExpiry.
@@ -459,7 +467,7 @@ WriteStartedNon412Error(w) ==
        /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                        workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
-                       workerReadySet, workerCurrentReady>>
+                       workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* NOTE: Settlement is now conditional on blob state.
 \* RereadAfterRetrySettle leads to Completing (settle) when the blob is claimed/terminal.
@@ -476,7 +484,7 @@ ExecuteTask(w) ==
         /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                         workerCapturedEtag,
                         workerSnapshot, workerSnapshotEtags,
-                        workerReadySet, workerCurrentReady>>
+                        workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* ===== WriteResult =====
 \* Worker writes the execution result to blob storage (unconditional overwrite).
@@ -496,7 +504,7 @@ WriteResult(w) ==
        /\ UNCHANGED <<blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask, workerResult,
                        workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
-                       workerReadySet, workerCurrentReady>>
+                       workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* ===== LoadGraph =====
 \* Worker reads all task statuses from blob storage.
@@ -509,7 +517,7 @@ LoadGraph(w) ==
     /\ workerPhase' = [workerPhase EXCEPT ![w] = "CheckingMismatch"]
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                     workerResult, workerCapturedEtag,
-                    workerReadySet, workerCurrentReady>>
+                    workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* ===== StatusMismatchCheck =====
 \* Verify that the loaded status for the completed task matches the written result.
@@ -531,6 +539,8 @@ StatusMismatchCheck(w) ==
              /\ workerReadySet' = [workerReadySet EXCEPT ![w] = readySet]
              /\ workerPhase' = [workerPhase EXCEPT ![w] = "AcquiringLease"]
              /\ workerCurrentReady' = [workerCurrentReady EXCEPT ![w] = Nil]
+             \* Initialize dispatch_failed to FALSE at the start of the scheduling loop
+             /\ workerDispatchFailed' = [workerDispatchFailed EXCEPT ![w] = FALSE]
           /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                           workerResult, workerCapturedEtag,
                           workerSnapshot, workerSnapshotEtags>>
@@ -585,7 +595,7 @@ AcquireLeaseSuccess(w) ==
         /\ workerPhase' = [workerPhase EXCEPT ![w] = "PublishingTask"]
         /\ UNCHANGED <<blobStatus, blobEtag, blobDeadLettered, sbMessages, workerMsg, workerTask,
                         workerResult, workerCapturedEtag,
-                        workerSnapshot, workerSnapshotEtags>>
+                        workerSnapshot, workerSnapshotEtags, workerDispatchFailed>>
 
 AcquireLeaseFail(w) ==
     /\ workerPhase[w] = "AcquiringLease"
@@ -597,18 +607,64 @@ AcquireLeaseFail(w) ==
         /\ workerReadySet' = [workerReadySet EXCEPT ![w] = workerReadySet[w] \ {child}]
         /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerPhase,
                         workerMsg, workerTask, workerResult, workerCapturedEtag,
-                        workerSnapshot, workerSnapshotEtags, workerCurrentReady>>
+                        workerSnapshot, workerSnapshotEtags, workerCurrentReady, workerDispatchFailed>>
 
-FinishAcquiring(w) ==
+\* ===== AcquireLeaseStorageError =====
+\* try_acquire_lease raises a storage error (not 409/412 lease contention, but
+\* a genuine infrastructure failure). The dispatch is lost.
+\* Maps to _DispatchOutcome.FAILED in the implementation.
+\* Sets workerDispatchFailed so that FinishAcquiring suppresses settlement.
+AcquireLeaseStorageError(w) ==
+    /\ workerPhase[w] = "AcquiringLease"
+    /\ workerReadySet[w] /= {}
+    /\ \E child \in workerReadySet[w] :
+        /\ workerReadySet' = [workerReadySet EXCEPT ![w] = workerReadySet[w] \ {child}]
+        /\ workerDispatchFailed' = [workerDispatchFailed EXCEPT ![w] = TRUE]
+    /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerPhase,
+                    workerMsg, workerTask, workerResult, workerCapturedEtag,
+                    workerSnapshot, workerSnapshotEtags, workerCurrentReady>>
+
+\* ===== FinishAcquiring =====
+\* All ready tasks have been attempted. If any dispatch failed
+\* (workerDispatchFailed is TRUE), the parent message MUST NOT be settled:
+\* ContinueGraphError is raised, causing the message to be returned to
+\* SB for redelivery. Otherwise, settle the message normally.
+FinishAcquiringSuccess(w) ==
     /\ workerPhase[w] = "AcquiringLease"
     /\ workerReadySet[w] = {}
     /\ workerCurrentReady[w] = Nil
-    \* No more tasks to schedule in this pass; settle the message
+    /\ ~workerDispatchFailed[w]
+    \* No failures: settle the message
     /\ workerPhase' = [workerPhase EXCEPT ![w] = "Completing"]
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                     workerResult, workerCapturedEtag,
                     workerSnapshot, workerSnapshotEtags,
-                    workerReadySet, workerCurrentReady>>
+                    workerReadySet, workerCurrentReady, workerDispatchFailed>>
+
+\* Dispatch-failed variant: at least one ready task could not be published.
+\* ContinueGraphError is raised: do NOT settle the parent message.
+\* Return it to SB for redelivery (bounded by MaxDeliveryCount).
+\* On redelivery, the idempotent guard skips re-executing the finished parent
+\* task and retries continue_graph; SB duplicate-detection suppresses
+\* re-publishing tasks that already succeeded.
+FinishAcquiringDispatchFailed(w) ==
+    /\ workerPhase[w] = "AcquiringLease"
+    /\ workerReadySet[w] = {}
+    /\ workerCurrentReady[w] = Nil
+    /\ workerDispatchFailed[w]
+    \* Dispatch failed: suppress settlement, return message to SB
+    /\ LET msg == workerMsg[w]
+       IN
+       /\ \/ /\ msg.deliveryCount < MaxDeliveryCount
+             /\ sbMessages' = sbMessages \cup
+                   {[taskId |-> msg.taskId,
+                     deliveryCount |-> msg.deliveryCount + 1]}
+             /\ UNCHANGED blobDeadLettered
+          \/ /\ msg.deliveryCount = MaxDeliveryCount
+             /\ UNCHANGED sbMessages
+             /\ blobDeadLettered' = [blobDeadLettered EXCEPT ![msg.taskId] = TRUE]
+    /\ WorkerReset(w)
+    /\ UNCHANGED <<blobStatus, blobEtag, blobLeased>>
 
 \* ===== PublishTask =====
 \* Publish SB message for the leased task (publish-before-store).
@@ -624,17 +680,19 @@ PublishTaskSuccess(w) ==
        /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, workerMsg, workerTask,
                        workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
-                       workerReadySet, workerCurrentReady>>
+                       workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 PublishTaskFail(w) ==
     /\ workerPhase[w] = "PublishingTask"
     /\ workerCurrentReady[w] /= Nil
     /\ LET child == workerCurrentReady[w]
        IN
-       \* Publish failed: release lease (in finally), return to acquiring next task
+       \* Publish failed: release lease (in finally), set dispatch_failed,
+       \* return to acquiring next task (best-effort: try remaining tasks).
        /\ blobLeased' = [blobLeased EXCEPT ![child] = FALSE]
        /\ workerCurrentReady' = [workerCurrentReady EXCEPT ![w] = Nil]
        /\ workerPhase' = [workerPhase EXCEPT ![w] = "AcquiringLease"]
+       /\ workerDispatchFailed' = [workerDispatchFailed EXCEPT ![w] = TRUE]
        /\ UNCHANGED <<blobStatus, blobEtag, blobDeadLettered, sbMessages, workerMsg, workerTask,
                        workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags, workerReadySet>>
@@ -655,7 +713,7 @@ WriteScheduledSuccess(w) ==
        /\ UNCHANGED <<blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                        workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
-                       workerReadySet, workerCurrentReady>>
+                       workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 WriteScheduledFail(w) ==
     /\ workerPhase[w] = "WritingScheduled"
@@ -665,7 +723,7 @@ WriteScheduledFail(w) ==
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                     workerResult, workerCapturedEtag,
                     workerSnapshot, workerSnapshotEtags,
-                    workerReadySet, workerCurrentReady>>
+                    workerReadySet, workerCurrentReady, workerDispatchFailed>>
 
 \* ===== ReleaseLease =====
 \* Release the blob lease (always, in finally block).
@@ -680,10 +738,12 @@ ReleaseLease(w) ==
        /\ workerPhase' = [workerPhase EXCEPT ![w] = "AcquiringLease"]
        /\ UNCHANGED <<blobStatus, blobEtag, blobDeadLettered, sbMessages, workerMsg, workerTask,
                        workerResult, workerCapturedEtag,
-                       workerSnapshot, workerSnapshotEtags, workerReadySet>>
+                       workerSnapshot, workerSnapshotEtags, workerReadySet, workerDispatchFailed>>
 
 \* ===== CompleteMessage =====
 \* Settle the SB message. Message was already removed from sbMessages on receive.
+\* This action is only reachable when workerDispatchFailed is FALSE
+\* (FinishAcquiringDispatchFailed handles the failed case by returning the message).
 CompleteMessage(w) ==
     /\ workerPhase[w] = "Completing"
     /\ WorkerReset(w)
@@ -725,24 +785,21 @@ Crash(w) == LockExpiry(w)
 \* Next-state relation
 \* ---------------------------------------------------------------------------
 
-\* PublishTaskFail is excluded from the Next relation.
+\* PublishTaskFail and AcquireLeaseStorageError are now included in Next.
 \*
-\* In the real implementation (task_graph.py line 629), a publish failure is
-\* caught, logged, and the scheduling loop continues — the message is completed
-\* normally.  This orphans the child task (Pending, all antecedents Success,
-\* no SB message).  Recovery relies on the dead-letter reprocessor, which is
-\* outside this spec's scope.
+\* Previously, PublishTaskFail was excluded because publish failures were
+\* silently swallowed — the parent message was settled and the child task
+\* was orphaned in Pending forever.  Recovery relied on a dead-letter
+\* reprocessor outside this spec's scope.
 \*
-\* The Azure SB SDK retries sends internally; a permanent publish failure
-\* represents an infrastructure outage.  Modeling it here would require either
-\* (a) a reprocessor action or (b) vacuous liveness properties.  Since the
-\* safety-relevant effects of PublishTaskFail (lease released, no SB message)
-\* are also reachable via LockExpiry during the publishing phase (which
-\* additionally returns the parent message for redelivery), we do not lose
-\* meaningful safety coverage by excluding it.
-\*
-\* The PublishTaskFail action definition is retained above for documentation
-\* and can be re-added to Next for targeted safety analysis.
+\* With the _DispatchOutcome change, publish failures and lease-acquisition
+\* storage errors now set workerDispatchFailed=TRUE.  After the scheduling
+\* loop completes, FinishAcquiringDispatchFailed returns the parent message
+\* to Service Bus (ContinueGraphError) instead of settling it.  On
+\* redelivery, the idempotent guard skips re-executing the finished parent
+\* and retries continue_graph; SB duplicate-detection suppresses re-publishing
+\* tasks that already succeeded.  This makes PublishTaskFail a recoverable
+\* fault within the protocol rather than a permanent stall.
 Next ==
     \E w \in Workers :
         \/ ReceiveMessage(w)
@@ -761,8 +818,11 @@ Next ==
         \/ StatusMismatchCheck(w)
         \/ AcquireLeaseSuccess(w)
         \/ AcquireLeaseFail(w)
-        \/ FinishAcquiring(w)
+        \/ AcquireLeaseStorageError(w)
+        \/ FinishAcquiringSuccess(w)
+        \/ FinishAcquiringDispatchFailed(w)
         \/ PublishTaskSuccess(w)
+        \/ PublishTaskFail(w)
         \/ WriteScheduledSuccess(w)
         \/ WriteScheduledFail(w)
         \/ ReleaseLease(w)
@@ -857,16 +917,19 @@ Fairness ==
         /\ WF_vars(StatusMismatchCheck(w))
         /\ WF_vars(AcquireLeaseSuccess(w))
         /\ WF_vars(AcquireLeaseFail(w))
-        /\ WF_vars(FinishAcquiring(w))
+        /\ WF_vars(FinishAcquiringSuccess(w))
+        /\ WF_vars(FinishAcquiringDispatchFailed(w))
         /\ WF_vars(PublishTaskSuccess(w))
         /\ WF_vars(WriteScheduledSuccess(w))
         /\ WF_vars(ReleaseLease(w))
         /\ WF_vars(CompleteMessage(w))
         \* No fairness on fault actions:
-        \*   LockExpiry/Crash   -- SB lock expiry or worker crash
-        \*   WriteScheduledFail -- blob write failure (SB message already published
-        \*                        so the task is reachable; real impl retries)
-        \* PublishTaskFail is excluded from Next (see comment above Next).
+        \*   LockExpiry/Crash            -- SB lock expiry or worker crash
+        \*   WriteScheduledFail          -- blob write failure (SB message already published
+        \*                                  so the task is reachable; real impl retries)
+        \*   PublishTaskFail             -- SB publish failure (sets dispatch_failed;
+        \*                                  parent redelivered on FinishAcquiringDispatchFailed)
+        \*   AcquireLeaseStorageError    -- lease acquisition storage error (sets dispatch_failed)
 
 \* EventualCompletion: absent dead-letter exhaustion, every task eventually
 \* reaches a terminal state or is blocked by a failed antecedent.
