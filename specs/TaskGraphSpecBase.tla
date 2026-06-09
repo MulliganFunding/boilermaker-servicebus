@@ -56,7 +56,7 @@
 \* RETRIES-EXHAUSTED ON RECEIVE:
 \*   A task can arrive at the worker already retry-exhausted: record_attempt
 \*   has pushed it past max_tries on a prior delivery, and the current
-\*   delivery sees `not self.task.can_retry` at message_handler.py:498.  The
+\*   delivery sees `not self.task.can_retry` at boilermaker/evaluators/task_graph.py:498.  The
 \*   handler must write RetriesExhausted to the blob, dispatch any failure
 \*   callbacks via continue_graph, and only then settle the parent message
 \*   (deadletter).  The corresponding code lives in:
@@ -79,7 +79,7 @@
 \*       assignments).
 \*     - VARIABLE retriesExhaustedDispatched[t]: monotonically becomes TRUE
 \*       when a worker reaches FinishAcquiringSuccess on a dispatch pass
-\*       entered via RetriesExhasted-on-receive (worker flag
+\*       entered via RetriesExhausted-on-receive (worker flag
 \*       workerRetriesExhaustedDispatch[w]).
 \*     - VARIABLE buggyPreSettledParent[t]: TRUE iff the OLD-buggy
 \*       pre-settle ran for t; distinguishes "deadlettered by the bug"

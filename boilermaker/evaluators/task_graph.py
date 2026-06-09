@@ -510,7 +510,7 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
             except exc.ContinueGraphError:
                 logger.error(
                     f"{_graph_tag} continue_graph failed after retries exhausted for {_task_tag}; "
-                    "abandoning for immediate redelivery",
+                    "triggering redelivery (abandon or lock expiry)",
                     exc_info=True,
                 )
                 try:
