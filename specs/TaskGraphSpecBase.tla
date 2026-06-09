@@ -52,6 +52,48 @@
 \* double-412 Pending/Scheduled case, abandon the message for immediate SB
 \* redelivery — this is the mechanism that prevents permanent stalls when the
 \* blob is unclaimed after two consecutive CAS misses.
+\*
+\* RETRIES-EXHAUSTED ON RECEIVE:
+\*   A task can arrive at the worker already retry-exhausted: record_attempt
+\*   has pushed it past max_tries on a prior delivery, and the current
+\*   delivery sees `not self.task.can_retry` at message_handler.py:498.  The
+\*   handler must write RetriesExhausted to the blob, dispatch any failure
+\*   callbacks via continue_graph, and only then settle the parent message
+\*   (deadletter).  The corresponding code lives in:
+\*       boilermaker/evaluators/task_graph.py:498-547   (the `not can_retry`
+\*           branch of message_handler)
+\*
+\*   The model captures both the FIXED and BUGGY orderings of that branch:
+\*     - CONSTANT BuggyRetriesExhaustedOrdering:
+\*         FALSE -> NEW (fixed) ordering: write blob, run continue_graph,
+\*                  settle (deadletter) ONLY if continue_graph succeeded;
+\*                  on ContinueGraphError abandon for redelivery.
+\*         TRUE  -> OLD (buggy) ordering: settle (deadletter) the parent
+\*                  message FIRST, then write the blob and run
+\*                  continue_graph.  If continue_graph then fails, the
+\*                  parent message is already deadlettered and failure
+\*                  callbacks are orphaned with no recovery path.
+\*     - VARIABLE attemptsExhausted[t] \in BOOLEAN: set non-deterministically
+\*       at Init and stays constant.  Indicates that any delivery of t
+\*       arrives already retry-exhausted (TLC enumerates 2^|Tasks|
+\*       assignments).
+\*     - VARIABLE retriesExhaustedDispatched[t]: monotonically becomes TRUE
+\*       when a worker reaches FinishAcquiringSuccess on a dispatch pass
+\*       entered via RetriesExhasted-on-receive (worker flag
+\*       workerRetriesExhaustedDispatch[w]).
+\*     - VARIABLE buggyPreSettledParent[t]: TRUE iff the OLD-buggy
+\*       pre-settle ran for t; distinguishes "deadlettered by the bug"
+\*       from "deadlettered by lock-expiry exhaustion" so the safety
+\*       invariant can detect the bug but ignore the orthogonal DLQ fault.
+\*
+\*   Properties:
+\*     - SAFETY INVARIANT NoOrphanedRetriesExhausted: a task in
+\*       RetriesExhausted whose SB message is permanently gone (settled by
+\*       the bug, not by ordinary lock-expiry) must have its failure
+\*       callbacks dispatched.  Holds on FALSE; violated on TRUE.
+\*     - LIVENESS PROPERTY RetriesExhaustedCallbacksDispatched: absent
+\*       dead-lettering, any task reaching RetriesExhausted eventually has
+\*       its failure callbacks dispatched.  Holds on FALSE.
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -61,7 +103,11 @@ CONSTANTS
     Nil,                \* Sentinel value for "nothing"
     Workers,            \* Set of worker identifiers, e.g. {w1, w2}
     Tasks,              \* Set of all task IDs in the graph, e.g. {t1, t2, t3}
-    RootTasks           \* Set of tasks with no antecedents (initially ready)
+    RootTasks,          \* Set of tasks with no antecedents (initially ready)
+    BuggyRetriesExhaustedOrdering   \* BOOLEAN: TRUE models OLD buggy ordering
+                                    \* (settle-then-dispatch); FALSE models NEW
+                                    \* fixed ordering (write-blob-then-dispatch-
+                                    \* then-conditionally-settle).
 
 \* ---------------------------------------------------------------------------
 \* Derived helpers from the graph structure
@@ -146,13 +192,50 @@ VARIABLES
     \* TRUE if any dispatch in the current continue_graph pass returned FAILED.
     \* When TRUE at the end of the scheduling loop, the parent message MUST NOT
     \* be settled — it is returned to SB for redelivery (ContinueGraphError).
-    workerDispatchFailed    \* workerDispatchFailed[w] \in BOOLEAN
+    workerDispatchFailed,   \* workerDispatchFailed[w] \in BOOLEAN
+
+    \* --- Retries-exhausted-on-receive state ---
+    \* attemptsExhausted[t]: TRUE if any delivery of task t arrives already
+    \* retry-exhausted (record_attempt has driven attempts past max_tries on a
+    \* prior delivery).  Set non-deterministically at Init for each task; once
+    \* TRUE it stays TRUE (a task that exhausted retries cannot un-exhaust).
+    attemptsExhausted,      \* attemptsExhausted[t] \in BOOLEAN
+
+    \* retriesExhaustedDispatched[t]: TRUE iff some worker has successfully
+    \* completed a continue_graph dispatch pass after observing/writing
+    \* RetriesExhausted for t.  Used to express the NoOrphanedRetriesExhausted
+    \* invariant: a permanently-settled RetriesExhausted message must have its
+    \* failure callbacks dispatched at least once.
+    retriesExhaustedDispatched,  \* retriesExhaustedDispatched[t] \in BOOLEAN
+
+    \* workerRetriesExhaustedDispatch[w]: TRUE iff the current dispatch pass on
+    \* worker w was entered via the RetriesExhausted-on-receive path (so a
+    \* successful FinishAcquiringSuccess should mark retriesExhaustedDispatched
+    \* for workerTask[w]).
+    workerRetriesExhaustedDispatch,   \* workerRetriesExhaustedDispatch[w] \in BOOLEAN
+
+    \* buggyPreSettledParent[t]: TRUE iff the OLD (buggy) RetriesExhausted-on-
+    \* receive path ran for task t and settled the parent message before
+    \* dispatch.  Distinguishes "deadlettered by the bug" from "deadlettered by
+    \* lock expiry" so that NoOrphanedRetriesExhausted can detect the bug.
+    \* Always FALSE in the NEW (fixed) ordering.
+    buggyPreSettledParent   \* buggyPreSettledParent[t] \in BOOLEAN
 
 vars == <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages,
           workerPhase, workerMsg, workerTask, workerResult,
           workerCapturedEtag,
           workerSnapshot, workerSnapshotEtags,
-          workerReadySet, workerCurrentReady, workerDispatchFailed>>
+          workerReadySet, workerCurrentReady, workerDispatchFailed,
+          attemptsExhausted, retriesExhaustedDispatched,
+          workerRetriesExhaustedDispatch, buggyPreSettledParent>>
+
+\* Helper tuples for the retries-exhausted-on-receive variables.  Most actions
+\* leave these UNCHANGED via `reVars`; actions that internally call WorkerReset
+\* assign workerRetriesExhaustedDispatch' themselves and use `reVarsNoWorker`.
+reVars == <<attemptsExhausted, retriesExhaustedDispatched,
+            workerRetriesExhaustedDispatch, buggyPreSettledParent>>
+reVarsNoWorker == <<attemptsExhausted, retriesExhaustedDispatched,
+                    buggyPreSettledParent>>
 
 \* ---------------------------------------------------------------------------
 \* Type invariant
@@ -175,10 +258,14 @@ TypeOK ==
         /\ msg.deliveryCount \in 1..MaxDeliveryCount
     /\ workerPhase \in [Workers -> WorkerPhases]
     /\ \A w \in Workers : workerTask[w] \in Tasks \cup {Nil}
-    /\ \A w \in Workers : workerResult[w] \in {"Success", "Failure", Nil}
+    /\ \A w \in Workers : workerResult[w] \in {"Success", "Failure", "RetriesExhausted", Nil}
     /\ \A w \in Workers : workerCapturedEtag[w] \in Nat \cup {0}
     /\ \A w \in Workers : workerCurrentReady[w] \in Tasks \cup {Nil}
     /\ workerDispatchFailed \in [Workers -> BOOLEAN]
+    /\ attemptsExhausted \in [Tasks -> BOOLEAN]
+    /\ retriesExhaustedDispatched \in [Tasks -> BOOLEAN]
+    /\ workerRetriesExhaustedDispatch \in [Workers -> BOOLEAN]
+    /\ buggyPreSettledParent \in [Tasks -> BOOLEAN]
 
 \* ---------------------------------------------------------------------------
 \* Initial state
@@ -206,6 +293,16 @@ Init ==
     /\ workerReadySet = [w \in Workers |-> {}]
     /\ workerCurrentReady = [w \in Workers |-> Nil]
     /\ workerDispatchFailed = [w \in Workers |-> FALSE]
+    \* Each task is non-deterministically marked exhausted or not at Init.
+    \* TLC enumerates all 2^|Tasks| assignments, which produces the necessary
+    \* counterexamples on the OLD buggy ordering.  Root tasks may be exhausted
+    \* (they have in-flight SB messages at Init); non-root tasks may also be
+    \* exhausted if a later dispatch will publish them (the flag predates the
+    \* actual message delivery).
+    /\ attemptsExhausted \in [Tasks -> BOOLEAN]
+    /\ retriesExhaustedDispatched = [t \in Tasks |-> FALSE]
+    /\ workerRetriesExhaustedDispatch = [w \in Workers |-> FALSE]
+    /\ buggyPreSettledParent = [t \in Tasks |-> FALSE]
 
 \* ---------------------------------------------------------------------------
 \* Helper: reset worker to Idle
@@ -222,6 +319,8 @@ WorkerReset(w) ==
     /\ workerReadySet' = [workerReadySet EXCEPT ![w] = {}]
     /\ workerCurrentReady' = [workerCurrentReady EXCEPT ![w] = Nil]
     /\ workerDispatchFailed' = [workerDispatchFailed EXCEPT ![w] = FALSE]
+    /\ workerRetriesExhaustedDispatch' =
+            [workerRetriesExhaustedDispatch EXCEPT ![w] = FALSE]
 
 \* ---------------------------------------------------------------------------
 \* Actions
@@ -241,6 +340,7 @@ ReceiveMessage(w) ==
                         workerCapturedEtag,
                         workerSnapshot, workerSnapshotEtags,
                         workerReadySet, workerCurrentReady, workerDispatchFailed>>
+        /\ UNCHANGED reVars
 
 \* ===== ReadForIdempotency =====
 \* Worker reads the blob before writing Started.
@@ -260,22 +360,39 @@ ReadForIdempotency(w) ==
           /\ workerResult' = [workerResult EXCEPT ![w] = currentStatus]
           /\ workerPhase'  = [workerPhase  EXCEPT ![w] = "LoadingGraph"]
           /\ workerCapturedEtag' = [workerCapturedEtag EXCEPT ![w] = currentEtag]
+          \* If the terminal status we observe is RetriesExhausted, mark this
+          \* worker as performing the RetriesExhausted dispatch so a successful
+          \* dispatch completion records retriesExhaustedDispatched.
+          /\ workerRetriesExhaustedDispatch' =
+                IF currentStatus = "RetriesExhausted"
+                THEN [workerRetriesExhaustedDispatch EXCEPT ![w] = TRUE]
+                ELSE workerRetriesExhaustedDispatch
           /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                           workerSnapshot, workerSnapshotEtags,
                           workerReadySet, workerCurrentReady, workerDispatchFailed>>
+          /\ UNCHANGED <<attemptsExhausted, retriesExhaustedDispatched,
+                         buggyPreSettledParent>>
        \/ \* Read succeeds and status is non-terminal: capture etag, proceed to Started write
           /\ currentStatus \notin TerminalStatuses
+          \* Guard: the RetriesExhausted-on-receive branch fires from this same
+          \* state, so we exclude the case where the task arrives exhausted to
+          \* avoid spuriously entering the Started write path.
+          /\ ~attemptsExhausted[t]
           /\ workerCapturedEtag' = [workerCapturedEtag EXCEPT ![w] = currentEtag]
           /\ workerPhase' = [workerPhase EXCEPT ![w] = "WroteStarted"]
           /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                           workerResult, workerSnapshot, workerSnapshotEtags,
                           workerReadySet, workerCurrentReady, workerDispatchFailed>>
+          /\ UNCHANGED reVars
        \/ \* Read fails (transient): proceed with etag=0 (unconditional write, fail-open)
+          \* Same guard as above: not an exhausted-on-receive path.
+          /\ ~attemptsExhausted[t]
           /\ workerCapturedEtag' = [workerCapturedEtag EXCEPT ![w] = 0]
           /\ workerPhase' = [workerPhase EXCEPT ![w] = "WroteStarted"]
           /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                           workerResult, workerSnapshot, workerSnapshotEtags,
                           workerReadySet, workerCurrentReady, workerDispatchFailed>>
+          /\ UNCHANGED reVars
 
 \* ===== WriteStarted =====
 \* Worker attempts to write Started with an ETag CAS.
@@ -303,6 +420,7 @@ WriteStartedSuccess(w) ==
                        workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
                        workerReadySet, workerCurrentReady, workerDispatchFailed>>
+       /\ UNCHANGED reVars
 
 \* Sub-action: 412 — etag mismatch; re-read blob and branch
 \* We model the re-read as instantaneous (reading current blobStatus).
@@ -343,6 +461,7 @@ WriteStarted412(w) ==
                              workerMsg, workerTask, workerResult, workerCapturedEtag,
                              workerSnapshot, workerSnapshotEtags,
                              workerReadySet, workerCurrentReady, workerDispatchFailed>>
+             /\ UNCHANGED reVars
           \/ \* Re-read is Scheduled or Pending: no worker owns Started yet —
              \* retry the Started write with the re-read etag.
              \* Pending:   Under corrected Azure semantics (lease acquire does NOT bump
@@ -358,6 +477,7 @@ WriteStarted412(w) ==
                              workerMsg, workerTask, workerResult,
                              workerSnapshot, workerSnapshotEtags,
                              workerReadySet, workerCurrentReady, workerDispatchFailed>>
+             /\ UNCHANGED reVars
           \/ \* Re-read is some other non-terminal, non-Started, non-Scheduled, non-Pending status:
              \* always settle (complete message, return Failure)
              /\ rereadStatus \notin TerminalStatuses \cup {"Started", "Scheduled", "Pending"}
@@ -366,6 +486,7 @@ WriteStarted412(w) ==
                              workerMsg, workerTask, workerResult, workerCapturedEtag,
                              workerSnapshot, workerSnapshotEtags,
                              workerReadySet, workerCurrentReady, workerDispatchFailed>>
+             /\ UNCHANGED reVars
 
 \* ===== RetryStartedWrite =====
 \* Worker retries the Started write using the etag captured from the re-read.
@@ -391,6 +512,7 @@ RetryStartedWriteSuccess(w) ==
                        workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
                        workerReadySet, workerCurrentReady, workerDispatchFailed>>
+       /\ UNCHANGED reVars
 
 RetryStartedWrite412(w) ==
     /\ workerPhase[w] = "RetryStartedAfterScheduled"
@@ -404,6 +526,7 @@ RetryStartedWrite412(w) ==
                        workerMsg, workerTask, workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
                        workerReadySet, workerCurrentReady, workerDispatchFailed>>
+       /\ UNCHANGED reVars
 
 RetryStartedWriteNon412Error(w) ==
     /\ workerPhase[w] = "RetryStartedAfterScheduled"
@@ -413,6 +536,7 @@ RetryStartedWriteNon412Error(w) ==
                     workerMsg, workerTask, workerResult, workerCapturedEtag,
                     workerSnapshot, workerSnapshotEtags,
                     workerReadySet, workerCurrentReady, workerDispatchFailed>>
+    /\ UNCHANGED reVars
 
 \* ===== RereadAfterRetry =====
 \* Worker got a second 412 on the retry. Re-reads the blob to determine action.
@@ -434,6 +558,7 @@ RereadAfterRetrySettle(w) ==
                     workerMsg, workerTask, workerResult, workerCapturedEtag,
                     workerSnapshot, workerSnapshotEtags,
                     workerReadySet, workerCurrentReady, workerDispatchFailed>>
+    /\ UNCHANGED reVars
 
 \* No-settle variant: blob is unclaimed (Pending or Scheduled).
 \* Return the SB message to the queue and reset the worker, exactly like LockExpiry.
@@ -453,6 +578,7 @@ RereadAfterRetryNoSettle(w) ==
              /\ blobDeadLettered' = [blobDeadLettered EXCEPT ![msg.taskId] = TRUE]
     /\ WorkerReset(w)
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased>>
+    /\ UNCHANGED reVarsNoWorker
 
 \* Sub-action: non-412 storage error on Started write — proceed anyway (fail-open)
 WriteStartedNon412Error(w) ==
@@ -468,6 +594,7 @@ WriteStartedNon412Error(w) ==
                        workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
                        workerReadySet, workerCurrentReady, workerDispatchFailed>>
+       /\ UNCHANGED reVars
 
 \* NOTE: Settlement is now conditional on blob state.
 \* RereadAfterRetrySettle leads to Completing (settle) when the blob is claimed/terminal.
@@ -485,6 +612,7 @@ ExecuteTask(w) ==
                         workerCapturedEtag,
                         workerSnapshot, workerSnapshotEtags,
                         workerReadySet, workerCurrentReady, workerDispatchFailed>>
+        /\ UNCHANGED reVars
 
 \* ===== WriteResult =====
 \* Worker writes the execution result to blob storage (unconditional overwrite).
@@ -505,6 +633,7 @@ WriteResult(w) ==
                        workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
                        workerReadySet, workerCurrentReady, workerDispatchFailed>>
+       /\ UNCHANGED reVars
 
 \* ===== LoadGraph =====
 \* Worker reads all task statuses from blob storage.
@@ -518,6 +647,7 @@ LoadGraph(w) ==
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                     workerResult, workerCapturedEtag,
                     workerReadySet, workerCurrentReady, workerDispatchFailed>>
+    /\ UNCHANGED reVars
 
 \* ===== StatusMismatchCheck =====
 \* Verify that the loaded status for the completed task matches the written result.
@@ -544,6 +674,7 @@ StatusMismatchCheck(w) ==
           /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                           workerResult, workerCapturedEtag,
                           workerSnapshot, workerSnapshotEtags>>
+          /\ UNCHANGED reVars
        \/ \* Mismatch: ContinueGraphError — suppress settlement (message returns to SB)
           /\ loaded /= expected
           /\ LET msg == workerMsg[w]
@@ -556,6 +687,7 @@ StatusMismatchCheck(w) ==
                    /\ UNCHANGED sbMessages
              /\ WorkerReset(w)
           /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered>>
+          /\ UNCHANGED reVarsNoWorker
 
 \* ===== AcquireLeaseForReady =====
 \* For the continue_graph scheduling loop: pick one ready task, try to acquire its lease.
@@ -596,6 +728,7 @@ AcquireLeaseSuccess(w) ==
         /\ UNCHANGED <<blobStatus, blobEtag, blobDeadLettered, sbMessages, workerMsg, workerTask,
                         workerResult, workerCapturedEtag,
                         workerSnapshot, workerSnapshotEtags, workerDispatchFailed>>
+        /\ UNCHANGED reVars
 
 AcquireLeaseFail(w) ==
     /\ workerPhase[w] = "AcquiringLease"
@@ -608,6 +741,7 @@ AcquireLeaseFail(w) ==
         /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerPhase,
                         workerMsg, workerTask, workerResult, workerCapturedEtag,
                         workerSnapshot, workerSnapshotEtags, workerCurrentReady, workerDispatchFailed>>
+        /\ UNCHANGED reVars
 
 \* ===== AcquireLeaseStorageError =====
 \* try_acquire_lease raises a storage error (not 409/412 lease contention, but
@@ -623,6 +757,7 @@ AcquireLeaseStorageError(w) ==
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerPhase,
                     workerMsg, workerTask, workerResult, workerCapturedEtag,
                     workerSnapshot, workerSnapshotEtags, workerCurrentReady>>
+    /\ UNCHANGED reVars
 
 \* ===== FinishAcquiring =====
 \* All ready tasks have been attempted. If any dispatch failed
@@ -636,10 +771,19 @@ FinishAcquiringSuccess(w) ==
     /\ ~workerDispatchFailed[w]
     \* No failures: settle the message
     /\ workerPhase' = [workerPhase EXCEPT ![w] = "Completing"]
+    \* If this dispatch was entered via the RetriesExhausted-on-receive path,
+    \* mark the task's failure callbacks as dispatched: continue_graph
+    \* completed successfully and any failure tasks have been published to SB.
+    /\ retriesExhaustedDispatched' =
+            IF workerRetriesExhaustedDispatch[w]
+            THEN [retriesExhaustedDispatched EXCEPT ![workerTask[w]] = TRUE]
+            ELSE retriesExhaustedDispatched
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
                     workerResult, workerCapturedEtag,
                     workerSnapshot, workerSnapshotEtags,
                     workerReadySet, workerCurrentReady, workerDispatchFailed>>
+    /\ UNCHANGED <<attemptsExhausted, workerRetriesExhaustedDispatch,
+                   buggyPreSettledParent>>
 
 \* Dispatch-failed variant: at least one ready task could not be published.
 \* ContinueGraphError is raised: do NOT settle the parent message.
@@ -652,19 +796,36 @@ FinishAcquiringDispatchFailed(w) ==
     /\ workerReadySet[w] = {}
     /\ workerCurrentReady[w] = Nil
     /\ workerDispatchFailed[w]
-    \* Dispatch failed: suppress settlement, return message to SB
+    \* Dispatch failed: behavior diverges between OLD and NEW orderings on the
+    \* RetriesExhausted path.
+    \*   NEW: parent message is still in flight (not yet settled); return it to
+    \*        SB for redelivery exactly like a normal failed dispatch.
+    \*   OLD (buggy): parent message was already deadlettered by the pre-settle
+    \*        step in RetriesExhaustedOnReceiveBuggy.  It is therefore gone from
+    \*        sbMessages permanently — we cannot requeue.  The worker just
+    \*        resets, the dispatch is lost, and retriesExhaustedDispatched stays
+    \*        FALSE.  This is the orphaning we want TLC to find.
     /\ LET msg == workerMsg[w]
+           buggyPreSettled == BuggyRetriesExhaustedOrdering
+                              /\ workerRetriesExhaustedDispatch[w]
        IN
-       /\ \/ /\ msg.deliveryCount < MaxDeliveryCount
-             /\ sbMessages' = sbMessages \cup
-                   {[taskId |-> msg.taskId,
-                     deliveryCount |-> msg.deliveryCount + 1]}
-             /\ UNCHANGED blobDeadLettered
-          \/ /\ msg.deliveryCount = MaxDeliveryCount
-             /\ UNCHANGED sbMessages
-             /\ blobDeadLettered' = [blobDeadLettered EXCEPT ![msg.taskId] = TRUE]
+       \/ \* OLD-buggy path: message was pre-settled, no requeue.
+          /\ buggyPreSettled
+          /\ UNCHANGED sbMessages
+          /\ UNCHANGED blobDeadLettered
+       \/ \* NEW path: requeue the message (or DLQ if delivery count exhausted).
+          /\ ~buggyPreSettled
+          /\ \/ /\ msg.deliveryCount < MaxDeliveryCount
+                /\ sbMessages' = sbMessages \cup
+                      {[taskId |-> msg.taskId,
+                        deliveryCount |-> msg.deliveryCount + 1]}
+                /\ UNCHANGED blobDeadLettered
+             \/ /\ msg.deliveryCount = MaxDeliveryCount
+                /\ UNCHANGED sbMessages
+                /\ blobDeadLettered' = [blobDeadLettered EXCEPT ![msg.taskId] = TRUE]
     /\ WorkerReset(w)
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased>>
+    /\ UNCHANGED reVarsNoWorker
 
 \* ===== PublishTask =====
 \* Publish SB message for the leased task (publish-before-store).
@@ -681,6 +842,7 @@ PublishTaskSuccess(w) ==
                        workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
                        workerReadySet, workerCurrentReady, workerDispatchFailed>>
+       /\ UNCHANGED reVars
 
 PublishTaskFail(w) ==
     /\ workerPhase[w] = "PublishingTask"
@@ -696,6 +858,7 @@ PublishTaskFail(w) ==
        /\ UNCHANGED <<blobStatus, blobEtag, blobDeadLettered, sbMessages, workerMsg, workerTask,
                        workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags, workerReadySet>>
+       /\ UNCHANGED reVars
 
 \* ===== WriteScheduled =====
 \* Write Scheduled status to blob (lease held, so no etag needed).
@@ -714,6 +877,7 @@ WriteScheduledSuccess(w) ==
                        workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags,
                        workerReadySet, workerCurrentReady, workerDispatchFailed>>
+       /\ UNCHANGED reVars
 
 WriteScheduledFail(w) ==
     /\ workerPhase[w] = "WritingScheduled"
@@ -724,6 +888,7 @@ WriteScheduledFail(w) ==
                     workerResult, workerCapturedEtag,
                     workerSnapshot, workerSnapshotEtags,
                     workerReadySet, workerCurrentReady, workerDispatchFailed>>
+    /\ UNCHANGED reVars
 
 \* ===== ReleaseLease =====
 \* Release the blob lease (always, in finally block).
@@ -739,6 +904,7 @@ ReleaseLease(w) ==
        /\ UNCHANGED <<blobStatus, blobEtag, blobDeadLettered, sbMessages, workerMsg, workerTask,
                        workerResult, workerCapturedEtag,
                        workerSnapshot, workerSnapshotEtags, workerReadySet, workerDispatchFailed>>
+       /\ UNCHANGED reVars
 
 \* ===== CompleteMessage =====
 \* Settle the SB message. Message was already removed from sbMessages on receive.
@@ -748,6 +914,7 @@ CompleteMessage(w) ==
     /\ workerPhase[w] = "Completing"
     /\ WorkerReset(w)
     /\ UNCHANGED <<blobStatus, blobEtag, blobLeased, blobDeadLettered, sbMessages>>
+    /\ UNCHANGED reVarsNoWorker
 
 \* ===== LockExpiry =====
 \* SB message lock expires at any point while a worker holds it.
@@ -761,25 +928,125 @@ LockExpiry(w) ==
     /\ workerTask[w] /= Nil   \* task is set iff msg is set; avoids record/string equality error
     /\ LET msg   == workerMsg[w]
            child == workerCurrentReady[w]
+           buggyPreSettled == BuggyRetriesExhaustedOrdering
+                              /\ workerRetriesExhaustedDispatch[w]
        IN
        \* Release blob lease if held
        /\ blobLeased' = IF child /= Nil
                         THEN [blobLeased EXCEPT ![child] = FALSE]
                         ELSE blobLeased
-       /\ \/ /\ msg.deliveryCount < MaxDeliveryCount
-             /\ sbMessages' = sbMessages \cup
-                   {[taskId |-> msg.taskId,
-                     deliveryCount |-> msg.deliveryCount + 1]}
-             /\ UNCHANGED blobDeadLettered
-          \/ /\ msg.deliveryCount = MaxDeliveryCount
+       \* OLD-buggy path: the parent SB message was already settled to DLQ before
+       \* dispatch began.  A lock-expiry on the in-flight worker cannot return the
+       \* message to SB (there is no message held by the SB client any more);
+       \* nor can it advance blobDeadLettered (the message already is in DLQ).
+       /\ \/ /\ buggyPreSettled
              /\ UNCHANGED sbMessages
-             /\ blobDeadLettered' = [blobDeadLettered EXCEPT ![msg.taskId] = TRUE]
+             /\ UNCHANGED blobDeadLettered
+          \/ /\ ~buggyPreSettled
+             /\ \/ /\ msg.deliveryCount < MaxDeliveryCount
+                   /\ sbMessages' = sbMessages \cup
+                         {[taskId |-> msg.taskId,
+                           deliveryCount |-> msg.deliveryCount + 1]}
+                   /\ UNCHANGED blobDeadLettered
+                \/ /\ msg.deliveryCount = MaxDeliveryCount
+                   /\ UNCHANGED sbMessages
+                   /\ blobDeadLettered' = [blobDeadLettered EXCEPT ![msg.taskId] = TRUE]
        /\ WorkerReset(w)
        /\ UNCHANGED <<blobStatus, blobEtag>>
+       /\ UNCHANGED reVarsNoWorker
 
 \* ===== Crash =====
 \* Worker crashes: observationally identical to LockExpiry.
 Crash(w) == LockExpiry(w)
+
+\* ===== RetriesExhaustedOnReceive (NEW / fixed ordering) =====
+\* Fires from ReadForIdempotency when the task arrives with attemptsExhausted=TRUE
+\* (i.e., the worker sees `not self.task.can_retry` after recording the attempt).
+\*
+\* NEW (fixed) protocol (boilermaker/evaluators/task_graph.py:498-547):
+\*   1. Write RetriesExhausted to the blob.
+\*   2. Enter LoadingGraph -> CheckingMismatch -> AcquiringLease -> dispatch.
+\*   3. On dispatch success (FinishAcquiringSuccess): mark
+\*      retriesExhaustedDispatched[t] and proceed to Completing (settle msg).
+\*   4. On dispatch failure (FinishAcquiringDispatchFailed): leave the message
+\*      unsettled — Service Bus redelivers it.  On redelivery the existing
+\*      terminal-status read branch in ReadForIdempotency re-enters dispatch.
+\*
+\* Preconditions: attemptsExhausted[t]=TRUE, blob status non-terminal (otherwise
+\* the existing terminal-status branch handles it).
+RetriesExhaustedOnReceive(w) ==
+    /\ ~BuggyRetriesExhaustedOrdering
+    /\ workerPhase[w] = "ReadForIdempotency"
+    /\ LET t == workerTask[w]
+       IN
+       /\ attemptsExhausted[t]
+       /\ blobStatus[t] \notin TerminalStatuses
+       \* Same lease guard as WriteResult: Azure Blob Storage rejects non-lease
+       \* writes (409) against a leased blob.  The scheduler will release the
+       \* lease before this worker can proceed.
+       /\ ~blobLeased[t]
+       \* Write RetriesExhausted to the blob (unconditional; we already own
+       \* execution from the prior Started write of an earlier delivery).
+       /\ blobStatus' = [blobStatus EXCEPT ![t] = "RetriesExhausted"]
+       /\ blobEtag'   = [blobEtag   EXCEPT ![t] = blobEtag[t] + 1]
+       /\ workerResult' = [workerResult EXCEPT ![w] = "RetriesExhausted"]
+       /\ workerCapturedEtag' = [workerCapturedEtag EXCEPT ![w] = blobEtag[t] + 1]
+       /\ workerRetriesExhaustedDispatch' =
+             [workerRetriesExhaustedDispatch EXCEPT ![w] = TRUE]
+       /\ workerPhase' = [workerPhase EXCEPT ![w] = "LoadingGraph"]
+       /\ UNCHANGED <<blobLeased, blobDeadLettered, sbMessages, workerMsg, workerTask,
+                       workerSnapshot, workerSnapshotEtags,
+                       workerReadySet, workerCurrentReady, workerDispatchFailed>>
+       /\ UNCHANGED <<attemptsExhausted, retriesExhaustedDispatched,
+                      buggyPreSettledParent>>
+
+\* ===== RetriesExhaustedOnReceiveBuggy (OLD / pre-fix ordering) =====
+\* Models the buggy ordering that existed before the fix on this branch:
+\*   1. Settle (deadletter) the parent message FIRST.
+\*   2. Write RetriesExhausted blob.
+\*   3. Enter LoadingGraph -> ... -> dispatch.
+\*   4. On dispatch failure: the parent message is gone permanently (deadlettered);
+\*      failure callbacks are orphaned.  retriesExhaustedDispatched stays FALSE
+\*      and there is no recovery path.
+\*
+\* This action is only enabled when CONSTANT BuggyRetriesExhaustedOrdering=TRUE.
+\* It is used to validate that the spec exercises the orphaning counterexample:
+\* with the OLD ordering, TLC must find a reachable state violating
+\* NoOrphanedRetriesExhausted; with the NEW ordering, the invariant holds.
+\*
+\* We model the pre-settle as removing the message from sbMessages permanently
+\* (it goes to DLQ) and setting blobDeadLettered[t]=TRUE.
+RetriesExhaustedOnReceiveBuggy(w) ==
+    /\ BuggyRetriesExhaustedOrdering
+    /\ workerPhase[w] = "ReadForIdempotency"
+    /\ LET t == workerTask[w]
+       IN
+       /\ attemptsExhausted[t]
+       /\ blobStatus[t] \notin TerminalStatuses
+       \* Same lease guard as the NEW variant (Azure 409 on non-lease writes).
+       /\ ~blobLeased[t]
+       \* Step 1: pre-settle (deadletter) the parent message.  In the real OLD
+       \* code this is `deadletter_or_complete_task("ProcessingError", ...)`.
+       \* In the model the message was already removed from sbMessages at
+       \* ReceiveMessage; we model the deadletter by setting blobDeadLettered
+       \* AND by setting buggyPreSettledParent (which distinguishes "settled by
+       \* the bug" from "settled by lock-expiry exhaustion").
+       /\ blobDeadLettered' = [blobDeadLettered EXCEPT ![t] = TRUE]
+       /\ buggyPreSettledParent' = [buggyPreSettledParent EXCEPT ![t] = TRUE]
+       \* Step 2: write RetriesExhausted blob.
+       /\ blobStatus' = [blobStatus EXCEPT ![t] = "RetriesExhausted"]
+       /\ blobEtag'   = [blobEtag   EXCEPT ![t] = blobEtag[t] + 1]
+       /\ workerResult' = [workerResult EXCEPT ![w] = "RetriesExhausted"]
+       /\ workerCapturedEtag' = [workerCapturedEtag EXCEPT ![w] = blobEtag[t] + 1]
+       /\ workerRetriesExhaustedDispatch' =
+             [workerRetriesExhaustedDispatch EXCEPT ![w] = TRUE]
+       \* Step 3: enter the dispatch pipeline.
+       /\ workerPhase' = [workerPhase EXCEPT ![w] = "LoadingGraph"]
+       /\ UNCHANGED <<blobLeased, sbMessages, workerMsg, workerTask,
+                       workerSnapshot, workerSnapshotEtags,
+                       workerReadySet, workerCurrentReady, workerDispatchFailed>>
+       /\ UNCHANGED <<attemptsExhausted, retriesExhaustedDispatched>>
+       \* buggyPreSettledParent[t] is set above; no UNCHANGED for it here.
 
 \* ---------------------------------------------------------------------------
 \* Next-state relation
@@ -804,6 +1071,8 @@ Next ==
     \E w \in Workers :
         \/ ReceiveMessage(w)
         \/ ReadForIdempotency(w)
+        \/ RetriesExhaustedOnReceive(w)
+        \/ RetriesExhaustedOnReceiveBuggy(w)
         \/ WriteStartedSuccess(w)
         \/ WriteStarted412(w)
         \/ WriteStartedNon412Error(w)
@@ -895,6 +1164,53 @@ ResultWriteNotBlockedByLease ==
                   /\ workerPhase[scheduler] \in
                       {"PublishingTask", "WritingScheduled", "ReleasingLease"}
 
+\* NoOrphanedRetriesExhausted: a task whose blob status is RetriesExhausted
+\* must EITHER have its failure callbacks already dispatched
+\* (retriesExhaustedDispatched[t] = TRUE), OR have its parent SB message
+\* still available for redelivery (in sbMessages, or in flight at a worker
+\* that has not yet given up).
+\*
+\* Equivalently (contrapositive — the bad state we want to assert is
+\* unreachable): there is no task t such that:
+\*   - blob is RetriesExhausted,
+\*   - failure callbacks were never dispatched,
+\*   - no SB message is queued for t,
+\*   - no worker holds t's message in a non-Idle phase.
+\*
+\* The OLD (buggy) RetriesExhausted-on-receive ordering settles the parent
+\* message BEFORE running continue_graph.  If continue_graph then fails
+\* (e.g., load_graph transient error), the parent is already gone and the
+\* failure callbacks are orphaned.  TLC must find this state as a reachable
+\* counterexample when BuggyRetriesExhaustedOrdering=TRUE.
+\*
+\* The NEW (fixed) ordering writes RetriesExhausted, then runs
+\* continue_graph, then settles only on success.  This invariant must hold
+\* when BuggyRetriesExhaustedOrdering=FALSE.
+\*
+\* As with NoPermStuck/NoOrphanedScheduledFinal, blobDeadLettered is the
+\* spec's representation of "permanent loss of the SB message".  The OLD
+\* ordering sets blobDeadLettered[t] = TRUE in RetriesExhaustedOnReceiveBuggy
+\* — so a violation under the OLD ordering manifests as
+\* blobDeadLettered[t] /\ blobStatus[t]="RetriesExhausted" /\
+\* ~retriesExhaustedDispatched[t] with no in-flight worker.
+NoOrphanedRetriesExhausted ==
+    \A t \in Tasks :
+        ~ ( /\ blobStatus[t] = "RetriesExhausted"
+            /\ ~retriesExhaustedDispatched[t]
+            \* Exclude tasks that ended up dead-lettered via ordinary
+            \* lock-expiry exhaustion of MaxDeliveryCount — this is the
+            \* same fault that NoOrphanedScheduledFinal excludes.  A
+            \* lock-expiry orphaning is recoverable via the separate
+            \* dead-letter reprocessor.  The orphaning we want to detect
+            \* here is the BUGGY pre-settle, which is unrecoverable
+            \* because no SB message ever existed for reprocessing once
+            \* it was deadlettered by the bug.
+            /\ ~( blobDeadLettered[t] /\ ~buggyPreSettledParent[t] )
+            /\ ~(\E msg \in sbMessages : msg.taskId = t)
+            /\ ~(\E w \in Workers :
+                    /\ workerTask[w] = t
+                    /\ workerPhase[w] /= "Idle") )
+
 \* ---------------------------------------------------------------------------
 \* Liveness / Temporal Properties
 \* ---------------------------------------------------------------------------
@@ -903,6 +1219,8 @@ Fairness ==
     \A w \in Workers :
         /\ WF_vars(ReceiveMessage(w))
         /\ WF_vars(ReadForIdempotency(w))
+        /\ WF_vars(RetriesExhaustedOnReceive(w))
+        /\ WF_vars(RetriesExhaustedOnReceiveBuggy(w))
         /\ WF_vars(WriteStartedSuccess(w))
         /\ WF_vars(WriteStarted412(w))
         /\ WF_vars(WriteStartedNon412Error(w))
@@ -962,11 +1280,41 @@ EventualCompletion ==
 \*
 \* Dead-letter exhaustion can prevent continue_graph from completing the
 \* scheduling pass, so this property is conditioned on no dead-lettering.
+\*
+\* COVERAGE OF FAILURE CALLBACKS (RetriesExhausted dispatch):
+\* The dependency-edge ready-set computation in StatusMismatchCheck only
+\* yields children whose antecedents are all "Success", so this property as
+\* originally stated does not cover failure-callback scheduling when a
+\* parent terminates via "Failure" or "RetriesExhausted".  The companion
+\* property RetriesExhaustedCallbacksDispatched below covers that case via
+\* the retriesExhaustedDispatched flag, which is set when a
+\* RetriesExhausted-on-receive dispatch pass reaches FinishAcquiringSuccess.
 EventualScheduling ==
     [](\A t \in Tasks : ~blobDeadLettered[t])
     => \A t \in Tasks \ RootTasks :
         [](\A parent \in Antecedents(t) : blobStatus[parent] = "Success")
         ~> blobStatus[t] \in {"Scheduled", "Started", "Success", "Failure", "RetriesExhausted"}
+
+\* RetriesExhaustedCallbacksDispatched: if a task ever reaches RetriesExhausted
+\* blob status, then absent dead-letter exhaustion, the failure callbacks for
+\* that task must eventually be dispatched (retriesExhaustedDispatched[t]
+\* becomes TRUE).
+\*
+\* Conditioned on no dead-lettering, exactly like EventualScheduling /
+\* NoOrphanedScheduled: a lock-expiry exhaustion can leave the task without
+\* a deliverable SB message and recovery requires the separate dead-letter
+\* reprocessor.  The orphaning bug we want to expose with this property is
+\* DIFFERENT — it is the buggy pre-settle, which the safety invariant
+\* NoOrphanedRetriesExhausted detects directly.
+\*
+\* On the NEW (fixed) code path with no dead-lettering: redelivery + the
+\* idempotent terminal-status branch eventually drive a worker through
+\* FinishAcquiringSuccess.  Property holds.
+RetriesExhaustedCallbacksDispatched ==
+    [](\A t \in Tasks : ~blobDeadLettered[t])
+    => \A t \in Tasks :
+           blobStatus[t] = "RetriesExhausted"
+           ~> retriesExhaustedDispatched[t]
 
 \* NoOrphanedScheduled: absent dead-letter exhaustion, every task that
 \* reaches Scheduled eventually gets processed (reaches Started or terminal).
@@ -1014,13 +1362,13 @@ EventualResultWrite ==
 \*   1  (Pending write in Init or continue_graph)
 \* + 1  (Scheduled write by continue_graph)
 \* + MaxDeliveryCount * 2  (Started + result write per delivery attempt)
-\* = 2 * MaxDeliveryCount + 2
+\* + MaxDeliveryCount * 1  (RetriesExhausted-on-receive write per delivery
+\*                          attempt; only on the exhausted-on-receive path,
+\*                          replaces the Started+result writes in that path)
+\* <= 3 * MaxDeliveryCount + 2  (overapproximate)
 \*
-\* The bound of 2 * MaxDeliveryCount + 4 retains two extra slots of buffer
-\* above the tightest derivation to accommodate model-checking edge cases and
-\* any future protocol extensions.  If TLC ever reports a CONSTRAINT violation,
-\* increase the bound.
-EtagBound == \A t \in Tasks : blobEtag[t] <= 2 * MaxDeliveryCount + 4
+\* The bound of 3 * MaxDeliveryCount + 4 retains buffer.
+EtagBound == \A t \in Tasks : blobEtag[t] <= 3 * MaxDeliveryCount + 4
 
 \* ---------------------------------------------------------------------------
 \* Specification

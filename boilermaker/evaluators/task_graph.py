@@ -497,6 +497,32 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
 
         if not self.task.can_retry:
             logger.error(f"{_graph_tag} Retries exhausted for {_task_tag}")
+            task_result = TaskResult(
+                task_id=self.task.task_id,
+                graph_id=self.task.graph_id,
+                status=TaskStatus.RetriesExhausted,
+                result=None,
+            )
+            await self.storage_interface.store_task_result(task_result)
+
+            try:
+                await self.continue_graph(task_result)
+            except exc.ContinueGraphError:
+                logger.error(
+                    f"{_graph_tag} continue_graph failed after retries exhausted for {_task_tag}; "
+                    "abandoning for immediate redelivery",
+                    exc_info=True,
+                )
+                try:
+                    await self._abandon_or_let_expire()
+                except (exc.BoilermakerTaskLeaseLost, exc.BoilermakerServiceBusError):
+                    logger.warning(
+                        f"{_graph_tag} Failed to abandon message after continue_graph failure for {_task_tag}; "
+                        "SB will redeliver when lock expires",
+                        exc_info=True,
+                    )
+                return task_result
+
             if not message_settled:
                 try:
                     await self.deadletter_or_complete_task("ProcessingError", detail="Retries exhausted")
@@ -521,25 +547,6 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                         errors=["ServiceBus error during retry exhaustion"],
                     )
 
-            # Early return here: no more processing
-            task_result = TaskResult(
-                task_id=self.task.task_id,
-                graph_id=self.task.graph_id,
-                status=TaskStatus.RetriesExhausted,
-                result=None,
-            )
-            await self.storage_interface.store_task_result(task_result)
-            # Publish failure tasks which may be ready now.
-            # The message is already deadlettered at this point, so suppressing settlement
-            # is not possible — log and return gracefully if continue_graph fails.
-            try:
-                await self.continue_graph(task_result)
-            except exc.ContinueGraphError:
-                logger.error(
-                    f"{_graph_tag} continue_graph failed after retries exhausted for {_task_tag}; "
-                    "failure callbacks may not be dispatched (message already deadlettered)",
-                    exc_info=True,
-                )
             return task_result
 
         # Actually invoke the task here

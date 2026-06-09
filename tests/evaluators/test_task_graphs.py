@@ -328,10 +328,12 @@ async def test_retries_exhausted_task_lease_lost_exception(retries_exhausted_sce
         "ProcessingError", detail="Retries exhausted"
     )
 
-    # Should store the start result
-    assert mock_storage.store_task_result.call_count == 1
+    # Should store Started first, then RetriesExhausted (before continue_graph and settlement)
+    assert mock_storage.store_task_result.call_count >= 2
     start_call = mock_storage.store_task_result.call_args_list[0][0][0]
     assert start_call.status == TaskStatus.Started
+    retries_exhausted_call = mock_storage.store_task_result.call_args_list[1][0][0]
+    assert retries_exhausted_call.status == TaskStatus.RetriesExhausted
 
 
 async def test_retries_exhausted_service_bus_error_exception(retries_exhausted_scenario, mock_storage, app):
@@ -351,10 +353,12 @@ async def test_retries_exhausted_service_bus_error_exception(retries_exhausted_s
         "ProcessingError", detail="Retries exhausted"
     )
 
-    # Should store the start result
-    assert mock_storage.store_task_result.call_count == 1
+    # Should store Started first, then RetriesExhausted (before continue_graph and settlement)
+    assert mock_storage.store_task_result.call_count >= 2
     start_call = mock_storage.store_task_result.call_args_list[0][0][0]
     assert start_call.status == TaskStatus.Started
+    retries_exhausted_call = mock_storage.store_task_result.call_args_list[1][0][0]
+    assert retries_exhausted_call.status == TaskStatus.RetriesExhausted
 
 
 async def test_late_settlement_task_lease_lost_exception_success(evaluator_context, mock_storage, app):
@@ -932,12 +936,13 @@ async def test_non404_storage_error_retried_raises_continue_graph_error_no_settl
     )
 
 
-async def test_retries_exhausted_continue_graph_error_does_not_propagate(retries_exhausted_scenario, mock_storage):
-    """ContinueGraphError from continue_graph on the RetriesExhausted path must not propagate.
+async def test_retries_exhausted_continue_graph_error_abandons_message(retries_exhausted_scenario, mock_storage):
+    """ContinueGraphError from continue_graph on the RetriesExhausted path must abandon the message.
 
-    The message is already deadlettered before continue_graph is called, so
-    suppressing settlement is not possible.  The correct behaviour is to log
-    and return the RetriesExhausted result gracefully without raising.
+    The message must NOT be settled when continue_graph fails, so Service Bus
+    redelivers it.  On redelivery the idempotent guard sees the persisted
+    RetriesExhausted blob status (which is finished=True) and retries the
+    dispatch via continue_graph.
     """
     from unittest.mock import patch
 
@@ -960,8 +965,20 @@ async def test_retries_exhausted_continue_graph_error_does_not_propagate(retries
         f"Expected {_LOAD_GRAPH_RETRY_POLICY.max_tries} load_graph attempts, got {mock_storage.load_graph.call_count}"
     )
 
-    # The message must have been settled (deadlettered) before continue_graph was called
-    retries_exhausted_scenario.assert_msg_dead_lettered()
+    # The RetriesExhausted blob status must have been written before continue_graph
+    stored_statuses = [c.args[0].status for c in mock_storage.store_task_result.call_args_list]
+    assert TaskStatus.RetriesExhausted in stored_statuses, (
+        "RetriesExhausted blob status must be persisted before continue_graph is attempted"
+    )
+
+    # Message must be abandoned (not completed/deadlettered) so SB redelivers it
+    retries_exhausted_scenario.mockservicebus._receiver.abandon_message.assert_called_once()
+    assert not retries_exhausted_scenario.mockservicebus._receiver.complete_message.called, (
+        "Message must not be completed when continue_graph fails after retries exhausted"
+    )
+    assert not retries_exhausted_scenario.mockservicebus._receiver.dead_letter_message.called, (
+        "Message must not be deadlettered when continue_graph fails after retries exhausted"
+    )
 
 
 async def test_pending_task_published_exactly_once_from_ready_loop(evaluator_context, app):
