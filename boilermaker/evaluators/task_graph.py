@@ -401,10 +401,10 @@ class TaskGraphEvaluator(TaskEvaluatorBase):
                                 # ETag and succeed without hitting the two-412 window.
                                 # Spec action: RereadAfterRetry412 (Pending/Scheduled) → abandon
                                 _reread2_status = _reread2.status if _reread2 is not None else None
-                                logger.error(
+                                logger.warning(
                                     f"{_graph_tag} Two 412s on Started write; second re-read returned "
                                     f"{_reread2_status!r} for {_task_tag}. "
-                                    "Abandoning for immediate redelivery.",
+                                    "Abandoning for immediate redelivery."
                                 )
                                 try:
                                     await self._abandon_or_let_expire()
