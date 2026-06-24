@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import Any
 
 from boilermaker.task import TaskGraph, TaskStatus
 from boilermaker.task.result import TaskResult
@@ -132,17 +132,17 @@ def generate_mermaid(graph: TaskGraph, stalled_task_ids: set[TaskId]) -> str:
     fail_edge_indices: list[int] = []
 
     # Success-path edges (solid arrows)
-    for parent_id in cast(list[TaskId], sorted(graph.edges, key=str)):
+    for parent_id in sorted(graph.edges, key=str):
         parent_san = _sanitize_id(parent_id)
-        for child_id in cast(list[TaskId], sorted(graph.edges[parent_id], key=str)):
+        for child_id in sorted(graph.edges[parent_id], key=str):
             child_san = _sanitize_id(child_id)
             lines.append(f"    {parent_san} --> {child_san}")
             edge_index += 1
 
     # Failure-path edges (dashed arrows)
-    for parent_id in cast(list[TaskId], sorted(graph.fail_edges, key=str)):
+    for parent_id in sorted(graph.fail_edges, key=str):
         parent_san = _sanitize_id(parent_id)
-        for child_id in cast(list[TaskId], sorted(graph.fail_edges[parent_id], key=str)):
+        for child_id in sorted(graph.fail_edges[parent_id], key=str):
             child_san = _sanitize_id(child_id)
             lines.append(f"    {parent_san} -.-> {child_san}")
             fail_edge_indices.append(edge_index)
