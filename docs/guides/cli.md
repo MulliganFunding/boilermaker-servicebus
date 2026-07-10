@@ -226,7 +226,7 @@ boilermaker --storage-url <url> --container <name> purge \
 
 **How "old" is decided**
 
-`purge` groups blobs by graph and keeps or deletes each group as a unit. A group is eligible when its **creation time** is more than `--older-than` days ago.
+`purge` groups blobs by graph and keeps or deletes each group as a unit. A group is eligible when its age is more than `--older-than` days — where age comes from the `created_date` **tag** (default discovery) or, with `--all-graphs`, from the millisecond timestamp embedded in the UUID7 `graph_id`.
 
 By default, discovery uses the Azure blob **tag index** (`created_date < cutoff`): fast, server-side, no full container scan. It only sees graphs that carry a `created_date` tag — graphs written before tagging existed (or otherwise untagged) are invisible to it. To sweep those, use **`--all-graphs`**, which instead lists every graph-id prefix and dates each graph by the millisecond timestamp embedded in its UUID7 `graph_id`. That path is slower (it scans prefixes) but finds untagged/legacy graphs. `purge` uses one path or the other — never both.
 
@@ -251,7 +251,7 @@ Within each eligible group, task-result blobs are deleted first and `graph.json`
 
 | Option | Required | Description |
 |---|---|---|
-| `--older-than DAYS` | Yes | Delete graphs whose creation time is more than `DAYS` days ago (1–30 inclusive). By default, age comes from the `created_date` tag; with `--all-graphs` it comes from the UUID7 `graph_id` timestamp. |
+| `--older-than DAYS` | Yes | Delete graphs older than `DAYS` days (1–30 inclusive). By default, age comes from the `created_date` tag; with `--all-graphs` it comes from the UUID7 `graph_id` timestamp. |
 | `--dry-run` | No | Print what would be deleted without deleting any blobs |
 | `--force` | No | Also delete old graphs/tasks that are still in progress, and old corrupted graphs that are missing `graph.json`. Use with care — this removes work whose status could not be verified. |
 | `--all-graphs` | No | Slower, thorough discovery: skip the tag index and list every graph-id prefix, dating each graph by its UUID7 timestamp. Use this to find untagged/pre-tag graphs the default (tag-based) discovery cannot see. |

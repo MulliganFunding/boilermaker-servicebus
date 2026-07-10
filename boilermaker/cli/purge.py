@@ -92,8 +92,8 @@ async def _stream_all_graphs(
     after *cutoff* signals that all subsequent groups are also too new.
     Iteration stops immediately at that point (early exit).
 
-    Non-UUID7 graph_ids (which cannot be dated this way) are flagged on stderr
-    and skipped.
+    Non-UUID7 graph_ids (which cannot be dated this way) are logged via the
+    ``boilermaker.cli`` logger and skipped.
     """
     listing_prefix = f"{storage.task_result_prefix}/"
 
