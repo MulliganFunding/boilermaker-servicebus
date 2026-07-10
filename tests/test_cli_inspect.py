@@ -1,6 +1,7 @@
 """Tests for boilermaker.cli.inspect — run_inspect() with JSON output mode and single-task path."""
 
 import json
+import logging
 from io import StringIO
 from unittest import mock
 
@@ -518,28 +519,28 @@ class TestRunInspectSingleTaskNotFound:
         assert exit_code == EXIT_ERROR
 
     @pytest.mark.asyncio
-    async def test_error_message_includes_task_id(self, capsys):
+    async def test_error_message_includes_task_id(self, caplog):
         graph, task_a, task_b, task_c = _make_graph_with_tasks()
         storage = _mock_storage(graph)
-        await run_inspect(
-            storage, str(graph.graph_id),
-            console=_no_color_console(),
-            task_id="bad-task-xyz",
-        )
-        captured = capsys.readouterr()
-        assert "bad-task-xyz" in captured.err
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            await run_inspect(
+                storage, str(graph.graph_id),
+                console=_no_color_console(),
+                task_id="bad-task-xyz",
+            )
+        assert "bad-task-xyz" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_error_message_lists_available_task_ids(self, capsys):
+    async def test_error_message_lists_available_task_ids(self, caplog):
         graph, task_a, task_b, task_c = _make_graph_with_tasks()
         storage = _mock_storage(graph)
-        await run_inspect(
-            storage, str(graph.graph_id),
-            console=_no_color_console(),
-            task_id="bad-task-id",
-        )
-        captured = capsys.readouterr()
-        assert str(task_a.task_id) in captured.err or str(task_b.task_id) in captured.err
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            await run_inspect(
+                storage, str(graph.graph_id),
+                console=_no_color_console(),
+                task_id="bad-task-id",
+            )
+        assert str(task_a.task_id) in caplog.text or str(task_b.task_id) in caplog.text
 
 
 # ---------------------------------------------------------------------------

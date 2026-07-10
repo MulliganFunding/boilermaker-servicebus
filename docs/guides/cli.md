@@ -214,7 +214,7 @@ Output:
 
 ### `purge`
 
-Delete old task-result blobs from Azure Blob Storage. Graphs with in-progress tasks are automatically skipped.
+Delete old task-result blobs from Azure Blob Storage.
 
 ```sh
 boilermaker --storage-url <url> --container <name> purge \
@@ -224,14 +224,37 @@ boilermaker --storage-url <url> --container <name> purge \
     [--all-graphs]
 ```
 
+**How "old" is decided**
+
+`purge` groups blobs by graph and keeps or deletes each group as a unit. A group is eligible when its age is more than `--older-than` days — where age comes from the `created_date` **tag** (default discovery) or, with `--all-graphs`, from the millisecond timestamp embedded in the UUID7 `graph_id`.
+
+By default, discovery uses the Azure blob **tag index** (`created_date < cutoff`): fast, server-side, no full container scan. It only sees graphs that carry a `created_date` tag — graphs written before tagging existed (or otherwise untagged) are invisible to it. To sweep those, use **`--all-graphs`**, which instead lists every graph-id prefix and dates each graph by the millisecond timestamp embedded in its UUID7 `graph_id`. That path is slower (it scans prefixes) but finds untagged/legacy graphs. `purge` uses one path or the other — never both.
+
+!!! tip "Cleaning up legacy (pre-tag) graphs"
+    If your container has graphs created before `created_date` tagging was in use, the default run will not find them. Run `purge --older-than <days> --all-graphs` (start with `--dry-run`) to reach them.
+
+**What gets deleted vs. protected**
+
+| Data | Default behavior | With `--force` |
+|---|---|---|
+| Graph, all tasks finished | Deleted when old | Deleted when old |
+| Graph with in-progress tasks (`scheduled`, `started`, `retry`) | **Skipped** quietly (counted in the summary, exit code `1`) | Deleted when old |
+| Standalone task-result (a task run outside a graph — no `graph.json`), finished | Deleted when old | Deleted when old |
+| Standalone task-result still in progress | **Skipped** quietly (counted in the summary, exit code `1`) | Deleted when old |
+| Corrupted graph — missing `graph.json` but still holds task blobs, so its status can't be verified | **Skipped** and logged as a warning | Deleted when old |
+
+In-progress work is a normal, expected state, so it is skipped without noise — you see it in the run summary and the exit code, not as a per-item message. Diagnostics are emitted through the standard `logging` module (logger `boilermaker.cli`), so you can route or suppress them like any other logs; a warning is logged **only** for genuinely **corrupted** data (a directory with task-result blobs but no `graph.json`, or a `graph.json` that fails to load), so a warning always means "something here needs a look."
+
+Within each eligible group, task-result blobs are deleted first and `graph.json` last; if any task-result deletion fails, that group's `graph.json` is left in place so the group is retried on the next run rather than orphaned.
+
 **Options**
 
 | Option | Required | Description |
 |---|---|---|
-| `--older-than DAYS` | Yes | Delete graphs older than `DAYS` days, based on `created_date` tags (1–30 inclusive) |
+| `--older-than DAYS` | Yes | Delete graphs older than `DAYS` days (1–30 inclusive). By default, age comes from the `created_date` tag; with `--all-graphs` it comes from the UUID7 `graph_id` timestamp. |
 | `--dry-run` | No | Print what would be deleted without deleting any blobs |
-| `--force` | No | Also delete graphs that have in-progress tasks |
-| `--all-graphs` | No | Discover graphs by UUID7 timestamp instead of tag index — use for containers with pre-tag blobs |
+| `--force` | No | Also delete old graphs/tasks that are still in progress, and old corrupted graphs that are missing `graph.json`. Use with care — this removes work whose status could not be verified. |
+| `--all-graphs` | No | Slower, thorough discovery: skip the tag index and list every graph-id prefix, dating each graph by its UUID7 timestamp. Use this to find untagged/pre-tag graphs the default (tag-based) discovery cannot see. |
 
 **Example — dry run first, then execute**
 
@@ -252,36 +275,43 @@ boilermaker \
 **Dry-run output**
 
 ```
-Purge plan: graphs with created_date before 2026-04-07 (older than 7 days)
+                    Purge Plan
+   Blobs last modified before 2026-04-07 (older than 7 days)
 
- Graph ID                                    Blobs
+ Graph                                        Blobs
  ──────────────────────────────────────────  ─────
  019d8c0c-bd9b-7c23-be84-4d0799d7ecd4        12
  019d8c0c-bd9b-7c23-be84-4d0799d7ecd5        3
 
+Total: 2 graphs, 15 blobs
 [DRY RUN] No blobs were deleted.
 ```
 
-Graphs with in-progress tasks are printed to stderr and excluded from the plan:
+Only **corrupted** data is logged (as a `WARNING` on the `boilermaker.cli` logger) and excluded from the plan; in-progress work is skipped silently — see the summary and exit code instead:
 
 ```
-SKIP: Graph 019d8c0c-... has in-progress tasks. Skipping.
+WARNING  boilermaker.cli  Graph 019d8c0c-... appears corrupted — it has task-result blobs but no graph.json, so its status cannot be verified. Skipping (use --force to delete).
 ```
+
+Pass `--force` to delete corrupted and in-progress groups anyway.
 
 **Post-deletion output**
 
 ```
 Deleted 15 blobs across 2 graphs.
-Skipped 1 graph(s) due to in-progress tasks.
+Skipped 1 graph(s)/task(s) with in-progress tasks.
 ```
 
 **Exit codes**
 
 | Code | Meaning |
 |---|---|
-| `0` | Success — no errors, no skipped graphs (or dry-run completed) |
-| `1` | One or more graphs skipped due to in-progress tasks |
+| `0` | Success — no errors, nothing skipped for in-progress tasks (or dry-run completed) |
+| `1` | One or more graphs/tasks skipped because they are still in progress |
 | `2` | Unrecoverable error (auth failure, container not found, all deletions failed) |
+
+!!! note "Corrupted data does not change the exit code"
+    A logged warning for a corrupted group is there for a human to investigate; it does not on its own make the run exit non-zero. Only in-progress skips set exit code `1`.
 
 !!! warning "Deletion is irreversible"
     Deleted blobs cannot be recovered unless Azure soft-delete is enabled on the storage account. Always run with `--dry-run` first to confirm the scope. Concurrent `purge` invocations against the same container are safe — any blob already deleted by a concurrent process returns a 404, which is treated as a no-op.

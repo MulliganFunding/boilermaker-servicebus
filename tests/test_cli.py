@@ -1,5 +1,6 @@
 """Tests for boilermaker.cli — TaskGraph inspection CLI."""
 
+import logging
 import re
 from argparse import ArgumentTypeError
 from datetime import datetime, timedelta, UTC
@@ -12,7 +13,7 @@ from boilermaker.cli._output import format_graph_table
 from boilermaker.cli.inspect import run_inspect
 from boilermaker.cli.purge import _stream_all_graphs, _stream_eligible_graphs, _validate_older_than, run_purge
 from boilermaker.cli.recover import run_recover
-from boilermaker.task import Task, TaskGraph, TaskResultSlim, TaskStatus
+from boilermaker.task import Task, TaskGraph, TaskId, TaskResultSlim, TaskStatus
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -179,21 +180,21 @@ class TestInspectGraphExitCodes:
 
 
 class TestInspectGraphErrorOutput:
-    async def test_graph_not_found_prints_to_stderr(self, capsys):
+    async def test_graph_not_found_logs_error(self, caplog):
         storage = _mock_storage(graph=None)
-        await run_inspect(storage, "missing-graph")
-        captured = capsys.readouterr()
-        assert "ERROR: Graph missing-graph not found in storage." in captured.err
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            await run_inspect(storage, "missing-graph")
+        assert "Graph missing-graph not found in storage." in caplog.text
 
-    async def test_recover_missing_args_prints_to_stderr(self, capsys):
+    async def test_recover_missing_args_logs_error(self, caplog):
         graph, task_a, task_b, task_c = _make_graph_with_tasks()
         _set_result(graph, task_a, TaskStatus.Success)
         _set_result(graph, task_b, TaskStatus.Retry)
         _set_result(graph, task_c, TaskStatus.Pending)
         storage = _mock_storage(graph)
-        await run_recover(storage, str(graph.graph_id), sb_namespace_url=None, sb_queue_name=None)
-        captured = capsys.readouterr()
-        assert "--recover requires --sb-namespace-url and --sb-queue-name" in captured.err
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            await run_recover(storage, str(graph.graph_id), sb_namespace_url=None, sb_queue_name=None)
+        assert "--recover requires --sb-namespace-url and --sb-queue-name" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +415,9 @@ def _make_purge_storage(
     storage.task_result_prefix = "task-results"
 
     async def _list_blobs(prefix):
-        for b in blob_list:
+        # Azure returns names in lexicographic order; mirror that so ordering-
+        # dependent logic (UUID7 early-exit) is exercised realistically.
+        for b in sorted(blob_list, key=lambda x: x.name):
             if b.name.startswith(prefix):
                 yield b
 
@@ -425,6 +428,7 @@ def _make_purge_storage(
     storage.list_blobs = _list_blobs
     storage.find_blobs_by_tags = _find_blobs_by_tags
     storage.load_graph = mock.AsyncMock(return_value=graph)
+    storage.load_task_result = mock.AsyncMock(return_value=None)
     storage.delete_blob = mock.AsyncMock()
     storage.delete_blobs_batch = mock.AsyncMock(return_value=[])
     return storage
@@ -581,16 +585,17 @@ class TestPurgeAgeEligibility:
 
 
 class TestPurgeMissingGraphJson:
-    async def test_graph_without_graph_json_is_skipped(self, capsys):
+    async def test_graph_without_graph_json_is_skipped(self, caplog):
         graph_id = "019d8c0c-bd9b-7c23-be84-4d0799d7ecd4"
         blobs = [
             _make_blob(f"task-results/{graph_id}/task-1.json", _old(10)),
         ]
         storage = _make_purge_storage(blob_list=blobs)
-        code = await run_purge(storage, older_than_days=7)
+        with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
+            code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_HEALTHY
-        captured = capsys.readouterr()
-        assert "no graph.json" in captured.err
+        assert "no graph.json" in caplog.text
+        assert "corrupted" in caplog.text
         storage.load_graph.assert_not_called()
         storage.delete_blob.assert_not_called()
 
@@ -608,13 +613,66 @@ class TestPurgeMissingGraphJson:
         assert blob_name in deleted
 
     async def test_orphaned_blobs_not_purged_without_force(self, capsys):
-        """Without --force orphaned blobs (no graph.json) must still be skipped."""
+        """Without --force a *damaged graph* (task blobs but no graph.json) must
+        still be skipped — its name does not match the standalone pattern."""
         graph_id = "019d8c0c-bd9b-7c23-be84-4d0799d7ecd4"
         blobs = [_make_blob(f"task-results/{graph_id}/task-1.json", _old(10))]
         storage = _make_purge_storage(blob_list=blobs)
         code = await run_purge(storage, older_than_days=7, force=False)
         assert code == EXIT_HEALTHY
         storage.delete_blobs_batch.assert_not_called()
+
+    async def test_standalone_task_result_purged_by_age_without_force(self, capsys):
+        """A finished standalone task-result (graph_id=null) lives at
+        task-results/{task_id}/{task_id}.json with no graph.json. It must be
+        purged on age alone — no --force required."""
+        task_id = "019e8f16-a79a-76f3-ac1a-b4c2b7404a8e"
+        blob_name = f"task-results/{task_id}/{task_id}.json"
+        blobs = [_make_blob(blob_name, _old(10))]
+        storage = _make_purge_storage(blob_list=blobs)
+        storage.load_task_result = mock.AsyncMock(
+            return_value=TaskResultSlim(task_id=TaskId(task_id), status=TaskStatus.Success)
+        )
+        code = await run_purge(storage, older_than_days=7, force=False)
+        assert code == EXIT_HEALTHY
+        storage.load_graph.assert_not_called()
+        storage.load_task_result.assert_awaited_once()  # status was verified before deleting
+        storage.delete_blobs_batch.assert_called()
+        deleted = [name for call in storage.delete_blobs_batch.call_args_list for name in call.args[0]]
+        assert blob_name in deleted
+
+    @pytest.mark.parametrize("status", [TaskStatus.Scheduled, TaskStatus.Started, TaskStatus.Retry])
+    async def test_standalone_task_result_in_progress_is_protected(self, caplog, status):
+        """A standalone task still in progress (stuck/retrying) must NOT be
+        deleted on age without --force — the same protection graphs get."""
+        task_id = "019e8f16-a79a-76f3-ac1a-b4c2b7404a8e"
+        blob_name = f"task-results/{task_id}/{task_id}.json"
+        blobs = [_make_blob(blob_name, _old(10))]
+        storage = _make_purge_storage(blob_list=blobs)
+        storage.load_task_result = mock.AsyncMock(
+            return_value=TaskResultSlim(task_id=TaskId(task_id), status=status)
+        )
+        with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
+            code = await run_purge(storage, older_than_days=7, force=False)
+        assert code == EXIT_STALLED
+        storage.delete_blobs_batch.assert_not_called()
+        # in-progress is expected, not corrupted → no warning is logged
+        assert "corrupted" not in caplog.text
+
+    async def test_standalone_task_result_in_progress_deleted_with_force(self, capsys):
+        """--force deletes even an in-progress standalone task."""
+        task_id = "019e8f16-a79a-76f3-ac1a-b4c2b7404a8e"
+        blob_name = f"task-results/{task_id}/{task_id}.json"
+        blobs = [_make_blob(blob_name, _old(10))]
+        storage = _make_purge_storage(blob_list=blobs)
+        storage.load_task_result = mock.AsyncMock(
+            return_value=TaskResultSlim(task_id=TaskId(task_id), status=TaskStatus.Started)
+        )
+        code = await run_purge(storage, older_than_days=7, force=True)
+        assert code == EXIT_HEALTHY
+        storage.load_task_result.assert_not_called()  # force skips the status load
+        deleted = [name for call in storage.delete_blobs_batch.call_args_list for name in call.args[0]]
+        assert blob_name in deleted
 
 
 # ---------------------------------------------------------------------------
@@ -640,7 +698,10 @@ class TestPurgeInProgressSafetyCheck:
         code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_STALLED
         captured = capsys.readouterr()
-        assert "in-progress tasks" in captured.err
+        # In-progress graphs are skipped quietly (no per-graph SKIP noise); the
+        # situation is surfaced via the summary and the exit code instead.
+        assert "in-progress tasks" in captured.out
+        assert "SKIP" not in captured.err
         storage.delete_blob.assert_not_called()
 
     async def test_started_task_causes_skip(self, capsys):
@@ -665,7 +726,9 @@ class TestPurgeInProgressSafetyCheck:
         assert code == EXIT_STALLED
         storage.delete_blob.assert_not_called()
 
-    async def test_in_progress_skip_message_sent_to_stderr(self, capsys):
+    async def test_in_progress_skipped_quietly_no_per_graph_stderr(self, capsys):
+        """In-progress graphs are not corrupted, so they must NOT emit a
+        per-graph SKIP line — that channel is reserved for weird/corrupted data."""
         graph = self._make_graph_with_status(TaskStatus.Scheduled)
         graph_id = str(graph.graph_id)
         blobs = [
@@ -674,7 +737,8 @@ class TestPurgeInProgressSafetyCheck:
         storage = _make_purge_storage(blob_list=blobs, graph=graph)
         await run_purge(storage, older_than_days=7)
         captured = capsys.readouterr()
-        assert graph_id in captured.err
+        assert graph_id not in captured.err
+        assert "SKIP" not in captured.err
 
     async def test_skipped_in_progress_count_excludes_age_filtered_graphs(self, capsys):
         """Summary line counts only graphs skipped for in-progress tasks, not age-filtered ones."""
@@ -702,7 +766,7 @@ class TestPurgeInProgressSafetyCheck:
         code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_STALLED
         captured = capsys.readouterr()
-        assert "Skipped 1 graph(s) due to in-progress tasks." in captured.out
+        assert "Skipped 1 graph(s)/task(s) with in-progress tasks." in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -838,7 +902,7 @@ class TestPurge404NoOp:
         code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_HEALTHY
 
-    async def test_non_404_error_logged_as_warning(self, capsys):
+    async def test_non_404_error_logged_as_warning(self, caplog):
         """Non-404 batch failures are returned by delete_blobs_batch and reported as warnings."""
         graph = self._make_complete_graph()
         graph_id = str(graph.graph_id)
@@ -852,9 +916,9 @@ class TestPurge404NoOp:
         storage.delete_blobs_batch = mock.AsyncMock(
             side_effect=[[], [graph_json_path]]
         )
-        code = await run_purge(storage, older_than_days=7)
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.err or "Failed" in captured.err
+        with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
+            code = await run_purge(storage, older_than_days=7)
+        assert "Failed to delete blob" in caplog.text
         # All deletions failed for the only graph, so EXIT_ERROR
         assert code == EXIT_ERROR
 
@@ -865,7 +929,7 @@ class TestPurge404NoOp:
 
 
 class TestPurgeListingError:
-    async def test_listing_error_returns_exit_error(self, capsys):
+    async def test_listing_error_returns_exit_error(self, caplog):
         storage = mock.AsyncMock()
         storage.task_result_prefix = "task-results"
 
@@ -874,10 +938,10 @@ class TestPurgeListingError:
             yield  # make it a generator
 
         storage.find_blobs_by_tags = _failing_tag_query
-        code = await run_purge(storage, older_than_days=7)
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_ERROR
-        captured = capsys.readouterr()
-        assert "ERROR" in captured.err
+        assert "Failed to list blobs" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -887,17 +951,18 @@ class TestPurgeListingError:
 
 class TestStreamEligibleGraphs:
     async def test_stream_eligible_graphs_yields_old_graphs(self):
-        """Tag query returns only old graph's blobs; new graph is absent from
-        tag results (the tag filter excluded it). Verify only the old group is yielded."""
-        old_graph_id = "aaaa-old-graph"
-        new_graph_id = "bbbb-new-graph"
+        """Tag query returns only the old graph's blobs; the new graph is absent
+        from tag results (the tag filter excluded it). With realistic UUID7 ids,
+        the fallback's age comparison must actually run and exclude the new graph."""
+        old_uuid = _make_uuid7_str(int((datetime.now(UTC) - timedelta(days=10)).timestamp() * 1000))
+        new_uuid = _make_uuid7_str(int(datetime.now(UTC).timestamp() * 1000))
         old_blobs = [
-            _make_blob(f"task-results/{old_graph_id}/graph.json", _old(10)),
-            _make_blob(f"task-results/{old_graph_id}/task-1.json", _old(10)),
+            _make_blob(f"task-results/{old_uuid}/graph.json", _old(10)),
+            _make_blob(f"task-results/{old_uuid}/task-1.json", _old(10)),
         ]
         all_blobs = old_blobs + [
-            _make_blob(f"task-results/{new_graph_id}/graph.json", _new(1)),
-            _make_blob(f"task-results/{new_graph_id}/task-1.json", _new(1)),
+            _make_blob(f"task-results/{new_uuid}/graph.json", _new(1)),
+            _make_blob(f"task-results/{new_uuid}/task-1.json", _new(1)),
         ]
         storage = mock.AsyncMock()
         storage.task_result_prefix = "task-results"
@@ -910,7 +975,7 @@ class TestStreamEligibleGraphs:
             yielded.append((graph_id, group_blobs))
 
         assert len(yielded) == 1
-        assert yielded[0][0] == old_graph_id
+        assert yielded[0][0] == old_uuid
         assert len(yielded[0][1]) == 2
 
     async def test_stream_eligible_graphs_empty_listing(self):
@@ -942,6 +1007,24 @@ class TestStreamEligibleGraphs:
         assert len(yielded) == 1
         assert yielded[0][0] == graph_id
         assert len(yielded[0][1]) == 2
+
+    async def test_untagged_graph_is_not_discovered_by_default(self):
+        """The default (tag-index) path is intentionally blind to untagged /
+        pre-tag graphs — it must NOT list prefixes or date by UUID7. Those are
+        handled only by _stream_all_graphs (--all-graphs)."""
+        storage = mock.AsyncMock()
+        storage.task_result_prefix = "task-results"
+        storage.find_blobs_by_tags = lambda fe: _tag_gen([])  # tag index misses it
+        # With no tag hits there are no candidates, so the default path must not
+        # fall back to listing prefixes to discover the untagged graph.
+        storage.list_blobs = mock.MagicMock(side_effect=AssertionError("default path must not scan prefixes"))
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        yielded = []
+        async for gid, _group_blobs in _stream_eligible_graphs(storage, cutoff):
+            yielded.append(gid)
+
+        assert yielded == []
 
 
 # ---------------------------------------------------------------------------
@@ -982,9 +1065,9 @@ class TestPurgeBatchDeletion:
         assert graph_json_path in graph_batch
         assert task_blob_path not in graph_batch
 
-    async def test_batch_failure_warnings(self, capsys):
+    async def test_batch_failure_warnings(self, caplog):
         """Mock delete_blobs_batch to return failed names. Verify warnings
-        printed to stderr."""
+        are logged."""
         graph = self._make_complete_graph()
         graph_id = str(graph.graph_id)
         graph_json_path = f"task-results/{graph_id}/graph.json"
@@ -999,11 +1082,11 @@ class TestPurgeBatchDeletion:
             side_effect=[[task_blob_path], []]
         )
 
-        await run_purge(storage, older_than_days=7)
+        with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
+            await run_purge(storage, older_than_days=7)
 
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.err
-        assert task_blob_path in captured.err
+        assert "Failed to delete blob" in caplog.text
+        assert task_blob_path in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1018,9 +1101,10 @@ async def _tag_gen(blobs):
 
 
 def _make_list_blobs(all_blobs):
-    """Return a list_blobs mock that filters by prefix."""
+    """Return a list_blobs mock that filters by prefix, yielding in lexicographic
+    name order to mirror real Azure ``list_blobs`` semantics."""
     async def _list_blobs(prefix):
-        for b in all_blobs:
+        for b in sorted(all_blobs, key=lambda x: x.name):
             if b.name.startswith(prefix):
                 yield b
     return _list_blobs
@@ -1394,21 +1478,21 @@ class TestValidateInspectArgs:
 
 
 class TestRecoverGraphNotFound:
-    async def test_returns_error_when_graph_not_found(self, capsys):
+    async def test_returns_error_when_graph_not_found(self, caplog):
         storage = _mock_storage(graph=None)
-        code = await run_recover(
-            storage,
-            "missing-graph-id",
-            sb_namespace_url="https://test.servicebus.windows.net",
-            sb_queue_name="test-queue",
-        )
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            code = await run_recover(
+                storage,
+                "missing-graph-id",
+                sb_namespace_url="https://test.servicebus.windows.net",
+                sb_queue_name="test-queue",
+            )
         assert code == EXIT_ERROR
-        captured = capsys.readouterr()
-        assert "not found in storage" in captured.err
+        assert "not found in storage" in caplog.text
 
-    async def test_task_not_in_graph_is_skipped(self, capsys):
+    async def test_task_not_in_graph_is_skipped(self, caplog):
         """If detect_stalled_tasks returns a task_id that isn't in children or
-        fail_children (defensive guard), it must be skipped with a message to stderr."""
+        fail_children (defensive guard), it must be skipped with a logged warning."""
         from boilermaker.task.task_id import TaskId
 
         graph, task_a, task_b, task_c = _make_graph_with_tasks()
@@ -1426,6 +1510,7 @@ class TestRecoverGraphNotFound:
         with (
             mock.patch("boilermaker.task.graph.TaskGraph.detect_stalled_tasks", return_value=stalled),
             mock.patch("boilermaker.cli.recover.AzureServiceBus", return_value=mock_sb),
+            caplog.at_level(logging.WARNING, logger="boilermaker.cli"),
         ):
             code = await run_recover(
                 storage,
@@ -1435,8 +1520,7 @@ class TestRecoverGraphNotFound:
             )
 
         assert code == EXIT_STALLED
-        captured = capsys.readouterr()
-        assert "SKIP" in captured.err
+        assert "not found in graph definition" in caplog.text
         mock_sb.send_message.assert_not_called()
 
 
@@ -1521,9 +1605,9 @@ class TestPurgeLoadGraphEdgeCases:
     def _make_graph_blob(self, graph_id: str) -> mock.MagicMock:
         return _make_blob(f"task-results/{graph_id}/graph.json", _old(10))
 
-    async def test_load_graph_storage_error_skips_graph(self, capsys):
+    async def test_load_graph_storage_error_skips_graph(self, caplog):
         """BoilermakerStorageError from load_graph must skip that graph with a
-        SKIP message to stderr and continue processing others."""
+        warning and continue processing others."""
         from boilermaker.exc import BoilermakerStorageError
 
         graph_id = "019d8c0c-bd9b-7c23-be84-4d0799d7ecd5"
@@ -1535,23 +1619,23 @@ class TestPurgeLoadGraphEdgeCases:
             )
         )
 
-        code = await run_purge(storage, older_than_days=7)
+        with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
+            code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_HEALTHY
-        captured = capsys.readouterr()
-        assert "SKIP" in captured.err
-        assert "failed to load graph" in captured.err
+        assert "could not be loaded" in caplog.text
+        assert "corrupted" in caplog.text
 
-    async def test_load_graph_returns_none_skips_graph(self, capsys):
+    async def test_load_graph_returns_none_skips_graph(self, caplog):
         """None returned by load_graph (graph.json missing or unreadable) must
-        skip that graph with a SKIP message to stderr."""
+        skip that graph with a warning."""
         graph_id = "019d8c0c-bd9b-7c23-be84-4d0799d7ecd6"
         blobs = [self._make_graph_blob(graph_id)]
         storage = _make_purge_storage(blob_list=blobs, graph=None)
 
-        code = await run_purge(storage, older_than_days=7)
+        with caplog.at_level(logging.WARNING, logger="boilermaker.cli"):
+            code = await run_purge(storage, older_than_days=7)
         assert code == EXIT_HEALTHY
-        captured = capsys.readouterr()
-        assert "SKIP" in captured.err
+        assert "corrupted" in caplog.text
 
     async def test_force_true_deletes_in_progress_graphs(self):
         """With force=True, graphs with in-progress tasks must be added to the

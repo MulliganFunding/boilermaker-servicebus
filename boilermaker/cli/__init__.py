@@ -110,22 +110,23 @@ def _add_purge_subparser(subparsers: argparse._SubParsersAction) -> None:  # noq
         metavar="DAYS",
         help=(
             "Delete graphs older than DAYS days, based on created_date tags "
-            "(or UUID7 timestamps when --all-graphs is used) (1–30 inclusive)"
+            "(1–30 inclusive). Untagged/pre-tag graphs are only found with --all-graphs."
         ),
     )
     purge_parser.add_argument("--dry-run", action="store_true", help="Print what would be deleted without deleting")
     purge_parser.add_argument(
         "--force",
         action="store_true",
-        help="Delete graphs that have in-progress tasks, and purge orphaned blobs that have no graph.json",
+        help="Delete graphs/tasks that are still in progress, and purge corrupted directories missing graph.json",
     )
     purge_parser.add_argument(
         "--all-graphs",
         action="store_true",
         default=False,
         help=(
-            "Discover graphs by listing all graph-id prefixes and using UUID7 temporal ordering "
-            "instead of tag-based filtering. Use for containers with pre-tag blobs."
+            "Slower, thorough discovery: list every graph-id prefix and date each by its UUID7 "
+            "timestamp instead of the tag index. Use this to find untagged/pre-tag graphs the "
+            "default (tag-based) discovery cannot see."
         ),
     )
 
@@ -244,7 +245,7 @@ def main() -> None:
                     force=args.force,
                     console=console,
                 )
-            print(f"ERROR: Unknown command: {args.command}", file=sys.stderr)
+            logger.error("Unknown command: %s", args.command)
             return EXIT_ERROR
         finally:
             await credentials.close()
