@@ -1,6 +1,6 @@
 """Inspect subcommand handler for the boilermaker CLI."""
 
-import sys
+import logging
 
 from rich.console import Console
 
@@ -14,6 +14,8 @@ from boilermaker.cli._output import (
 from boilermaker.cli._visual import open_visual
 from boilermaker.storage.blob_storage import BlobClientStorage
 from boilermaker.task.task_id import GraphId
+
+logger = logging.getLogger("boilermaker.cli")
 
 
 async def run_inspect(
@@ -50,7 +52,7 @@ async def run_inspect(
     if visual:
         graph = await storage.load_graph(GraphId(graph_id), full=True)
         if graph is None:
-            print(f"ERROR: Graph {graph_id} not found in storage.", file=sys.stderr)
+            logger.error("Graph %s not found in storage.", graph_id)
             return EXIT_ERROR
 
         stalled = graph.detect_stalled_tasks()
@@ -65,7 +67,7 @@ async def run_inspect(
 
     graph = await storage.load_graph_slim_from_tags(GraphId(graph_id))
     if graph is None:
-        print(f"ERROR: Graph {graph_id} not found in storage.", file=sys.stderr)
+        logger.error("Graph %s not found in storage.", graph_id)
         return EXIT_ERROR
 
     stalled = graph.detect_stalled_tasks()
@@ -106,10 +108,11 @@ def _inspect_single_task(graph, graph_id, task_id, stalled, console) -> int:
         available = sorted(
             [str(tid) for tid in list(graph.children) + list(graph.fail_children)]
         )
-        print(
-            f"ERROR: Task {task_id} not found in graph {graph_id}.\n"
-            f"Available tasks: {', '.join(available) if available else '(none)'}",
-            file=sys.stderr,
+        logger.error(
+            "Task %s not found in graph %s. Available tasks: %s",
+            task_id,
+            graph_id,
+            ", ".join(available) if available else "(none)",
         )
         return EXIT_ERROR
 

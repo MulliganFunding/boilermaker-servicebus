@@ -1,5 +1,6 @@
 """Tests for boilermaker.cli.invoke — run_invoke() handler."""
 
+import logging
 from io import StringIO
 from unittest import mock
 
@@ -72,16 +73,16 @@ class TestRunInvokeGraphNotFound:
         assert exit_code == EXIT_ERROR
 
     @pytest.mark.asyncio
-    async def test_error_message_includes_graph_id(self, capsys):
+    async def test_error_message_includes_graph_id(self, caplog):
         storage = _mock_storage(None)
-        await run_invoke(
-            storage, "missing-graph-abc", "some-task-id",
-            sb_namespace_url="https://example.servicebus.windows.net",
-            sb_queue_name="tasks",
-            console=_no_color_console(),
-        )
-        captured = capsys.readouterr()
-        assert "missing-graph-abc" in captured.err
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            await run_invoke(
+                storage, "missing-graph-abc", "some-task-id",
+                sb_namespace_url="https://example.servicebus.windows.net",
+                sb_queue_name="tasks",
+                console=_no_color_console(),
+            )
+        assert "missing-graph-abc" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -103,31 +104,31 @@ class TestRunInvokeTaskNotFound:
         assert exit_code == EXIT_ERROR
 
     @pytest.mark.asyncio
-    async def test_error_message_includes_task_id(self, capsys):
+    async def test_error_message_includes_task_id(self, caplog):
         graph, _, _ = _make_graph_with_tasks()
         storage = _mock_storage(graph)
-        await run_invoke(
-            storage, str(graph.graph_id), "bad-task-id",
-            sb_namespace_url="https://example.servicebus.windows.net",
-            sb_queue_name="tasks",
-            console=_no_color_console(),
-        )
-        captured = capsys.readouterr()
-        assert "bad-task-id" in captured.err
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            await run_invoke(
+                storage, str(graph.graph_id), "bad-task-id",
+                sb_namespace_url="https://example.servicebus.windows.net",
+                sb_queue_name="tasks",
+                console=_no_color_console(),
+            )
+        assert "bad-task-id" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_error_message_lists_available_tasks(self, capsys):
+    async def test_error_message_lists_available_tasks(self, caplog):
         graph, task_a, task_b = _make_graph_with_tasks()
         storage = _mock_storage(graph)
-        await run_invoke(
-            storage, str(graph.graph_id), "bad-task-id",
-            sb_namespace_url="https://example.servicebus.windows.net",
-            sb_queue_name="tasks",
-            console=_no_color_console(),
-        )
-        captured = capsys.readouterr()
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            await run_invoke(
+                storage, str(graph.graph_id), "bad-task-id",
+                sb_namespace_url="https://example.servicebus.windows.net",
+                sb_queue_name="tasks",
+                console=_no_color_console(),
+            )
         # Available tasks should be listed
-        assert str(task_a.task_id) in captured.err or str(task_b.task_id) in captured.err
+        assert str(task_a.task_id) in caplog.text or str(task_b.task_id) in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -176,18 +177,18 @@ class TestRunInvokeTerminalStateGuard:
         assert exit_code == EXIT_ERROR
 
     @pytest.mark.asyncio
-    async def test_error_message_mentions_terminal_state(self, capsys):
+    async def test_error_message_mentions_terminal_state(self, caplog):
         graph, task_a, _ = _make_graph_with_tasks()
         _set_result(graph, task_a, TaskStatus.Success)
         storage = _mock_storage(graph)
-        await run_invoke(
-            storage, str(graph.graph_id), str(task_a.task_id),
-            sb_namespace_url="https://example.servicebus.windows.net",
-            sb_queue_name="tasks",
-            console=_no_color_console(),
-        )
-        captured = capsys.readouterr()
-        assert "terminal" in captured.err.lower() or "force" in captured.err.lower()
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            await run_invoke(
+                storage, str(graph.graph_id), str(task_a.task_id),
+                sb_namespace_url="https://example.servicebus.windows.net",
+                sb_queue_name="tasks",
+                console=_no_color_console(),
+            )
+        assert "terminal" in caplog.text.lower() or "force" in caplog.text.lower()
 
 
 # ---------------------------------------------------------------------------

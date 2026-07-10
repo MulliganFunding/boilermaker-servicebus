@@ -245,7 +245,7 @@ def main() -> None:
                     force=args.force,
                     console=console,
                 )
-            print(f"ERROR: Unknown command: {args.command}", file=sys.stderr)
+            logger.error("Unknown command: %s", args.command)
             return EXIT_ERROR
         finally:
             await credentials.close()

@@ -1,6 +1,6 @@
 """Recovery subcommand handler for the boilermaker CLI."""
 
-import sys
+import logging
 from datetime import datetime, UTC
 
 from azure.identity.aio import DefaultAzureCredential
@@ -11,6 +11,8 @@ from boilermaker.cli._output import render_graph_summary, render_task_table
 from boilermaker.service_bus import AzureServiceBus
 from boilermaker.storage.blob_storage import BlobClientStorage
 from boilermaker.task.task_id import GraphId
+
+logger = logging.getLogger("boilermaker.cli")
 
 
 async def run_recover(
@@ -38,12 +40,12 @@ async def run_recover(
         console = Console()
 
     if not sb_namespace_url or not sb_queue_name:
-        print("ERROR: --recover requires --sb-namespace-url and --sb-queue-name", file=sys.stderr)
+        logger.error("--recover requires --sb-namespace-url and --sb-queue-name")
         return EXIT_ERROR
 
     graph = await storage.load_graph(GraphId(graph_id))
     if graph is None:
-        print(f"ERROR: Graph {graph_id} not found in storage.", file=sys.stderr)
+        logger.error("Graph %s not found in storage.", graph_id)
         return EXIT_ERROR
 
     console.print(render_graph_summary(graph))
@@ -65,7 +67,7 @@ async def run_recover(
         for task_id, fn_name, _status in stalled:
             task = graph.children.get(task_id) or graph.fail_children.get(task_id)
             if task is None:
-                print(f"  SKIP: Task {task_id} not found in graph definition", file=sys.stderr)
+                logger.warning("Task %s not found in graph definition; skipping.", task_id)
                 continue
             timestamp = int(datetime.now(UTC).timestamp())
             recovery_msg_id = f"{task_id}:recovery:{timestamp}"

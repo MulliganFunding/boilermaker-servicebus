@@ -1,6 +1,6 @@
 """Invoke subcommand handler for the boilermaker CLI."""
 
-import sys
+import logging
 from datetime import datetime, UTC
 
 from azure.identity.aio import DefaultAzureCredential
@@ -11,6 +11,8 @@ from boilermaker.service_bus import AzureServiceBus
 from boilermaker.storage.blob_storage import BlobClientStorage
 from boilermaker.task.result import TaskStatus
 from boilermaker.task.task_id import GraphId, TaskId
+
+logger = logging.getLogger("boilermaker.cli")
 
 
 async def run_invoke(
@@ -47,7 +49,7 @@ async def run_invoke(
 
     graph = await storage.load_graph(GraphId(graph_id))
     if graph is None:
-        print(f"ERROR: Graph {graph_id} not found in storage.", file=sys.stderr)
+        logger.error("Graph %s not found in storage.", graph_id)
         return EXIT_ERROR
 
     task_id = TaskId(task_id)
@@ -56,10 +58,11 @@ async def run_invoke(
         available = sorted(
             [str(tid) for tid in list(graph.children) + list(graph.fail_children)]
         )
-        print(
-            f"ERROR: Task {task_id} not found in graph {graph_id}.\n"
-            f"Available tasks: {', '.join(available) if available else '(none)'}",
-            file=sys.stderr,
+        logger.error(
+            "Task %s not found in graph %s. Available tasks: %s",
+            task_id,
+            graph_id,
+            ", ".join(available) if available else "(none)",
         )
         return EXIT_ERROR
 
@@ -68,10 +71,10 @@ async def run_invoke(
     task_is_terminal = result is not None and result.status in TaskStatus.finished_types()
 
     if task_is_terminal and not force:
-        print(
-            f"ERROR: Task {task_id} is in terminal state '{status}'. "
-            f"Use --force to re-invoke.",
-            file=sys.stderr,
+        logger.error(
+            "Task %s is in terminal state '%s'. Use --force to re-invoke.",
+            task_id,
+            status,
         )
         return EXIT_ERROR
 
@@ -93,7 +96,7 @@ async def run_invoke(
                 unique_msg_id=invoke_msg_id,
             )
         except Exception as exc:
-            print(f"ERROR: Failed to publish task {task_id} to Service Bus: {exc}", file=sys.stderr)
+            logger.error("Failed to publish task %s to Service Bus: %s", task_id, exc)
             return EXIT_ERROR
         console.print(
             f"[green]Invoked[/green]  {task.function_name} ({task_id}) -> msg_id: {invoke_msg_id}"

@@ -180,21 +180,21 @@ class TestInspectGraphExitCodes:
 
 
 class TestInspectGraphErrorOutput:
-    async def test_graph_not_found_prints_to_stderr(self, capsys):
+    async def test_graph_not_found_logs_error(self, caplog):
         storage = _mock_storage(graph=None)
-        await run_inspect(storage, "missing-graph")
-        captured = capsys.readouterr()
-        assert "ERROR: Graph missing-graph not found in storage." in captured.err
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            await run_inspect(storage, "missing-graph")
+        assert "Graph missing-graph not found in storage." in caplog.text
 
-    async def test_recover_missing_args_prints_to_stderr(self, capsys):
+    async def test_recover_missing_args_logs_error(self, caplog):
         graph, task_a, task_b, task_c = _make_graph_with_tasks()
         _set_result(graph, task_a, TaskStatus.Success)
         _set_result(graph, task_b, TaskStatus.Retry)
         _set_result(graph, task_c, TaskStatus.Pending)
         storage = _mock_storage(graph)
-        await run_recover(storage, str(graph.graph_id), sb_namespace_url=None, sb_queue_name=None)
-        captured = capsys.readouterr()
-        assert "--recover requires --sb-namespace-url and --sb-queue-name" in captured.err
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            await run_recover(storage, str(graph.graph_id), sb_namespace_url=None, sb_queue_name=None)
+        assert "--recover requires --sb-namespace-url and --sb-queue-name" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1478,21 +1478,21 @@ class TestValidateInspectArgs:
 
 
 class TestRecoverGraphNotFound:
-    async def test_returns_error_when_graph_not_found(self, capsys):
+    async def test_returns_error_when_graph_not_found(self, caplog):
         storage = _mock_storage(graph=None)
-        code = await run_recover(
-            storage,
-            "missing-graph-id",
-            sb_namespace_url="https://test.servicebus.windows.net",
-            sb_queue_name="test-queue",
-        )
+        with caplog.at_level(logging.ERROR, logger="boilermaker.cli"):
+            code = await run_recover(
+                storage,
+                "missing-graph-id",
+                sb_namespace_url="https://test.servicebus.windows.net",
+                sb_queue_name="test-queue",
+            )
         assert code == EXIT_ERROR
-        captured = capsys.readouterr()
-        assert "not found in storage" in captured.err
+        assert "not found in storage" in caplog.text
 
-    async def test_task_not_in_graph_is_skipped(self, capsys):
+    async def test_task_not_in_graph_is_skipped(self, caplog):
         """If detect_stalled_tasks returns a task_id that isn't in children or
-        fail_children (defensive guard), it must be skipped with a message to stderr."""
+        fail_children (defensive guard), it must be skipped with a logged warning."""
         from boilermaker.task.task_id import TaskId
 
         graph, task_a, task_b, task_c = _make_graph_with_tasks()
@@ -1510,6 +1510,7 @@ class TestRecoverGraphNotFound:
         with (
             mock.patch("boilermaker.task.graph.TaskGraph.detect_stalled_tasks", return_value=stalled),
             mock.patch("boilermaker.cli.recover.AzureServiceBus", return_value=mock_sb),
+            caplog.at_level(logging.WARNING, logger="boilermaker.cli"),
         ):
             code = await run_recover(
                 storage,
@@ -1519,8 +1520,7 @@ class TestRecoverGraphNotFound:
             )
 
         assert code == EXIT_STALLED
-        captured = capsys.readouterr()
-        assert "SKIP" in captured.err
+        assert "not found in graph definition" in caplog.text
         mock_sb.send_message.assert_not_called()
 
 
