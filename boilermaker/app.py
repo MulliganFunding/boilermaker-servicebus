@@ -364,6 +364,12 @@ class Boilermaker:
                 [],
             )
 
+        span = trace.get_current_span()
+        span.set_attribute("task.name", task.function_name)
+        span.set_attribute("task.id", str(task.task_id))
+        if task.graph_id is not None:
+            span.set_attribute("task.graph_id", str(task.graph_id))
+
         encountered_errors = []
         for _i in range(publish_attempts):
             try:
