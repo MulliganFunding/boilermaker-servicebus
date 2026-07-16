@@ -1,6 +1,6 @@
 [project]
 name = "boilermaker-servicebus"
-version = "1.4.0"
+version = "1.4.1"
 description = "An async python Background task system using Azure Service Bus Queues"
 authors = [{ "name" = "Erik Aker", "email" = "eaker@mulliganfunding.com" }]
 license = { file = "LICENSE" }
@@ -29,17 +29,17 @@ Issues = "https://github.com/MulliganFunding/boilermaker-servicebus/issues"
 
 [dependency-groups]
 dev = [
-    "build>=1.5.1",
+    "build>=1.5.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
-    "ruff>=0.15.21",
+    "ruff>=0.15.22",
     # Documentation dependencies
     "mkdocs>=1.5.0",
     "mkdocs-material>=9.7.6",
-    "mkdocstrings[python]>=1.0.5",
+    "mkdocstrings[python]>=1.0.6",
     "mkdocs-mermaid2-plugin>=1.2.3",
-    "ty>=0.0.58",
+    "ty>=0.0.60",
 ]
 
 [project.optional-dependencies]
