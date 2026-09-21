@@ -13,8 +13,7 @@ import weakref
 from functools import wraps
 
 from aio_azure_clients_toolbox import AzureServiceBus, ManagedAzureServiceBusSender
-from anyio import create_task_group, open_signal_receiver
-from anyio.abc import CancelScope
+from anyio import CancelScope, create_task_group, open_signal_receiver
 from azure.servicebus import ServiceBusReceivedMessage
 from azure.servicebus.aio import ServiceBusReceiver
 from azure.servicebus.exceptions import (
