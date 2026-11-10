@@ -114,7 +114,7 @@ class EvaluatorTestContext:
         self.success_callback_single_parent_task = Task.si(success_callback)
         self.success_callback_two_parents_task = Task.si(success_callback)
 
-    def create_evaluator(self, task=None) -> "EvaluatorTestContext":
+    def create_evaluator(self, task=None) -> EvaluatorTestContext:
         """Create a TaskGraphEvaluator with the given task."""
         if task is None:
             task = self.ok_task
@@ -209,7 +209,7 @@ class EvaluatorTestContext:
         """Get a task from the graph by ID."""
         return self.graph.children.get(task_id) or self.graph.fail_children.get(task_id)
 
-    def set_task(self, task: Task, *args, **kwargs) -> "EvaluatorTestContext":
+    def set_task(self, task: Task, *args, **kwargs) -> EvaluatorTestContext:
         """Set the task for the evaluator."""
         task.msg = self.make_message(task, sequence_number=random.randint(1, 1000))
         task.payload["args"] = args
@@ -228,13 +228,13 @@ class EvaluatorTestContext:
             )
         )
 
-    def prep_task_to_succeed(self) -> "EvaluatorTestContext":
+    def prep_task_to_succeed(self) -> EvaluatorTestContext:
         """Configure ok_task to succeed."""
         self.set_task(self.ok_task)
         self._add_ok_result()
         return self
 
-    def prep_task_to_raise(self) -> "EvaluatorTestContext":
+    def prep_task_to_raise(self) -> EvaluatorTestContext:
         """Configure positive_task to raise an exception."""
         self.set_task(self.positive_task, -5)
 
@@ -246,7 +246,7 @@ class EvaluatorTestContext:
 
         return self
 
-    def prep_task_to_fail(self) -> "EvaluatorTestContext":
+    def prep_task_to_fail(self) -> EvaluatorTestContext:
         """Configure positive_task to return failure."""
         self.set_task(self.positive_task, 0)
 
@@ -260,7 +260,7 @@ class EvaluatorTestContext:
 
         return self
 
-    def prep_task_to_retry(self) -> "EvaluatorTestContext":
+    def prep_task_to_retry(self) -> EvaluatorTestContext:
         """Configure positive_task to retry."""
         self.set_task(self.positive_task, 100)
 
@@ -271,7 +271,7 @@ class EvaluatorTestContext:
 
         return self
 
-    def prep_task_to_exhaust_retries(self) -> "EvaluatorTestContext":
+    def prep_task_to_exhaust_retries(self) -> EvaluatorTestContext:
         """Configure positive_task to exhaust retries."""
         self.positive_task.attempts.attempts = self.positive_task.policy.max_tries + 1
         self.set_task(self.positive_task, 100)

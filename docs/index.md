@@ -4,7 +4,7 @@ Async Python background tasks with Azure ServiceBus.
 
 [![Tests](https://github.com/MulliganFunding/boilermaker-servicebus/workflows/Tests/badge.svg)](https://github.com/MulliganFunding/boilermaker-servicebus/actions)
 [![PyPI version](https://badge.fury.io/py/boilermaker-servicebus.svg)](https://badge.fury.io/py/boilermaker-servicebus)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14+-blue.svg)](https://www.python.org/downloads/)
 
 Boilermaker is a lightweight task runner exclusively for **async Python** and Azure Service Bus Queues. It's designed for simplicity and focuses specifically on Azure ServiceBus integration.
 

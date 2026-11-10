@@ -5,7 +5,7 @@ description = "An async python Background task system using Azure Service Bus Qu
 authors = [{ "name" = "Erik Aker", "email" = "eaker@mulliganfunding.com" }]
 license = { file = "LICENSE" }
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
     "aio-azure-clients-toolbox>=1.4.3",
     "rich >= 13.0.0",
@@ -16,7 +16,6 @@ dependencies = [
     "opentelemetry-api >= 1.43.0",
     "pydantic >= 2.13.4",
     "pydantic-settings >= 2.14.2",
-    "uuid-utils>=0.17.0",
 ]
 
 [project.scripts]
@@ -56,6 +55,7 @@ where = ["."]
 minversion = "8.3"
 pythonpath = "."
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 xfail_strict = true
 addopts = "--import-mode=importlib --cov-report=term-missing:skip-covered --cov=boilermaker --strict-config --strict-markers --cov-report html"
 testpaths = ["tests"]
@@ -95,7 +95,11 @@ select = [
     "UP", # pyupgrade
     "W",  # pycodestyle warning
 ]
-ignore = ["N818", "N805"] # exception naming
+ignore = [
+    "N818",  # exception naming
+    "N805",
+    "UP040", # `type X = ...` aliases are not callable; public aliases like TaskFailureResultType are called
+]
 
 [tool.ruff.lint.isort]
 force-single-line = false

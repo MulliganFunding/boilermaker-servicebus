@@ -20,7 +20,7 @@ class TaskStatus(enum.StrEnum):
     Deadlettered = "deadlettered"
 
     @classmethod
-    def default(cls) -> "TaskStatus":
+    def default(cls) -> TaskStatus:
         """Get the default task status.
 
         Returns:
@@ -38,7 +38,7 @@ class TaskStatus(enum.StrEnum):
         return self == TaskStatus.Success
 
     @classmethod
-    def finished_types(cls) -> set["TaskStatus"]:
+    def finished_types(cls) -> set[TaskStatus]:
         return {
             TaskStatus.Success,
             TaskStatus.Failure,
@@ -65,7 +65,7 @@ class TaskStatus(enum.StrEnum):
         return self in self.failure_types()
 
     @classmethod
-    def failure_types(cls) -> set["TaskStatus"]:
+    def failure_types(cls) -> set[TaskStatus]:
         return {
             TaskStatus.Failure,
             TaskStatus.RetriesExhausted,
@@ -93,7 +93,7 @@ class TaskResultSlim(BaseModel):
     status: TaskStatus
 
     @classmethod
-    def default(cls, task_id: TaskId, graph_id: GraphId | None = None) -> "TaskResultSlim":
+    def default(cls, task_id: TaskId, graph_id: GraphId | None = None) -> TaskResultSlim:
         """Create a default TaskResultSlim with Pending status.
 
         Returns:

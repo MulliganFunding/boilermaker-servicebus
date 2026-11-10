@@ -681,7 +681,7 @@ class _LastAddedSentinel:
 
     _instance = None
 
-    def __new__(cls) -> "_LastAddedSentinel":
+    def __new__(cls) -> _LastAddedSentinel:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
@@ -844,7 +844,7 @@ class TaskGraphBuilder:
         *,
         depends_on: list[Task | TaskId | TaskChain] | None | LastAddedSingleton = LAST_ADDED,
         on_failure: Task | None = None,
-    ) -> "TaskGraphBuilder":
+    ) -> TaskGraphBuilder:
         """Add a task with optional explicit dependencies.
 
         Args:
@@ -876,7 +876,7 @@ class TaskGraphBuilder:
         *tasks: Task,
         depends_on: list[Task | TaskId | TaskChain] | None | LastAddedSingleton = LAST_ADDED,
         on_failure: Task | None = None,
-    ) -> "TaskGraphBuilder":
+    ) -> TaskGraphBuilder:
         """Add multiple tasks to run in parallel.
 
         Args:
@@ -911,10 +911,10 @@ class TaskGraphBuilder:
 
     def add_chain(
         self,
-        chain: "TaskChain",
+        chain: TaskChain,
         *,
         depends_on: list[Task | TaskId | TaskChain] | None | LastAddedSingleton = LAST_ADDED,
-    ) -> "TaskGraphBuilder":
+    ) -> TaskGraphBuilder:
         """Embed a TaskChain into the graph as a composable unit.
 
         Cursor behavior:
@@ -960,7 +960,7 @@ class TaskGraphBuilder:
 
         return self
 
-    def then(self, task: Task, *, on_failure: Task | None = None) -> "TaskGraphBuilder":
+    def then(self, task: Task, *, on_failure: Task | None = None) -> TaskGraphBuilder:
         """Add a task that depends on the previously added task(s).
 
         Args:
@@ -980,7 +980,7 @@ class TaskGraphBuilder:
 
         return self.add(task, depends_on=LAST_ADDED, on_failure=on_failure)
 
-    def sequence(self, *tasks: Task) -> "TaskGraphBuilder":
+    def sequence(self, *tasks: Task) -> TaskGraphBuilder:
         """Convenience method to run tasks in sequence: A -> B -> C -> ...
 
         Args:
@@ -1001,7 +1001,7 @@ class TaskGraphBuilder:
 
         return self
 
-    def on_all_failed(self, task: Task) -> "TaskGraphBuilder":
+    def on_all_failed(self, task: Task) -> TaskGraphBuilder:
         """Register a graph-level fan-in error callback.
 
         The callback fires exactly once after the entire graph reaches terminal-failed

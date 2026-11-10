@@ -4,7 +4,7 @@
 
 Before installing Boilermaker, ensure you have:
 
-- **Python 3.11 or higher**
+- **Python 3.14 or higher**
 - **Azure subscription** with ServiceBus namespace
 - **pip** or **uv** package manager
 

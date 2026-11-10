@@ -4,7 +4,7 @@ _default:
     just --list
 
 # Install dependencies used by this project
-bootstrap default="3.12":
+bootstrap default="3.14":
     uv venv --python {{default}}
     just sync
 
