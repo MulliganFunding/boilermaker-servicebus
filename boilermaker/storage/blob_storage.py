@@ -14,7 +14,7 @@ from azure.core.exceptions import (
     ResourceNotFoundError,
 )
 from azure.identity.aio import DefaultAzureCredential
-from azure.storage.blob import BlobProperties
+from azure.storage.blob import FilteredBlob
 from azure.storage.blob.aio import BlobLeaseClient
 from opentelemetry import trace
 from pydantic import ValidationError
@@ -494,14 +494,14 @@ class BlobClientStorage(AzureBlobStorageClient, StorageInterface):
 
     async def find_blobs_by_tags(
         self, filter_expression: str
-    ) -> AsyncGenerator[BlobProperties, None]:
+    ) -> AsyncGenerator[FilteredBlob]:
         """Query blobs using Azure Blob Storage tag index.
 
         Args:
             filter_expression: OData-style filter string, e.g.
                 '"created_date" < '2026-04-13''
         Yields:
-            BlobProperties for each matching blob.
+            FilteredBlob for each matching blob.
         """
         async with self.get_blob_service_client() as blob_service_client:
             container_client = blob_service_client.get_container_client(

@@ -2,10 +2,10 @@
 
 import argparse
 import logging
+import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, UTC
 
-import uuid_utils
 from rich.console import Console
 
 from boilermaker.cli._globals import (
@@ -30,15 +30,15 @@ def _graph_created_at(graph_id: str) -> datetime | None:
 
     UUID7 values embed a millisecond Unix timestamp, so a graph's age can be
     derived from its id alone — no blob tags required. Returns None for anything
-    that is not a version-7 UUID (including v1/v6, whose ``.timestamp`` is a
+    that is not a version-7 UUID (including v1/v6, whose ``.time`` is a
     different epoch and must not be trusted here) or whose timestamp is out of
     range, so a single malformed id can never abort the whole purge.
     """
     try:
-        uuid_obj = uuid_utils.UUID(graph_id)
+        uuid_obj = uuid.UUID(graph_id)
         if uuid_obj.version != 7:
             return None
-        return datetime.fromtimestamp(uuid_obj.timestamp / 1000, tz=UTC)
+        return datetime.fromtimestamp(uuid_obj.time / 1000, tz=UTC)
     except (ValueError, AttributeError, OverflowError, OSError):
         return None
 
@@ -46,7 +46,7 @@ def _graph_created_at(graph_id: str) -> datetime | None:
 async def _stream_eligible_graphs(
     storage: BlobClientStorage,
     cutoff: datetime,
-) -> AsyncGenerator[tuple[str, list], None]:
+) -> AsyncGenerator[tuple[str, list]]:
     """Yield (graph_id, blobs) tuples for graphs eligible for purge.
 
     Discovers candidate graph_ids via the blob tag index
@@ -80,7 +80,7 @@ async def _stream_eligible_graphs(
 async def _stream_all_graphs(
     storage: BlobClientStorage,
     cutoff: datetime,
-) -> AsyncGenerator[tuple[str, list], None]:
+) -> AsyncGenerator[tuple[str, list]]:
     """Yield (graph_id, blobs) for all graphs created before *cutoff*.
 
     Discovers graphs by listing all blobs under the task-results/ prefix and

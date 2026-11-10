@@ -1,6 +1,6 @@
 import typing
+import uuid
 
-import uuid_utils as uuid
 from pydantic import Field
 
 TaskId = typing.NewType("TaskId", str)

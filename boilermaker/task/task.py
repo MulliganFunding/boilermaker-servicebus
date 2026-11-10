@@ -71,8 +71,8 @@ class Task(BaseModel):
     graph_id: GraphId | None = None
 
     # Callbacks for success and failure (used for chains)
-    on_success: typing.Optional["Task"] = None
-    on_failure: typing.Optional["Task"] = None
+    on_success: Task | None = None
+    on_failure: Task | None = None
 
     # Required for the uuid.UUID type annotation
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -220,7 +220,7 @@ class Task(BaseModel):
         """Hash based on unique task_id for use in sets and dicts."""
         return hash(self.task_id)
 
-    def __rshift__(self, other: "Task") -> "Task":
+    def __rshift__(self, other: Task) -> Task:
         """Set success callback using >> operator (right-shift chaining).
 
         Creates a success callback chain where the right-hand task
@@ -241,7 +241,7 @@ class Task(BaseModel):
         self.on_success = other
         return other
 
-    def __lshift__(self, other: "Task") -> "Task":
+    def __lshift__(self, other: Task) -> Task:
         """Set success callback using << operator (left-shift chaining).
 
         Creates a success callback chain where this task executes
@@ -284,7 +284,7 @@ class Task(BaseModel):
         acks_late: bool = True,
         policy: retries.RetryPolicy | None = None,
         **fn_kwargs,
-    ) -> "Task":
+    ) -> Task:
         """Create an immutable signature task from a function and arguments.
 
         Creates a task bound to specific function arguments, useful for

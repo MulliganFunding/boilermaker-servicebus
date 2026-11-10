@@ -4,7 +4,7 @@
 
 [![Tests](https://github.com/MulliganFunding/boilermaker-servicebus/workflows/Tests/badge.svg)](https://github.com/MulliganFunding/boilermaker-servicebus/actions)
 [![PyPI version](https://badge.fury.io/py/boilermaker-servicebus.svg)](https://badge.fury.io/py/boilermaker-servicebus)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14+-blue.svg)](https://www.python.org/downloads/)
 [![Documentation](https://img.shields.io/badge/docs-github--pages-blue)](https://mulliganfunding.github.io/boilermaker-servicebus/)
 
 Boilermaker is a lightweight task runner exclusively for **async Python** and Azure Service Bus Queues. If you need a fully-featured task runner with multiple backends, consider [Celery](https://github.com/celery/celery/tree/main) instead.
@@ -83,7 +83,7 @@ export SERVICE_BUS_QUEUE_NAME="your-queue-name"
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.14+
 - Azure ServiceBus namespace and queue
 - All task arguments must be JSON-serializable
 
